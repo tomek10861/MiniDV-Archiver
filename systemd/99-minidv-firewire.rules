@@ -1,0 +1,7 @@
+SUBSYSTEM=="firewire", ATTR{units}=="*0x00a02d:0x010001*", GROUP="video", MODE="0660"
+
+# Sony DCR-PC2E stability: keep the FireWire OHCI controller and its PCIe-to-PCI
+# bridge out of runtime D3. Autosuspend of either glitches the 1394 bus, and this
+# camera's ~25-year-old i.LINK PHY does not re-enumerate cleanly afterwards.
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1106", ATTR{device}=="0x3044", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1b21", ATTR{device}=="0x1080", ATTR{power/control}="on"

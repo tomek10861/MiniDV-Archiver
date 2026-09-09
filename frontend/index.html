@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MiniDV Archiver</title>
+  <link rel="stylesheet" href="/vendor/tailadmin.css">
+</head>
+<body
+  x-data="{ sidebarToggle: false, darkMode: JSON.parse(localStorage.getItem('darkMode') ?? 'true') }"
+  x-init="$watch('darkMode', v => localStorage.setItem('darkMode', JSON.stringify(v)))"
+  :class="{ 'dark bg-gray-900': darkMode }"
+  class="bg-gray-50 text-gray-800 dark:bg-gray-900 dark:text-gray-300">
+
+<div class="flex h-screen overflow-hidden">
+
+  <!-- ===== Sidebar ===== -->
+  <aside
+    :class="sidebarToggle ? 'translate-x-0' : '-translate-x-full'"
+    class="sidebar fixed left-0 top-0 z-9999 flex h-screen w-[290px] flex-col overflow-y-hidden border-r border-gray-200 bg-white px-5 dark:border-gray-800 dark:bg-black lg:static lg:translate-x-0">
+    <div class="flex items-center gap-2.5 py-6">
+      <span class="grid h-9 w-9 place-items-center rounded-lg bg-brand-500 font-black text-white">DV</span>
+      <span>
+        <span class="block font-bold leading-tight text-gray-800 dark:text-white/90">MiniDV Archiver</span>
+        <span class="block text-[11px] font-mono text-gray-400">IEEE 1394 · lossless</span>
+      </span>
+    </div>
+    <nav class="mt-2 flex flex-col overflow-y-auto no-scrollbar">
+      <h3 class="mb-3 text-xs font-medium uppercase leading-5 text-gray-400">Menu</h3>
+      <ul class="flex flex-col gap-1">
+        <li><a href="#pulpit" class="navlink menu-item group menu-item-inactive">
+          <svg class="menu-item-icon-inactive" width="24" height="24" viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M5.5 3.25C4.26 3.25 3.25 4.26 3.25 5.5V9C3.25 10.24 4.26 11.25 5.5 11.25H9C10.24 11.25 11.25 10.24 11.25 9V5.5C11.25 4.26 10.24 3.25 9 3.25H5.5ZM5.5 12.75C4.26 12.75 3.25 13.76 3.25 15V18.5C3.25 19.74 4.26 20.75 5.5 20.75H9C10.24 20.75 11.25 19.74 11.25 18.5V15C11.25 13.76 10.24 12.75 9 12.75H5.5ZM12.75 5.5C12.75 4.26 13.76 3.25 15 3.25H18.5C19.74 3.25 20.75 4.26 20.75 5.5V9C20.75 10.24 19.74 11.25 18.5 11.25H15C13.76 11.25 12.75 10.24 12.75 9V5.5ZM15 12.75C13.76 12.75 12.75 13.76 12.75 15V18.5C12.75 19.74 13.76 20.75 15 20.75H18.5C19.74 20.75 20.75 19.74 20.75 18.5V15C20.75 13.76 19.74 12.75 18.5 12.75H15Z"/></svg>
+          <span class="menu-item-text">Pulpit</span></a></li>
+        <li><a href="#zadania" class="navlink menu-item group menu-item-inactive">
+          <svg class="menu-item-icon-inactive" width="24" height="24" viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 8.25a3.75 3.75 0 100 7.5 3.75 3.75 0 000-7.5zM9.75 12a2.25 2.25 0 114.5 0 2.25 2.25 0 01-4.5 0z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M11.98 1.25c-.86 0-1.57 0-2.15.05-.6.05-1.13.15-1.62.42a3.75 3.75 0 00-1.44 1.44c-.24.42-.35.88-.4 1.4l-.02.16-.14.08-.14-.08a3.75 3.75 0 00-5.12 1.37c-.28.48-.38 1.02-.43 1.62-.05.58-.05 1.29-.05 2.15v.03c0 .86 0 1.57.05 2.15.05.6.15 1.14.43 1.62a3.75 3.75 0 001.37 1.37l.14.08.14.08.02.16c.05.52.16.98.4 1.4a3.75 3.75 0 001.44 1.44c.49.27 1.02.37 1.62.42.58.05 1.29.05 2.15.05h.04c.86 0 1.57 0 2.15-.05.6-.05 1.13-.15 1.62-.42a3.75 3.75 0 001.44-1.44c.24-.42.35-.88.4-1.4l.02-.16.14-.08.14.08a3.75 3.75 0 005.12-1.37c.28-.48.38-1.02.43-1.62.05-.58.05-1.29.05-2.15v-.04c0-.85 0-1.56-.05-2.14-.05-.6-.15-1.14-.43-1.62a3.75 3.75 0 00-1.37-1.37l-.14-.08-.14-.08-.02-.16a3.86 3.86 0 00-.4-1.4 3.75 3.75 0 00-1.44-1.44c-.49-.27-1.02-.37-1.62-.42-.58-.05-1.29-.05-2.15-.05h-.04z"/></svg>
+          <span class="menu-item-text">Zadania</span><span id="navJobs" class="menu-dropdown-badge menu-dropdown-badge-inactive ml-auto"></span></a></li>
+        <li><a href="#kasety" class="navlink menu-item group menu-item-inactive">
+          <svg class="menu-item-icon-inactive" width="24" height="24" viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M3.25 7A3.75 3.75 0 017 3.25h10A3.75 3.75 0 0120.75 7v10A3.75 3.75 0 0117 20.75H7A3.75 3.75 0 013.25 17V7zM7 4.75A2.25 2.25 0 004.75 7v10A2.25 2.25 0 007 19.25h10A2.25 2.25 0 0019.25 17V7A2.25 2.25 0 0017 4.75H7z"/><path d="M8 8.75a.75.75 0 100 1.5.75.75 0 000-1.5zM8 13.75a.75.75 0 100 1.5.75.75 0 000-1.5zM15.25 9.5a.75.75 0 011.5 0 .75.75 0 01-1.5 0zM16 13.75a.75.75 0 100 1.5.75.75 0 000-1.5zM10 12a2 2 0 114 0 2 2 0 01-4 0z"/></svg>
+          <span class="menu-item-text">Kasety</span><span id="navTapes" class="menu-dropdown-badge menu-dropdown-badge-inactive ml-auto"></span></a></li>
+        <li><a href="#logi" class="navlink menu-item group menu-item-inactive">
+          <svg class="menu-item-icon-inactive" width="24" height="24" viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M6 2.25A2.75 2.75 0 003.25 5v14A2.75 2.75 0 006 21.75h12A2.75 2.75 0 0020.75 19V8.31c0-.6-.24-1.17-.66-1.6l-4.05-4.05a2.25 2.25 0 00-1.6-.66H6zM4.75 5c0-.69.56-1.25 1.25-1.25h7.25V7A2.25 2.25 0 0015.5 9.25h3.75V19c0 .69-.56 1.25-1.25 1.25H6c-.69 0-1.25-.56-1.25-1.25V5z"/><path d="M7.5 12.25a.75.75 0 000 1.5h9a.75.75 0 000-1.5h-9zM7.5 15.75a.75.75 0 000 1.5h9a.75.75 0 000-1.5h-9zM6.75 9.5a.75.75 0 01.75-.75h3a.75.75 0 010 1.5h-3a.75.75 0 01-.75-.75z"/></svg>
+          <span class="menu-item-text">Logi</span></a></li>
+        <li><a href="#info" class="navlink menu-item group menu-item-inactive">
+          <svg class="menu-item-icon-inactive" width="24" height="24" viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 3.25a8.75 8.75 0 100 17.5 8.75 8.75 0 000-17.5zM4.75 12a7.25 7.25 0 1114.5 0 7.25 7.25 0 01-14.5 0z"/><path d="M12 10.75a.75.75 0 01.75.75v5a.75.75 0 01-1.5 0v-5a.75.75 0 01.75-.75zM12 7a1 1 0 100 2 1 1 0 000-2z"/></svg>
+          <span class="menu-item-text">Informacje</span></a></li>
+      </ul>
+    </nav>
+    <div id="sideCam" class="mt-auto py-4 text-[11px] font-mono text-gray-400 whitespace-pre-line">—</div>
+  </aside>
+  <div class="fixed inset-0 z-999 bg-gray-900/50 lg:hidden" x-show="sidebarToggle" @click="sidebarToggle=false" x-cloak></div>
+
+  <!-- ===== Content ===== -->
+  <div class="relative flex flex-1 flex-col overflow-x-hidden overflow-y-auto">
+
+    <header class="sticky top-0 z-999 flex w-full items-center gap-4 border-b border-gray-200 bg-white px-4 py-3 dark:border-gray-800 dark:bg-black md:px-6">
+      <button @click.prevent="sidebarToggle=!sidebarToggle" class="rounded-lg border border-gray-200 p-2 dark:border-gray-800 lg:hidden">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" class="fill-current"><path d="M3 6.75A.75.75 0 013.75 6h16.5a.75.75 0 010 1.5H3.75A.75.75 0 013 6.75zM3 12a.75.75 0 01.75-.75h16.5a.75.75 0 010 1.5H3.75A.75.75 0 013 12zm0 5.25a.75.75 0 01.75-.75h16.5a.75.75 0 010 1.5H3.75a.75.75 0 01-.75-.75z"/></svg>
+      </button>
+      <h1 class="font-semibold text-gray-800 dark:text-white/90 lg:hidden">MiniDV Archiver</h1>
+      <div class="ml-auto flex items-center gap-2.5">
+        <span id="camPill" class="inline-flex items-center rounded-full border border-gray-200 px-3 py-1.5 text-theme-xs font-medium text-gray-500 dark:border-gray-800 dark:text-gray-400">ŁĄCZENIE…</span>
+        <span id="diskPill" class="hidden sm:inline-flex items-center rounded-full border border-gray-200 px-3 py-1.5 text-theme-xs font-mono text-gray-500 dark:border-gray-800 dark:text-gray-400">—</span>
+        <button @click="darkMode=!darkMode" class="rounded-full border border-gray-200 p-2 text-gray-500 hover:text-brand-500 dark:border-gray-800 dark:text-gray-400" title="Motyw">
+          <svg x-show="!darkMode" width="18" height="18" viewBox="0 0 24 24" class="fill-current"><path d="M12 3a1 1 0 011 1v1a1 1 0 11-2 0V4a1 1 0 011-1zm0 14a5 5 0 100-10 5 5 0 000 10zm8-5a1 1 0 01-1 1h-1a1 1 0 110-2h1a1 1 0 011 1zM6 12a1 1 0 01-1 1H4a1 1 0 110-2h1a1 1 0 011 1zm12.36 6.36a1 1 0 01-1.41 0l-.71-.71a1 1 0 011.41-1.41l.71.7a1 1 0 010 1.42zM7.76 7.76a1 1 0 01-1.41 0l-.71-.71A1 1 0 017.05 5.6l.71.71a1 1 0 010 1.41zm10.6-2.12a1 1 0 010 1.41l-.71.71a1 1 0 11-1.41-1.41l.7-.71a1 1 0 011.42 0zM7.76 16.24a1 1 0 010 1.41l-.71.71a1 1 0 01-1.41-1.41l.71-.71a1 1 0 011.41 0zM12 19a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1z"/></svg>
+          <svg x-show="darkMode" x-cloak width="18" height="18" viewBox="0 0 24 24" class="fill-current"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main>
+      <div class="mx-auto max-w-(--breakpoint-2xl) space-y-6 p-4 md:p-6">
+
+        <!-- Pulpit -->
+        <section id="pulpit" class="scroll-mt-24 space-y-6">
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4 md:gap-6">
+            <div class="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-white/[0.03] md:p-6">
+              <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-gray-100 text-brand-500 dark:bg-gray-800">
+                <svg width="22" height="22" viewBox="0 0 24 24" class="fill-current"><path d="M4 6.5A2.5 2.5 0 016.5 4h9A2.5 2.5 0 0118 6.5v11A2.5 2.5 0 0115.5 20h-9A2.5 2.5 0 014 17.5v-11zM20 8l2.5-1.5v11L20 16V8z"/></svg>
+              </div>
+              <span class="mt-4 block text-theme-sm text-gray-500 dark:text-gray-400">Kamera</span>
+              <h4 id="stCam" class="mt-1 text-title-sm font-bold text-gray-800 dark:text-white/90">—</h4>
+              <span id="stCamSub" class="mt-1 block text-theme-xs font-mono text-gray-400">—</span>
+            </div>
+            <div class="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-white/[0.03] md:p-6">
+              <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-gray-100 text-brand-500 dark:bg-gray-800">
+                <svg width="22" height="22" viewBox="0 0 24 24" class="fill-current"><path d="M4 7a8 3 0 0116 0v10a8 3 0 01-16 0V7zm8 1c3.9 0 6-1 6-1s-2.1 1-6 1-6-1-6-1 2.1 1 6 1z"/></svg>
+              </div>
+              <span class="mt-4 block text-theme-sm text-gray-500 dark:text-gray-400">Wolne miejsce</span>
+              <h4 id="stFree" class="mt-1 text-title-sm font-bold text-gray-800 dark:text-white/90">—</h4>
+              <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800"><div id="stBar" class="h-full rounded-full bg-brand-500" style="width:0"></div></div>
+              <span id="stHours" class="mt-1 block text-theme-xs text-gray-400">—</span>
+            </div>
+            <div class="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-white/[0.03] md:p-6">
+              <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-gray-100 text-brand-500 dark:bg-gray-800">
+                <svg width="22" height="22" viewBox="0 0 24 24" class="fill-current"><path d="M13 3v6h6l-8 12v-6H5l8-12z"/></svg>
+              </div>
+              <span class="mt-4 block text-theme-sm text-gray-500 dark:text-gray-400">Zadania w toku</span>
+              <h4 id="stJobs" class="mt-1 text-title-sm font-bold text-gray-800 dark:text-white/90">0</h4>
+              <span id="stJobsSub" class="mt-1 block text-theme-xs text-gray-400">—</span>
+            </div>
+            <div class="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-white/[0.03] md:p-6">
+              <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-gray-100 text-brand-500 dark:bg-gray-800">
+                <svg width="22" height="22" viewBox="0 0 24 24" class="fill-current"><path d="M4 5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 2v2h2V7H7zm0 4v2h2v-2H7zm0 4v2h2v-2H7zm8-8v2h2V7h-2zm0 4v2h2v-2h-2zm0 4v2h2v-2h-2z"/></svg>
+              </div>
+              <span class="mt-4 block text-theme-sm text-gray-500 dark:text-gray-400">Kasety</span>
+              <h4 id="stTapes" class="mt-1 text-title-sm font-bold text-gray-800 dark:text-white/90">0</h4>
+              <span id="stTapesSub" class="mt-1 block text-theme-xs text-gray-400">zarchiwizowane</span>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-white/[0.03]">
+            <div class="flex items-center justify-between border-b border-gray-200 px-5 py-4 dark:border-gray-800">
+              <h2 class="text-base font-semibold text-gray-800 dark:text-white/90">Nowe zgrywanie</h2>
+              <span id="capState" class="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-1 text-theme-xs font-medium text-gray-600 dark:bg-gray-800 dark:text-gray-300">BEZCZYNNY</span>
+            </div>
+            <div class="p-5">
+              <div class="flex flex-wrap gap-2.5">
+                <input id="tape" placeholder="auto: TAPE-0001"
+                  class="h-11 flex-1 min-w-[13rem] rounded-lg border border-gray-200 bg-transparent px-4 text-sm text-gray-800 outline-none focus:border-brand-500 dark:border-gray-800 dark:text-white/90">
+                <button id="start" class="h-11 rounded-lg bg-brand-500 px-5 text-sm font-medium text-white hover:bg-brand-600 disabled:opacity-50">Rozpocznij</button>
+                <button id="cancel" class="h-11 rounded-lg border border-gray-200 px-5 text-sm font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-300 dark:hover:bg-white/5">Przerwij</button>
+              </div>
+              <label class="mt-3 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+                <input id="manual" type="checkbox" class="h-4 w-4 accent-brand-500"> Tryb ręczny — po starcie naciśnij PLAY na kamerze
+              </label>
+              <p id="manualHint" class="mt-2 text-theme-xs text-gray-400" hidden>Sterowanie AV/C wyłączone — transport obsługujesz przyciskami na kamerze.</p>
+              <div id="avc" class="mt-3 flex gap-2" hidden>
+                <button data-action="rewind" class="rounded-lg border border-gray-200 px-3 py-1.5 text-theme-xs text-gray-600 hover:border-brand-500 dark:border-gray-800 dark:text-gray-300">⏮ Przewiń</button>
+                <button data-action="play"   class="rounded-lg border border-gray-200 px-3 py-1.5 text-theme-xs text-gray-600 hover:border-brand-500 dark:border-gray-800 dark:text-gray-300">▶ Odtwórz</button>
+                <button data-action="stop"   class="rounded-lg border border-gray-200 px-3 py-1.5 text-theme-xs text-gray-600 hover:border-brand-500 dark:border-gray-800 dark:text-gray-300">■ Stop</button>
+              </div>
+              <ol id="manualSteps" class="mt-3 list-decimal space-y-1 pl-5 text-theme-xs text-gray-400" hidden>
+                <li>Kliknij „Rozpocznij”.</li>
+                <li>Gdy status pokaże <b class="text-gray-700 dark:text-gray-200">CZEKAM NA PLAY</b>, naciśnij <b class="text-gray-700 dark:text-gray-200">PLAY</b> na kamerze.</li>
+                <li>Po materiale naciśnij <b class="text-gray-700 dark:text-gray-200">STOP</b> na kamerze — zapis zamknie się sam.</li>
+              </ol>
+              <pre id="capLog" class="mt-3 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg bg-gray-50 p-3 text-[11px] text-gray-500 dark:bg-black/40 dark:text-gray-400">Brak aktywnego zgrywania.</pre>
+            </div>
+          </div>
+        </section>
+
+        <!-- Zadania -->
+        <section id="zadania" class="scroll-mt-24 rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-white/[0.03]">
+          <div class="border-b border-gray-200 px-5 py-4 dark:border-gray-800">
+            <h2 class="text-base font-semibold text-gray-800 dark:text-white/90">Zadania w tle</h2>
+          </div>
+          <div id="jobs" class="space-y-3 p-5"></div>
+        </section>
+
+        <!-- Kasety -->
+        <section id="kasety" class="scroll-mt-24 rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-white/[0.03]">
+          <div class="flex items-center gap-3 border-b border-gray-200 px-5 py-4 dark:border-gray-800">
+            <h2 class="text-base font-semibold text-gray-800 dark:text-white/90">Kasety</h2>
+            <button id="tapeBack" class="hidden text-sm text-gray-600 hover:text-brand-500 dark:text-gray-300">← wszystkie kasety</button>
+          </div>
+          <div id="tapeGrid" class="grid grid-cols-2 gap-4 p-5 sm:grid-cols-3 lg:grid-cols-4"></div>
+          <div id="tapeDetail" class="hidden p-5"></div>
+        </section>
+
+        <!-- Logi -->
+        <section id="logi" class="scroll-mt-24 rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-white/[0.03]">
+          <div class="flex flex-wrap items-center gap-3 border-b border-gray-200 px-5 py-4 dark:border-gray-800">
+            <h2 class="text-base font-semibold text-gray-800 dark:text-white/90">Logi</h2>
+            <select id="logPick" class="h-9 rounded-lg border border-gray-300 bg-white px-3 text-sm text-gray-700 dark:border-gray-700 dark:bg-white/[0.06] dark:text-gray-200"></select>
+            <label class="flex items-center gap-1.5 text-theme-xs text-gray-400"><input id="logFollow" type="checkbox" class="h-3.5 w-3.5 accent-brand-500" checked> auto-scroll</label>
+          </div>
+          <pre id="logView" class="m-5 h-[60vh] overflow-auto whitespace-pre-wrap rounded-xl bg-gray-50 p-4 text-[11px] leading-relaxed text-gray-600 dark:bg-black/40 dark:text-gray-300">—</pre>
+        </section>
+
+        <!-- Informacje -->
+        <section id="info" class="scroll-mt-24 rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-white/[0.03]">
+          <div class="border-b border-gray-200 px-5 py-4 dark:border-gray-800">
+            <h2 class="text-base font-semibold text-gray-800 dark:text-white/90">Informacje</h2>
+          </div>
+          <div class="space-y-5 p-5 text-sm leading-relaxed text-gray-600 dark:text-gray-300">
+            <p><b class="text-gray-800 dark:text-white/90">MiniDV Archiver</b> — bezstratne zgrywanie i archiwizacja kaset MiniDV / DV przez FireWire (IEEE&nbsp;1394), z panelem do przeglądania nagrań. Masterem jest zawsze surowy strumień DV skompresowany <span class="font-mono">zstd</span> i zweryfikowany bajt‑po‑bajcie.</p>
+            <div>
+              <div class="mb-2 text-theme-xs font-medium uppercase tracking-wide text-gray-400">Autor · kontakt</div>
+              <div class="flex flex-wrap gap-x-5 gap-y-2">
+                <a class="inline-flex items-center gap-2 text-brand-500 hover:underline" href="https://github.com/tomek10861" target="_blank" rel="noopener">
+                  <svg width="18" height="18" viewBox="0 0 24 24" class="fill-current"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.09.68-.22.68-.49l-.01-1.73c-2.78.62-3.37-1.36-3.37-1.36-.45-1.18-1.11-1.5-1.11-1.5-.91-.63.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.55-1.14-4.55-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05a9.3 9.3 0 015 0c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.79-4.57 5.05.36.32.68.94.68 1.9l-.01 2.82c0 .27.18.59.69.49A10.02 10.02 0 0022 12.25C22 6.58 17.52 2 12 2z"/></svg>
+                  github.com/tomek10861
+                </a>
+                <a class="inline-flex items-center gap-2 text-brand-500 hover:underline" href="https://www.linkedin.com/in/tomasz-siro%C5%84/" target="_blank" rel="noopener">
+                  <svg width="18" height="18" viewBox="0 0 24 24" class="fill-current"><path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.86 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.42v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.07 2.07 0 110-4.13 2.07 2.07 0 010 4.13zM7.12 20.45H3.55V9h3.57v11.45zM22.22 0H1.77C.8 0 0 .78 0 1.75v20.5C0 23.22.8 24 1.77 24h20.45c.98 0 1.78-.78 1.78-1.75V1.75C24 .78 23.2 0 22.22 0z"/></svg>
+                  Tomasz Siroń
+                </a>
+              </div>
+            </div>
+            <div>
+              <div class="mb-2 text-theme-xs font-medium uppercase tracking-wide text-gray-400">Licencja</div>
+              <p><b class="text-gray-800 dark:text-white/90">MIT</b> — kod jest wolny: można go używać, modyfikować i rozpowszechniać, także komercyjnie, zachowując notę o prawach autorskich. Pełny tekst w pliku <span class="font-mono">LICENSE</span> repozytorium.</p>
+              <p class="mt-1.5">Dashboard oparty na <a class="text-brand-500 hover:underline" href="https://github.com/TailAdmin/tailadmin-free-tailwind-dashboard-template" target="_blank" rel="noopener">TailAdmin</a> (MIT), Alpine.js (MIT), Tailwind CSS (MIT).</p>
+            </div>
+            <p class="text-theme-xs text-gray-400">Narzędzia zewnętrzne w runtime: dvgrab, ffmpeg, zstd, linux‑firewire‑utils.</p>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<script defer src="/vendor/alpine.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

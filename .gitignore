@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+venv/
+
+# Environment / local config (never commit secrets)
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Runtime data (created under MINIDV_STORAGE, keep out of the repo)
+/srv/
+/state/
+/working/
+/failed/
+/logs/
+/tapes/
+/tmp/
+*.dv
+*.dv.zst
+
+# ...but DO track the committed sample archive under examples/
+!examples/
+!examples/**
+
+# Local operator notes with host details — not for the public repo
+CLAUDE_FIREWIRE_HANDOFF.md

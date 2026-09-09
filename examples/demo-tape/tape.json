@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "tape_id": "DEMO-MINIDV",
+  "scene_count": 1,
+  "scenes": [
+    {
+      "scene_index": 1,
+      "scene_id": "0001_2067-02-15_22-26-25",
+      "frame_count": 149
+    }
+  ],
+  "source_discontinuities": [
+    "\"/srv/minidv/working/TAPE-0001/split/scene019.dv\": frame dropped: timecode 00:05:37.15 date 2067.02.15 22:26:25"
+  ],
+  "label": "Przykładowa taśma (demo)",
+  "recording_date": "2026-09-09",
+  "proxy_full": {
+    "filename": "tape.mp4",
+    "size": 726611
+  },
+  "note": "Sample archive committed to the repo — one real scene (TAPE-0001 / 14)."
+}

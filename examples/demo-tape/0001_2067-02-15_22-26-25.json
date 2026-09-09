@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "scene_index": 1,
+  "scene_id": "0001_2067-02-15_22-26-25",
+  "tape_id": "DEMO-MINIDV",
+  "recording": {
+    "datetime": "2067-02-15T22:26:25",
+    "datetime_source": "DV_VAUX",
+    "datetime_valid": true
+  },
+  "timecode": {
+    "start": "00:04:02:09",
+    "end": "00:04:08:07"
+  },
+  "video": {
+    "format": "DV",
+    "standard": "PAL",
+    "resolution": "720x576",
+    "frame_rate": "25/1",
+    "sample_aspect_ratio": "16:15",
+    "display_aspect_ratio": "4:3",
+    "pixel_format": "yuv420p",
+    "interlaced": true,
+    "top_field_first": false
+  },
+  "audio": [
+    {
+      "codec": "pcm_s16le",
+      "sample_rate": "32000",
+      "channels": 2
+    },
+    {
+      "codec": "pcm_s16le",
+      "sample_rate": "32000",
+      "channels": 2
+    }
+  ],
+  "capture": {
+    "dropped_frames": 0,
+    "errors": [],
+    "source_discontinuities": [
+      "\"/srv/minidv/working/TAPE-0001/split/scene019.dv\": frame dropped: timecode 00:05:37.15 date 2067.02.15 22:26:25"
+    ]
+  },
+  "source": {
+    "start_frame": 0,
+    "end_frame": 148
+  },
+  "files": {
+    "archive": {
+      "filename": "0001_2067-02-15_22-26-25.dv.zst",
+      "sha256_uncompressed": "70eb99f310c305e014d510c2358c861110ac43a366251055eeec73da4ae74890",
+      "sha256_compressed": "49fa5e7a4ab0b27f5d371600632d6f559f98089372a012f5525019518ccec012",
+      "size_uncompressed": 21456000,
+      "size_compressed": 19087022,
+      "zstd_level": 6,
+      "verified_byte_for_byte": true
+    },
+    "proxy": {
+      "filename": "0001_2067-02-15_22-26-25.mp4",
+      "sha256": "ba72fc085657e6f9c97decbde84552fe2375b3fbe285e17b75ebdcfddefb05d3",
+      "deinterlace": "bwdif send_field",
+      "size": 726611
+    }
+  },
+  "frame_count": 149
+}
