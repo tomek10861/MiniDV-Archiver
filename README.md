@@ -61,8 +61,8 @@ sudo apt install dvgrab ffmpeg zstd linux-firewire-utils util-linux python3
 ## Quick start
 
 ```bash
-git clone https://github.com/tomek10861/minidv-archiver
-cd minidv-archiver
+git clone https://github.com/tomek10861/MiniDV-Archiver
+cd MiniDV-Archiver
 cp .env.example .env          # edit if you want; all values have defaults
 sudo mkdir -p /srv/minidv && sudo chown "$USER" /srv/minidv
 

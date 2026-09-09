@@ -20,7 +20,7 @@ dependencies = []   # stdlib only; needs the external tools listed in the README
 dev = ["pytest>=7"]
 
 [project.urls]
-Repository = "https://github.com/tomek10861/minidv-archiver"
+Repository = "https://github.com/tomek10861/MiniDV-Archiver"
 
 [project.scripts]
 minidv-archive = "minidv_archiver.cli:main"
