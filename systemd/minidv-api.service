@@ -9,6 +9,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/minidv-archive
 EnvironmentFile=-/etc/minidv-archive.env
+Environment=PYTHONUNBUFFERED=1
 # only nginx should reach the api directly
 Environment=MINIDV_BIND=127.0.0.1
 ExecStart=/usr/bin/python3 -m minidv_archiver.api

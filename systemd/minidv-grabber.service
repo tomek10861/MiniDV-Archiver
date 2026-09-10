@@ -10,6 +10,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/minidv-archive
 EnvironmentFile=-/etc/minidv-archive.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 -m minidv_archiver.grabber
 Restart=on-failure
 RestartSec=3
