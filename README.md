@@ -36,6 +36,11 @@ whole-tape review file, thumbnails, JSON metadata) is a derivative you can regen
 - **Concurrent pipeline**: capture holds the FireWire slot exclusively; splitting +
   compression + encoding run in a background queue, so you can start the next tape
   while the previous one is still processing.
+- **Runs as one process or four**: `grabber` (FireWire), `converter` (background
+  processing / re-encodes), `api` (HTTP/JSON) and a static `ui` coordinate through a
+  small SQLite job store (`state/jobs.db`), so you can restart the api or move the
+  converter to another box without interrupting a capture. See
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 - **Dashboard**: live capture status, background job list with logs, a tape browser
   with per-scene thumbnails, in-page video preview, whole-tape playback with
   click-to-seek chapters, and downloads (master `.dv.zst`, proxy, JSON).
@@ -77,12 +82,18 @@ unit and a udev rule (gives the camera's device node group `video`, mode `0660`)
 and starts it. Edit `/etc/minidv-archive.env` for configuration.
 
 ```bash
-sudo ./scripts/install.sh
+sudo ./scripts/install.sh            # single process on :8080
+sudo ./scripts/install.sh --split    # grabber + converter + api (127.0.0.1:8080) + nginx UI
 ```
 
-An optional nginx reverse proxy is provided (`docker compose up -d`, port 8088);
-capture always stays on the host — passing a FireWire device into a container is
-less reliable than talking to `/dev/fw*` directly.
+Both layouts share the same storage and `state/jobs.db`; `--split` just runs the
+loops as separate units (`minidv-grabber`, `minidv-converter`, `minidv-api`) with
+nginx serving `frontend/` and proxying `/api`. Switch back and forth freely — the
+units `Conflicts=` each other.
+
+A container UI proxy is also provided (`docker compose up -d`, port 8088); capture
+always stays on the host — passing a FireWire device into a container is less
+reliable than talking to `/dev/fw*` directly.
 
 > There is no authentication. Expose it only on a trusted LAN.
 
@@ -117,7 +128,10 @@ with defaults. The ones you are most likely to touch:
 python3 -m minidv_archiver.cli camera status        # AV/C transport + timecode
 python3 -m minidv_archiver.cli camera play|stop     # only if MINIDV_ALLOW_FCP=1
 python3 -m minidv_archiver.cli process take.dv --tape-id TAPE-0007   # ingest an existing .dv
-python3 -m minidv_archiver.cli serve
+python3 -m minidv_archiver.cli serve                # single process (capture + converter + api)
+python3 -m minidv_archiver.cli grabber              # split: FireWire capture only
+python3 -m minidv_archiver.cli converter            # split: background processing / re-encodes
+python3 -m minidv_archiver.cli api                  # split: HTTP/JSON only
 ```
 
 ### Verifying / restoring a master
@@ -160,7 +174,7 @@ marginal and drop off the bus, or reset it on FCP transactions. If you hit that:
 The **Sony DCR-PC2E** is a worked example of all of the above; see
 [`docs/FIREWIRE.md`](docs/FIREWIRE.md).
 
-More docs: [archive format](docs/ARCHIVE_FORMAT.md) ·
+More docs: [architecture](docs/ARCHITECTURE.md) · [archive format](docs/ARCHIVE_FORMAT.md) ·
 [DV metadata](docs/DV_METADATA.md) · [storage](docs/STORAGE.md).
 
 ## Development

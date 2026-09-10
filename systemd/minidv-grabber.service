@@ -1,0 +1,23 @@
+[Unit]
+Description=MiniDV grabber (FireWire capture only)
+After=network-online.target srv-minidv.mount
+RequiresMountsFor=/srv/minidv
+# Split deployment: run grabber + converter + api together instead of minidv-archive.service
+Conflicts=minidv-archive.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/minidv-archive
+EnvironmentFile=-/etc/minidv-archive.env
+ExecStart=/usr/bin/python3 -m minidv_archiver.grabber
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/minidv
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -11,8 +11,17 @@ from .config import Config
 from .engine import Engine
 
 CONFIG = Config()
-ENGINE = Engine(CONFIG)
+ENGINE: Engine | None = None            # built lazily by build_engine() — importing this module has no side effects
 STATIC = Path(__file__).resolve().parent.parent / "frontend"
+
+
+def build_engine(role: str = "all") -> Engine:
+    """Construct the process-wide Engine in the given role (idempotent)."""
+    global ENGINE
+    if ENGINE is None:
+        ENGINE = Engine(CONFIG, role=role)
+    return ENGINE
+
 
 EXTRA_TYPES = {".dv": "video/x-dv", ".zst": "application/zstd", ".sha256": "text/plain",
                ".log": "text/plain; charset=utf-8", ".srt": "text/plain; charset=utf-8"}
@@ -140,7 +149,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not CONFIG.allow_fcp:
                     return self.json({"error": "Sterowanie AV/C wyłączone w trybie zgodności DCR-PC2E "
                                      "(ustaw MINIDV_ALLOW_FCP=1, aby włączyć)"}, 409)
-                return self.json(ENGINE.camera.command(path.rsplit("/", 1)[-1]))
+                name = path.rsplit("/", 1)[-1]
+                if ENGINE.role == "all":                       # camera lives in this process
+                    return self.json(ENGINE.camera.command(name))
+                cid = ENGINE.store.enqueue_cam_command(name)   # split mode: only the grabber touches the bus
+                res = ENGINE.store.wait_cam_command(cid, timeout=6)
+                if res["status"] == "DONE":
+                    return self.json(res["result"])
+                return self.json({"error": f"kamera nie odpowiedziała ({res['status'].lower()})"}, 409)
             if path == "/api/capture/start":
                 data = self.body()
                 return self.json(ENGINE.start(data.get("tape_id"), data.get("rewind", True), data.get("duration"),
@@ -241,9 +257,15 @@ class Handler(BaseHTTPRequestHandler):
         print(f"{self.address_string()} {fmt % args}")
 
 
-def main():
-    print(f"MiniDV Archive listening on http://{CONFIG.bind}:{CONFIG.port}")
+def run(role: str = "all"):
+    build_engine(role)
+    label = "api" if role == "api" else f"{role} + api"
+    print(f"MiniDV {label} listening on http://{CONFIG.bind}:{CONFIG.port}")
     ThreadingHTTPServer((CONFIG.bind, CONFIG.port), Handler).serve_forever()
+
+
+def main():
+    run("all")
 
 
 if __name__ == "__main__":

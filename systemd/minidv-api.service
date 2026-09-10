@@ -1,0 +1,24 @@
+[Unit]
+Description=MiniDV api (HTTP/JSON; nginx serves the UI in front)
+After=network-online.target srv-minidv.mount
+RequiresMountsFor=/srv/minidv
+Conflicts=minidv-archive.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/minidv-archive
+EnvironmentFile=-/etc/minidv-archive.env
+# only nginx should reach the api directly
+Environment=MINIDV_BIND=127.0.0.1
+ExecStart=/usr/bin/python3 -m minidv_archiver.api
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/minidv
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

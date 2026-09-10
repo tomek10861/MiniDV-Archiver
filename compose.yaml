@@ -8,4 +8,4 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-
+      - ./frontend:/usr/share/nginx/html:ro

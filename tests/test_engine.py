@@ -53,6 +53,7 @@ def test_second_capture_blocked_only_while_a_capture_holds_the_slot(tmp_path, mo
         assert "capture is already in progress" in str(exc)
     # processing does NOT block a new capture
     eng.capture_tape = None
+    eng.store.put_job({**eng.store.get_job("TAPE-9001"), "stage": "process", "status": "ANALYZING_DV"})
     eng.processing_tape = "TAPE-9001"
     assert eng.start(tape_id="TAPE-9002")["stage"] == "capture"
 

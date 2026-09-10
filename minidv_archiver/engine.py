@@ -9,42 +9,78 @@ import subprocess
 import threading
 import time
 import uuid
+from collections.abc import MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .camera import Camera, CameraError
 from .config import Config
 from .media import process_capture, sha256
+from .store import TERMINAL, JobStore, now
 
-TERMINAL = {"COMPLETED", "ERROR", "CANCELLED"}
 MAX_JOBS = 30
 
+__all__ = ["Engine", "now", "TERMINAL", "MAX_JOBS"]
 
-def now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+
+class _JobsView(MutableMapping):
+    """dict-like facade over the job store, so callers (and tests) keep using
+    ``engine.jobs[...]`` while the rows actually live in SQLite."""
+
+    def __init__(self, store: JobStore):
+        self._store = store
+
+    def __getitem__(self, key):
+        job = self._store.get_job(key)
+        if job is None:
+            raise KeyError(key)
+        return job
+
+    def __setitem__(self, key, value):
+        self._store.put_job({**value, "tape_id": key})
+
+    def __delitem__(self, key):
+        self._store.delete_job(key)
+
+    def __contains__(self, key):
+        return self._store.get_job(key) is not None
+
+    def __iter__(self):
+        return iter(self._store.all_job_ids())
+
+    def __len__(self):
+        return len(self._store.all_job_ids())
 
 
 class Engine:
     """Capture is an exclusive FireWire slot; processing runs in a background queue,
-    so a new tape can be captured while the previous one is still being archived."""
+    so a new tape can be captured while the previous one is still being archived.
 
-    def __init__(self, config: Config):
+    ``role`` selects which loops run in this process:
+      * ``all``       — single-process mode (default): capture, converter and api together.
+      * ``grabber``   — owns FireWire; drives captures only.
+      * ``converter`` — no hardware; drains the processing / share-encode queues.
+      * ``api``       — no loops; just reads the store and the filesystem.
+    All roles share ``state/jobs.db``.
+    """
+
+    def __init__(self, config: Config, role: str = "all"):
         self.config = config
+        self.role = role
         config.ensure_dirs()
         self.camera = Camera(config.camera_guid)
         self.lock = threading.RLock()
         self.proc_cv = threading.Condition(self.lock)
-        self.jobs: dict[str, dict] = {}
-        self.pending: list[str] = []          # tape_ids waiting for the processing worker
-        self.capture_tape: str | None = None  # tape_id holding the FireWire slot
+        self.store = JobStore(config.state / "jobs.db")
+        self.capture_tape: str | None = None   # this process's live capture (grabber/all)
         self.capture_proc: subprocess.Popen | None = None
         self.capture_cancel = threading.Event()
-        self.processing_tape: str | None = None
-        self.compress: dict[str, dict] = {}   # on-demand "share to FB" re-encodes, key "<tape>/<scene|TAPE>"
-        self.compress_pending: list[str] = []
-        self._load_jobs()
-        threading.Thread(target=self._process_worker, daemon=True).start()
-        threading.Thread(target=self._compress_worker, daemon=True).start()
+        self.processing_tape: str | None = None  # this process's live conversion (converter/all)
+        self.store.import_legacy(config.state / "jobs.json")
+        self.store.reconcile(config)
+        if role in ("all", "converter"):
+            threading.Thread(target=self._process_worker, daemon=True).start()
+            threading.Thread(target=self._compress_worker, daemon=True).start()
 
     # ---- storage -----------------------------------------------------------
     def storage(self) -> dict:
@@ -55,47 +91,41 @@ class Engine:
                 "min_free": safe, "ready": usage.free >= safe, "estimated_dv_hours": round(usable / 12.96e9, 1)}
 
     # ---- job registry ----------------------------------------------------
-    def _load_jobs(self) -> None:
-        path = self.config.state / "jobs.json"
-        try:
-            self.jobs = json.loads(path.read_text())
-        except (OSError, ValueError):
-            self.jobs = {}
-        # No capture survives a restart; resume processing where the raw DV is still on disk.
-        for tape_id, job in list(self.jobs.items()):
-            if job.get("status") in TERMINAL:
-                continue
-            tape_dir = self.config.tapes / tape_id
-            dv = self.config.working / tape_id / "capture001.dv"
-            if (tape_dir / "tape.json").exists():
-                job["stage"], job["status"] = "process", "COMPLETED"  # finished right before the restart
-                shutil.rmtree(self.config.working / tape_id, ignore_errors=True)
-            elif dv.exists() and dv.stat().st_size > 0:
-                job["stage"], job["status"] = "process", "QUEUED"
-                shutil.rmtree(tape_dir, ignore_errors=True)  # drop the half-written archive; redo from raw DV
-                self.pending.append(tape_id)
-            else:
-                job["status"] = "ERROR"
-                job["error"] = "interrupted by a restart"
-                shutil.rmtree(self.config.working / tape_id, ignore_errors=True)
-        self._persist()
+    @property
+    def jobs(self) -> _JobsView:
+        return _JobsView(self.store)
+
+    @jobs.setter
+    def jobs(self, mapping: dict) -> None:
+        self.store.replace_all_jobs(dict(mapping))
+
+    @property
+    def pending(self) -> list[str]:
+        return self.store.pending()
 
     def _persist(self) -> None:
-        keep = sorted(self.jobs.values(), key=lambda j: j.get("updated_at", ""), reverse=True)
-        drop = [j["tape_id"] for j in keep[MAX_JOBS:] if j.get("status") in TERMINAL]
-        for tid in drop:
-            self.jobs.pop(tid, None)
-        (self.config.state / "jobs.json").write_text(json.dumps(self.jobs, indent=2) + "\n")
+        self.store.prune(MAX_JOBS)
+
+    def _write_job(self, job: dict) -> None:
+        """Persist our working copy without clobbering a ``cancel`` another process
+        may have set on the row since we last read it."""
+        row = self.store.get_job(job["tape_id"])
+        if row and row.get("cancel"):
+            job["cancel"] = True
+        self.store.put_job(job)
 
     def _set(self, job: dict, status: str, scene_id=None, message=None) -> None:
         with self.lock:
-            if job.get("cancel") and status not in TERMINAL:
+            # capture cancellation is handled by _acquire_dv's own stop check (so a
+            # partial tape can still be archived); only abort the processing worker here.
+            if job.get("cancel") and status not in TERMINAL and job.get("stage") == "process":
                 raise RuntimeError("processing cancelled")
             job["status"] = status
             job["updated_at"] = now()
             if scene_id:
                 job["current_scene"] = scene_id
             job["history"].append({"status": status, "at": now(), **({"message": message} if message else {})})
+            self._write_job(job)
             self._persist()
 
     def _log(self, job: dict, message: str) -> None:
@@ -103,36 +133,34 @@ class Engine:
             return
         with self.lock:
             job["logs"] = (job["logs"] + message + "\n")[-20000:]
-            self._persist()
+            self._write_job(job)
 
     def _new_job(self, tape_id: str, manual_transport: bool) -> dict:
         return {"id": uuid.uuid4().hex, "tape_id": tape_id, "stage": "capture", "status": "CREATED",
                 "created_at": now(), "updated_at": now(), "current_scene": None, "dropped_frames": 0,
-                "logs": "", "history": [], "manual_transport": manual_transport, "error": None}
+                "logs": "", "history": [], "manual_transport": manual_transport, "error": None,
+                "rewind": True, "duration": None}
 
     def jobs_list(self) -> list[dict]:
-        with self.lock:
-            return [dict(j) for j in sorted(self.jobs.values(), key=lambda j: j.get("updated_at", ""), reverse=True)]
+        return self.store.list_jobs()
 
     def job_by_ref(self, ref: str) -> dict | None:
-        with self.lock:
-            if ref in self.jobs:
-                return dict(self.jobs[ref])
-            return next((dict(j) for j in self.jobs.values() if j.get("id") == ref), None)
+        job = self.store.get_job(ref)
+        if job:
+            return job
+        return next((j for j in self.store.list_jobs() if j.get("id") == ref), None)
 
     def current_job(self) -> dict:
-        with self.lock:
-            if self.capture_tape:
-                return dict(self.jobs[self.capture_tape])
-            jobs = self.jobs_list()
-            return jobs[0] if jobs else {"status": "IDLE"}
+        cap = self.store.capture_job()
+        if cap:
+            return cap
+        jobs = self.store.list_jobs()
+        return jobs[0] if jobs else {"status": "IDLE"}
 
     def status(self) -> dict:
-        with self.lock:
-            cap = dict(self.jobs[self.capture_tape]) if self.capture_tape else None
-            proc = dict(self.jobs[self.processing_tape]) if self.processing_tape else None
-            return {"capture": cap, "processing": proc, "queue": list(self.pending),
-                    "jobs": self.jobs_list(), "compress": [dict(c) for c in self.compress.values()]}
+        return {"capture": self.store.capture_job(), "processing": self.store.processing_job(),
+                "queue": self.store.pending(), "jobs": self.store.list_jobs(),
+                "compress": self.store.list_builds()}
 
     # ---- on-demand re-encode / download builds ----------------------------
     def _prune_share(self) -> None:
@@ -148,18 +176,17 @@ class Engine:
     def _enqueue_build(self, tape_id: str, token: str, sources: list[Path], mode: str, title: str) -> dict:
         key = f"{tape_id}/{token}"
         with self.proc_cv:
-            job = self.compress.get(key)
-            if job and (job["status"] in ("QUEUED", "RUNNING")
-                        or (job["status"] == "READY" and Path(job["path"]).exists())):
-                return dict(job)
+            existing = self.store.get_build(key)
+            if existing and (existing["status"] in ("QUEUED", "RUNNING")
+                             or (existing["status"] == "READY" and Path(existing["path"]).exists())):
+                return dict(existing)
             out = self.config.storage / "tmp" / "share" / f"{tape_id}_{token}.mp4"
-            job = {"key": key, "token": token, "tape_id": tape_id, "mode": mode, "title": title,
-                   "sources": [str(p) for p in sources], "status": "QUEUED", "path": str(out),
-                   "size": None, "error": None, "updated_at": now()}
-            self.compress[key] = job
-            self.compress_pending.append(key)
+            build = {"key": key, "token": token, "tape_id": tape_id, "mode": mode, "title": title,
+                     "sources": [str(p) for p in sources], "status": "QUEUED", "path": str(out),
+                     "size": None, "error": None}
+            self.store.put_build(build)
             self.proc_cv.notify_all()
-        return dict(job)
+        return dict(self.store.get_build(key))
 
     def _tape_dir(self, tape_id: str) -> Path:
         d = self.config.tapes / tape_id
@@ -189,60 +216,67 @@ class Engine:
                                    f"{tape_id} · {len(ids)} scen")
 
     def _compress_worker(self) -> None:
+        poll = self.role != "all"
         while True:
-            with self.proc_cv:
-                while not self.compress_pending:
-                    self.proc_cv.wait()
-                key = self.compress_pending.pop(0)
-                job = self.compress.get(key)
-                if not job:
+            if poll:
+                build = self.store.claim_next_build()
+                if not build:
+                    time.sleep(1)
                     continue
-                job["status"], job["updated_at"] = "RUNNING", now()
-            out = Path(job["path"])
+            else:
+                with self.proc_cv:
+                    while not any(b["status"] == "QUEUED" for b in self.store.list_builds()):
+                        self.proc_cv.wait()
+                build = self.store.claim_next_build()
+                if not build:
+                    continue
+            out = Path(build["path"])
             try:
                 from .media import compress_share, concat_mp4
                 out.parent.mkdir(parents=True, exist_ok=True)
                 self._prune_share()
-                srcs = [Path(s) for s in job["sources"]]
-                if job["mode"] == "concat":
-                    concat_mp4(srcs, out, meta={"title": job["title"]}, log=lambda m: None)
+                srcs = [Path(s) for s in build["sources"]]
+                if build["mode"] == "concat":
+                    concat_mp4(srcs, out, meta={"title": build["title"]}, log=lambda m: None)
                 else:
                     compress_share(srcs if len(srcs) > 1 else srcs[0], out, max_mb=self.config.share_max_mb,
                                    crf=self.config.share_crf, preset=self.config.share_preset,
-                                   meta={"title": job["title"]}, log=lambda m: None)
-                with self.lock:
-                    job.update(status="READY", size=out.stat().st_size, updated_at=now())
+                                   meta={"title": build["title"]}, log=lambda m: None)
+                build.update(status="READY", size=out.stat().st_size)
+                self.store.put_build(build)
             except Exception as exc:
-                with self.lock:
-                    job.update(status="ERROR", error=str(exc), updated_at=now())
+                build.update(status="ERROR", error=str(exc))
+                self.store.put_build(build)
 
     def compress_status(self, tape_id: str, token: str | None) -> dict:
-        with self.lock:
-            return dict(self.compress.get(f"{tape_id}/{token or 'TAPE'}", {"status": "NONE"}))
+        build = self.store.get_build(f"{tape_id}/{token or 'TAPE'}")
+        return dict(build) if build else {"status": "NONE"}
 
-    # ---- deletion (irreversible — the caller must have confirmed) ----------
+    # ---- deletion / rename / metadata (irreversible — the caller must have confirmed) ----
+    def _busy(self, tape_id: str) -> bool:
+        return self.store.tape_busy(tape_id) or tape_id in (self.capture_tape, self.processing_tape)
+
     def _drop_share(self, tape_id: str) -> None:
-        for k in [k for k in self.compress if k.startswith(f"{tape_id}/")]:
-            job = self.compress.pop(k)
-            Path(job["path"]).unlink(missing_ok=True)
+        for build in self.store.builds_for_tape(tape_id):
+            Path(build["path"]).unlink(missing_ok=True)
+            self.store.delete_build(build["key"])
 
     def delete_tape(self, tape_id: str) -> dict:
         with self.lock:
-            if tape_id in (self.capture_tape, self.processing_tape) or tape_id in self.pending:
+            if self._busy(tape_id):
                 raise RuntimeError("kaseta jest w użyciu — poczekaj, aż zadanie się skończy")
             d = self.config.tapes / tape_id
             if d.parent != self.config.tapes or not d.is_dir():
                 raise FileNotFoundError(f"nie ma kasety {tape_id}")
             shutil.rmtree(d, ignore_errors=True)
             shutil.rmtree(self.config.working / tape_id, ignore_errors=True)
-            self.jobs.pop(tape_id, None)
+            self.store.delete_job(tape_id)
             self._drop_share(tape_id)
-            self._persist()
         return {"deleted": tape_id}
 
     def delete_scenes(self, tape_id: str, scene_ids: list[str]) -> dict:
         with self.lock:
-            if tape_id in (self.capture_tape, self.processing_tape) or tape_id in self.pending:
+            if self._busy(tape_id):
                 raise RuntimeError("kaseta jest w użyciu — spróbuj później")
         d = self._tape_dir(tape_id)
         tape = json.loads((d / "tape.json").read_text())
@@ -279,7 +313,6 @@ class Engine:
             self._drop_share(tape_id)
         return {"tape_id": tape_id, "removed": removed, "remaining": tape["scene_count"]}
 
-    # ---- rename / editable metadata --------------------------------------
     def _refresh_sha_lines(self, tape_dir: Path, new_hashes: dict[str, str]) -> None:
         sha = tape_dir / "tape.sha256"
         if not sha.exists():
@@ -296,7 +329,7 @@ class Engine:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", new_id or ""):
             raise ValueError("niepoprawna nazwa kasety (dozwolone: litery, cyfry, . _ -)")
         with self.lock:
-            if tape_id in (self.capture_tape, self.processing_tape) or tape_id in self.pending:
+            if self._busy(tape_id):
                 raise RuntimeError("kaseta jest w użyciu — poczekaj, aż zadanie się skończy")
             src = self.config.tapes / tape_id
             if src.parent != self.config.tapes or not src.is_dir():
@@ -320,10 +353,11 @@ class Engine:
                 hashes[sj.name] = sha256(sj)
             hashes["tape.json"] = sha256(tp)
             self._refresh_sha_lines(dst, hashes)
-            if tape_id in self.jobs:
-                j = self.jobs.pop(tape_id)
-                j["tape_id"] = new_id
-                self.jobs[new_id] = j
+            job = self.store.get_job(tape_id)
+            if job:
+                self.store.delete_job(tape_id)
+                job["tape_id"] = new_id
+                self.store.put_job(job)
             self._drop_share(tape_id)
             self._persist()
         return {"tape_id": new_id}
@@ -372,7 +406,7 @@ class Engine:
               manual_transport: bool = False) -> dict:
         manual_transport, rewind = self._compat_override(self.config.allow_fcp, manual_transport, rewind)
         with self.lock:
-            if self.capture_tape:
+            if self.capture_tape or self.store.capture_job():
                 raise RuntimeError("a capture is already in progress")
             tape_id = tape_id or self._next_tape_id()
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", tape_id):
@@ -380,23 +414,28 @@ class Engine:
             if (self.config.tapes / tape_id).exists() or (self.config.working / tape_id).exists() or tape_id in self.jobs:
                 raise FileExistsError(f"tape_id already exists: {tape_id}")
             job = self._new_job(tape_id, manual_transport)
-            self.jobs[tape_id] = job
-            self.capture_tape = tape_id
-            self.capture_proc = None
-            self.capture_cancel.clear()
-            self._persist()
-            threading.Thread(target=self._capture_job, args=(job, rewind, duration, manual_transport),
-                             daemon=True).start()
+            job["rewind"], job["duration"] = rewind, duration
+            self.store.put_job(job)
+            # role "all": run the capture in this process now.
+            # role "api": the row is enough — the grabber process claims it from the store.
+            if self.role == "all":
+                self.capture_tape = tape_id
+                self.capture_proc = None
+                self.capture_cancel.clear()
+                threading.Thread(target=self._capture_job, args=(job, rewind, duration, manual_transport),
+                                 daemon=True).start()
             return dict(job)
 
     def stop(self, tape_id: str | None = None) -> dict:
         with self.lock:
-            target = tape_id or self.capture_tape
-            job = self.jobs.get(target) if target else None
+            target = tape_id or self.capture_tape or (self.store.capture_job() or {}).get("tape_id")
+            job = self.store.get_job(target) if target else None
             if not job:
                 return {"status": "IDLE"}
-            if target == self.capture_tape:
+            is_capture = job.get("stage") == "capture" and job.get("status") not in TERMINAL
+            if is_capture:
                 self.capture_cancel.set()
+                self.store.mark_cancel(target)                       # cross-process signal for the grabber
                 if self.capture_proc and self.capture_proc.poll() is None:
                     self.capture_proc.send_signal(signal.SIGINT)
                 if not job.get("manual_transport"):
@@ -404,12 +443,11 @@ class Engine:
                         self.camera.command("stop")
                     except Exception:
                         pass
-            elif target in self.pending:
-                self.pending.remove(target)
+            elif target in self.store.pending():
                 self._set(job, "CANCELLED", message="removed from queue")
             elif job.get("status") not in TERMINAL:
-                job["cancel"] = True  # picked up between scenes by the processing worker
-            return dict(job)
+                self.store.mark_cancel(target)
+            return dict(self.store.get_job(target) or job)
 
     def _acquire_dv(self, job: dict, work: Path, capture: Path, duration: int | None,
                     manual_transport: bool) -> None:
@@ -440,7 +478,7 @@ class Engine:
             return zero or future
 
         def stop_reason():
-            if self.capture_cancel.is_set():
+            if self.capture_cancel.is_set() or (self.role != "all" and self._store_cancelled(job)):
                 return "cancel"
             if not seen_data:
                 if time.monotonic() - started > cfg.play_wait_timeout:
@@ -513,6 +551,10 @@ class Engine:
                         shutil.copyfileobj(src, out)
                     p.unlink()
 
+    def _store_cancelled(self, job: dict) -> bool:
+        row = self.store.get_job(job["tape_id"])
+        return bool(row and row.get("cancel"))
+
     def _capture_job(self, job: dict, rewind: bool, duration: int | None, manual_transport: bool) -> None:
         tape_id = job["tape_id"]
         work = self.config.working / tape_id
@@ -542,18 +584,18 @@ class Engine:
             job["dropped_frames"] = len(drop_lines)
             dv_bytes = capture.stat().st_size if capture.exists() else 0
             has_dv = dv_bytes >= self.config.keep_partial_min_seconds * 3_600_000  # ~DV25 byte rate
-            if self.capture_cancel.is_set() and not has_dv:
+            if (self.capture_cancel.is_set() or self._store_cancelled(job)) and not has_dv:
                 self._set(job, "CANCELLED")
                 return
             if dv_bytes == 0:
                 raise RuntimeError("capture produced no DV data")
-            if self.capture_cancel.is_set():
+            if self.capture_cancel.is_set() or self._store_cancelled(job):
                 self._log(job, "Przerwano ręcznie — archiwizuję zebrany materiał")
             job["capture_meta"] = {"started_at": job["created_at"], "drops": len(drop_lines),
                                    "drop_lines": drop_lines, "camera": self.camera.info()}
             self._set(job, "CAPTURED")
+            self.store.enqueue_process(tape_id)
             with self.proc_cv:
-                self.pending.append(tape_id)
                 self.proc_cv.notify_all()
         except Exception as exc:
             self._log(job, f"ERROR: {type(exc).__name__}: {exc}")
@@ -578,18 +620,35 @@ class Engine:
             if job["status"] in {"ERROR", "CANCELLED"} and not (capture.exists() and capture.stat().st_size > 0):
                 shutil.rmtree(work, ignore_errors=True)
 
+    def run_capture_from_store(self, job: dict) -> None:
+        """Grabber entrypoint: a capture job already claimed from the store."""
+        with self.lock:
+            self.capture_tape = job["tape_id"]
+            self.capture_proc = None
+            self.capture_cancel.clear()
+        self._capture_job(job, job.get("rewind", True), job.get("duration"),
+                          job.get("manual_transport", False))
+
     # ---- processing worker -------------------------------------------------
     def _process_worker(self) -> None:
+        poll = self.role != "all"
         while True:
-            with self.proc_cv:
-                while not self.pending:
-                    self.proc_cv.wait()
-                tape_id = self.pending.pop(0)
-                self.processing_tape = tape_id
-                job = self.jobs.get(tape_id)
+            if poll:
+                job = self.store.claim_next_process()
+                if not job:
+                    time.sleep(1)
+                    continue
+            else:
+                with self.proc_cv:
+                    while not self.store.pending():
+                        self.proc_cv.wait()
+                job = self.store.claim_next_process()
+                if not job:
+                    continue
+            with self.lock:
+                self.processing_tape = job["tape_id"]
             try:
-                if job:
-                    self._run_processing(job)
+                self._run_processing(job)
             finally:
                 with self.lock:
                     self.processing_tape = None
@@ -630,6 +689,7 @@ class Engine:
                 job["status"] = "ERROR"
                 job["updated_at"] = now()
                 job["history"].append({"status": "ERROR", "at": now()})
+                self.store.put_job(job)   # terminal — a stale cancel no longer matters
                 self._persist()
 
     def process_existing(self, source: Path, tape_id: str) -> dict:
@@ -643,7 +703,7 @@ class Engine:
         job = self._new_job(tape_id, manual_transport=True)
         job["stage"] = "process"
         job["status"] = "ANALYZING_DV"
-        self.jobs[tape_id] = job
+        self.store.put_job(job)
         result = process_capture(capture, tape_id, self.config.storage, self.config.zstd_level,
                                  lambda m: self._log(job, m), lambda s, sid=None: self._set(job, s, sid),
                                  nice=self.config.nice_processing, mp4_preset=self.config.mp4_preset)
