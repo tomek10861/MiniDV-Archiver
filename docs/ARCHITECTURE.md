@@ -1,8 +1,8 @@
 # Architecture
 
 The app is one codebase that runs either as a single process or as four
-independently deployable pieces. They share nothing but the storage directory and
-a small SQLite job store.
+independently deployable pieces (Docker Compose, or bare-metal systemd). They share
+nothing but the storage directory and a small SQLite job store.
 
 ```
                        ┌──────────────┐
@@ -24,12 +24,16 @@ a small SQLite job store.
 
 ## Components
 
-| component | process | touches | responsibility |
-|---|---|---|---|
-| **grabber** | `python -m minidv_archiver.grabber` | `/dev/fw*` | claims `CREATED` capture jobs, runs `dvgrab`, end-of-tape detection, writes raw DV to `working/<id>/`, hands the job to the converter queue. Holds `state/grabber.lock` (one grabber). Also serves AV/C transport requests the api enqueues. |
-| **converter** | `python -m minidv_archiver.converter` | CPU/disk | drains two queues: processing (`split → zstd master + byte verify → H.264 proxies → tape.json / tape.sha256`) and share/concat re-encodes. |
-| **api** | `python -m minidv_archiver.api` | filesystem, `jobs.db` | HTTP/JSON **and** the static `frontend/`. Read endpoints hit the filesystem directly. `capture/start|stop` write a job row; `tape/{play,stop,rewind}` enqueue a camera command; `rename` / `meta` / delete are fast filesystem ops guarded by a `tape_busy()` check. |
-| **ui** | nginx (`compose.yaml`, container on `:8088`) | — | fronts the api. The api already serves `frontend/`, so nginx just proxies everything through (and terminates TLS / adds auth if you want). A bare-metal alternative that serves `frontend/` itself and proxies only `/api` is in [`../deploy/nginx-minidv.conf`](../deploy/nginx-minidv.conf). `frontend/` is plain HTML/JS + vendored TailAdmin — no build step. |
+| component | command | container | touches | responsibility |
+|---|---|---|---|---|
+| **grabber** | `python -m minidv_archiver.grabber` | `privileged`, host `/dev` + `/sys/bus/firewire` | `/dev/fw*` | claims `CREATED` capture jobs, runs `dvgrab`, end-of-tape detection, writes raw DV to `working/<id>/`, hands the job to the converter queue. Holds `state/grabber.lock` (one grabber). Also serves AV/C transport requests the api enqueues. |
+| **converter** | `python -m minidv_archiver.converter` | plain, `/srv/minidv` volume | CPU/disk | drains two queues: processing (`split → zstd master + byte verify → H.264 proxies → tape.json / tape.sha256`) and share/concat re-encodes. |
+| **api** | `python -m minidv_archiver.api` | plain, `/srv/minidv` volume, `expose: 8080` | filesystem, `jobs.db` | HTTP/JSON **and** the static `frontend/` (fallback). Read endpoints hit the filesystem directly. `capture/start|stop` write a job row; `tape/{play,stop,rewind}` enqueue a camera command; `rename` / `meta` / delete are fast filesystem ops guarded by a `tape_busy()` check. |
+| **ui** | `nginx:1.29-alpine` | publishes `:8088` | — | serves the mounted `frontend/` and proxies `/api` to `http://api:8080` over the compose network. `frontend/` is plain HTML/JS + vendored TailAdmin — no build step. A bare-metal equivalent is [`../deploy/nginx-minidv.conf`](../deploy/nginx-minidv.conf). |
+
+Bare-metal split: `systemd/minidv-{grabber,converter,api}.service` run the same three
+commands as units; nginx (`deploy/nginx-minidv.conf`) fronts the api. `Conflicts=`
+with `minidv-archive.service` keeps you from running the single process too.
 
 `python -m minidv_archiver.server` (and `minidv-archive.service`) runs **all of the
 above in one process** (`role="all"`): the api in the main thread, the capture and

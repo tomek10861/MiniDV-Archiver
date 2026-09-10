@@ -82,20 +82,28 @@ unit and a udev rule (gives the camera's device node group `video`, mode `0660`)
 and starts it. Edit `/etc/minidv-archive.env` for configuration.
 
 ```bash
-sudo ./scripts/install.sh            # single process on :8080
-sudo ./scripts/install.sh --split    # grabber + converter + api as separate units
+sudo ./scripts/install.sh            # single process on :8080 (systemd)
 ```
 
-Both layouts share the same storage and `state/jobs.db`; `--split` just runs the
-loops as separate units (`minidv-grabber`, `minidv-converter`, `minidv-api`), so
-you can restart the api or move the converter without touching a running capture.
-Switch back and forth freely — the units `Conflicts=` each other.
+### Split deployment (Docker)
 
-The **UI** is a container nginx fronting the api (`docker compose up -d`, port
-8088); `--split` brings it up for you. The api also serves `frontend/` directly on
-:8080, so nginx is optional — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-Capture always stays on the host — passing a FireWire device into a container is
-less reliable than talking to `/dev/fw*` directly.
+Four containers — `grabber` (FireWire), `converter` (background processing),
+`api` (HTTP/JSON) and `ui` (nginx) — sharing `/srv/minidv` and its `state/jobs.db`:
+
+```bash
+cp .env.example .env       # optional; set MINIDV_ALLOW_FCP=0 for a Sony DCR-PC2E, etc.
+docker compose up -d --build
+# UI on http://<host>:8088
+```
+
+`grabber` runs `privileged` with host `/dev` + `/sys/bus/firewire` so it can reach
+the camera's hot-plugged `/dev/fw*` node. Restart any one service without touching
+the others (`docker compose restart api`). Switch between single-process and split
+freely — same storage, same job store, and the systemd unit `Conflicts=` nothing
+Docker does.
+
+A bare-metal split (systemd units + `deploy/nginx-minidv.conf`) is also in the
+repo; see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 > There is no authentication. Expose it only on a trusted LAN.
 

@@ -74,14 +74,15 @@ class Camera:
         return dev if dev.exists() else None
 
     def info(self) -> dict:
-        dev = self.device()
-        if not dev:
+        """Passive: identifies the camera from sysfs only (no /dev, no AV/C), so it
+        works in an api/converter container that has /sys but not the FireWire node."""
+        node = self._match_node()
+        if not node:
             return {"connected": False, "guid": self.guid}
-        sysdev = FW_DEVICES / dev.name
-        return {"connected": True, "device": str(dev),
-                "guid": _read(sysdev / "guid").lower().removeprefix("0x") or self.guid,
-                "vendor": _read(sysdev / "vendor") or None, "model": _read(sysdev / "model") or None,
-                "model_name": _read(sysdev / "model_name") or None}
+        return {"connected": True, "device": str(Path("/dev") / node.name),
+                "guid": _read(node / "guid").lower().removeprefix("0x") or self.guid,
+                "vendor": _read(node / "vendor") or None, "model": _read(node / "model") or None,
+                "model_name": _read(node / "model_name") or None}
 
     def _fcp(self, payload: str, timeout: int = 5) -> list[str]:
         dev = self.device()

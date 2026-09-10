@@ -1,10 +1,53 @@
+# Full split as containers. All three app services share /srv/minidv (and therefore
+# state/jobs.db) from the host; only ui-proxy publishes a port.
+#
+#   cp .env.example .env      # optional; MINIDV_ALLOW_FCP=0 for a Sony DCR-PC2E etc.
+#   docker compose up -d --build
+#   # UI on http://<host>:8088
+name: minidv-archive
+
+x-app: &app
+  build: .
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  volumes:
+    - ${MINIDV_STORAGE:-/srv/minidv}:/srv/minidv
+    # camera.info() is a sysfs-only read (no bus traffic); the api needs it for
+    # /api/status, the converter for a capture_meta fallback. /sys/bus/firewire
+    # entries are symlinks into /sys/devices, so the whole tree has to be visible.
+    - /sys:/sys:ro
+
 services:
+  grabber:
+    <<: *app
+    command: python -m minidv_archiver.grabber
+    # FireWire: the camera's /dev/fw* node is dynamic (hot-plug), so hand the
+    # grabber the host's /dev and let it be privileged to open the char device
+    # (privileged also gives it the full /sys it needs to resolve the node).
+    privileged: true
+    volumes:
+      - ${MINIDV_STORAGE:-/srv/minidv}:/srv/minidv
+      - /dev:/dev
+
+  converter:
+    <<: *app
+    command: python -m minidv_archiver.converter
+
+  api:
+    <<: *app
+    command: python -m minidv_archiver.api
+    expose:
+      - "8080"
+
   ui-proxy:
     image: nginx:1.29-alpine
     restart: unless-stopped
+    depends_on:
+      - api
     ports:
       - "8088:80"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
