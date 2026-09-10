@@ -1,5 +1,24 @@
 # FireWire & camera notes
 
+## ⚠ Cabling and the 6-pin ↔ 4-pin adapter
+
+The 6-pin (alpha) FireWire connector carries **bus power, ~8–30 V**. The 4-pin
+i.LINK connector on camcorders carries **only data**. A cheap or miswired 6→4
+adapter cable — or hot-plugging one — can route that power into a connector that
+was never meant to receive it and physically burn out the port on the camera or
+the PC. It has happened here to an old camcorder.
+
+Safe procedure:
+
+1. **PC powered off** — connect the **6-pin** end to the PC card.
+2. **Camera powered off** — connect the **4-pin** end to the camera.
+3. Power the PC on, then the camera (PLAYER / VCR mode).
+4. **Never** hot-plug either end while anything is powered. To change cables, power
+   both down first.
+
+Prefer a straight **4-pin ↔ 4-pin** cable if the PC card exposes a 4-pin port, or a
+reputable powered adapter. Avoid unbranded bargain adapters.
+
 ## The stack
 
 MiniDV Archiver uses the mainline `firewire_ohci` / `firewire_core` kernel stack and

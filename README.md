@@ -1,5 +1,7 @@
 # MiniDV Archiver
 
+**English** · [Polski](README.pl.md)
+
 Lossless capture and archival of MiniDV / DV tapes over FireWire (IEEE 1394), with a
 web dashboard for reviewing what you captured.
 
@@ -8,11 +10,16 @@ scenes on the DV timecode/recording-date breaks, stored as `zstd`-compressed `.d
 and verified byte-for-byte after compression. Everything else (H.264 proxies, the
 whole-tape review file, thumbnails, JSON metadata) is a derivative you can regenerate.
 
-![dashboard](docs/dashboard.png)
-![timeline](docs/timeline.png)
+**The dashboard**
 
-> UI ships in English and Polish (switch it in the header); API and docs are
-> English. The dashboard is a
+![The dashboard — capture panel and status cards](docs/dashboard.png)
+
+**The timeline** — year → month → scene, like iPhone Photos
+
+![The timeline view](docs/timeline.png)
+
+> UI ships in English and Polish (switch it in the header). The API and the
+> `docs/` deep-dives are English. The dashboard is a
 > [TailAdmin](https://github.com/TailAdmin/tailadmin-free-tailwind-dashboard-template)
 > layout (MIT) — vendored under `frontend/vendor/`, so **no build step is needed to
 > run**. Everything else is configurable via environment variables.
@@ -201,6 +208,18 @@ download) ·
 `/api/tapes/{id}` · `/api/tapes/{id}/scenes` `{scenes: [...]}`.
 
 ## Camera compatibility & FireWire notes
+
+> **⚠ Cabling — the 6-pin ↔ 4-pin adapter can kill a port.** The 6-pin FireWire
+> connector carries bus power (~8–30 V); the 4-pin i.LINK connector does not. A
+> cheap or miswired 6→4 adapter cable, or hot-plugging one, can push power into a
+> port that was never meant to receive it and **fry the camera's or the PC's
+> FireWire connector** (this happened to an old camcorder here). Rules:
+>
+> - **PC off** → plug the **6-pin** end into the PC first.
+> - **Camera off** → plug the **4-pin** end into the camera.
+> - Only then power both on. **Never hot-plug either end.**
+> - Prefer a plain **4-pin ↔ 4-pin** cable when the PC card has a 4-pin port, or a
+>   known-good adapter; avoid the bargain-bin ones.
 
 Most DV decks and camcorders drive fine over AV/C. Some older i.LINK PHYs are
 marginal and drop off the bus, or reset it on FCP transactions. If you hit that:
