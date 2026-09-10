@@ -530,14 +530,18 @@ $('#dupView').addEventListener('click', async e => {
   if (e.target.id === 'dupRefresh') { loadDuplicates(true); return; }
   if (e.target.id === 'dupReprobeAll') {
     e.target.disabled = true; e.target.textContent = '⏳ zlecam…';
+    let n = 0;
     try {
       for (const t of (window.__tapes || [])) {
         await api(`/api/tapes/${encodeURIComponent(t.tape_id)}/reprobe`,
           { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        n++;
       }
-      e.target.textContent = 'zlecone — odśwież za chwilę';
-    } catch (err) { alert(err.message); e.target.textContent = '🔍 Sonduj wszystkie taśmy'; }
-    finally { e.target.disabled = false; }
+    } catch (err) { alert(err.message); }
+    finally { e.target.disabled = false; e.target.textContent = '🔍 Sonduj wszystkie taśmy'; }
+    await refresh();
+    go('#zadania');            // show the queue that just started
+    alert(`Zlecono sondę dla ${n} taśm — postęp widać w „Zadania". Wyniki pojawią się tu automatycznie po zakończeniu.`);
     return;
   }
   const k = e.target.closest('.dupkeep');
@@ -553,11 +557,24 @@ function jobBadge(j, queue) {
   if (j.status === 'CANCELLED') return ['PRZERWANE', 'bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300'];
   return ['PRZETWARZANIE', 'bg-blue-light-50 text-blue-light-700 dark:bg-blue-light-500/15 dark:text-blue-light-400'];
 }
+const BUILD_PL = { reprobe: 'SONDA JAKOŚCI', restore: 'NAPRAWA', share: 'UDOSTĘPNIANIE', concat: 'SKLEJANIE' };
+const BUILD_ST = { QUEUED: 'w kolejce', RUNNING: 'przetwarzanie…', READY: 'gotowe', ERROR: 'błąd' };
+const buildLabel = b => {
+  const t = b.token || '';
+  if (t.startsWith('REPROBE') || t.startsWith('SEL-') || ['TAPE', 'tape'].includes(t)) return b.tape_id;
+  return `${b.tape_id} · ${t.replace(/-RES$/, '')}`;
+};
+function activeBuilds(builds) {
+  return (builds || []).filter(b => b.status === 'QUEUED' || b.status === 'RUNNING'
+    || (b.updated_at && Date.now() - Date.parse(b.updated_at) < 5 * 60 * 1000));
+}
 let jobsSig = '';
-function renderJobs(list, queue) {
-  const sig = JSON.stringify(list.map(j => [j.tape_id, j.status, j.current_scene]));
+function renderJobs(list, queue, builds) {
+  builds = activeBuilds(builds);
+  const sig = JSON.stringify([list.map(j => [j.tape_id, j.status, j.current_scene]),
+    builds.map(b => [b.key, b.status])]);
   if (sig === jobsSig) return; jobsSig = sig;
-  $('#jobs').innerHTML = list.map(j => {
+  const jobRows = list.map(j => {
     const [txt, cls] = jobBadge(j, queue), run = !TERMINAL.has(j.status);
     return `<div class="rounded-xl border border-gray-200 p-3 dark:border-gray-800">
       <div class="flex flex-wrap items-center gap-2">
@@ -569,7 +586,23 @@ function renderJobs(list, queue) {
       </div>
       ${j.error ? `<div class="mt-1.5 text-theme-xs text-error-500">${j.error}</div>` : ''}
     </div>`;
-  }).join('') || '<p class="text-theme-sm text-gray-400">Brak zadań.</p>';
+  }).join('');
+  const buildRows = builds.map(b => {
+    const cls = b.status === 'ERROR' ? 'bg-error-50 text-error-700 dark:bg-error-500/15 dark:text-error-400'
+      : b.status === 'READY' ? 'bg-success-50 text-success-700 dark:bg-success-500/15 dark:text-success-400'
+      : b.status === 'QUEUED' ? 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200'
+      : 'bg-blue-light-50 text-blue-light-700 dark:bg-blue-light-500/15 dark:text-blue-light-400';
+    return `<div class="rounded-xl border border-gray-200 p-3 dark:border-gray-800">
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="${BADGE} ${cls}">${BUILD_PL[b.mode] || b.mode.toUpperCase()}</span>
+        <strong class="text-gray-800 dark:text-white/90">${buildLabel(b)}</strong>
+        <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${BUILD_ST[b.status] || b.status}</span>
+        <span class="ml-auto font-mono text-[11px] text-gray-400">${(b.updated_at || '').slice(11, 19)}</span>
+      </div>
+      ${b.error ? `<div class="mt-1.5 text-theme-xs text-error-500">${b.error}</div>` : ''}
+    </div>`;
+  }).join('');
+  $('#jobs').innerHTML = (jobRows + buildRows) || '<p class="text-theme-sm text-gray-400">Brak zadań.</p>';
 }
 $('#jobs').addEventListener('click', async e => {
   const b = e.target.closest('.jstop'); if (!b) return;
@@ -626,10 +659,14 @@ async function refresh() {
     $('#stHours').textContent = `≈ ${d.estimated_dv_hours} h DV · próg ${gib(d.min_free)}`;
 
     const active = (s.jobs || []).filter(j => !TERMINAL.has(j.status));
-    $('#stJobs').textContent = active.length;
-    $('#stJobsSub').textContent = s.processing ? `przetwarzanie ${s.processing.tape_id}` : (active.length ? 'w toku' : 'brak');
-    $('#navJobs').textContent = active.length || '';
-    $('#navJobs').hidden = !active.length;
+    const bq = (s.compress || []).filter(b => b.status === 'QUEUED' || b.status === 'RUNNING');
+    const total = active.length + bq.length;
+    $('#stJobs').textContent = total;
+    $('#stJobsSub').textContent = s.processing ? `przetwarzanie ${s.processing.tape_id}`
+      : bq.length ? `${bq.length} w tle (${BUILD_PL[bq[0].mode] ? BUILD_PL[bq[0].mode].toLowerCase() : bq[0].mode}…)`
+      : (active.length ? 'w toku' : 'brak');
+    $('#navJobs').textContent = total || '';
+    $('#navJobs').hidden = !total;
     $('#stTapes').textContent = t.length;
     $('#navTapes').textContent = t.length || '';
     $('#navTapes').hidden = !t.length;
@@ -649,7 +686,12 @@ async function refresh() {
       : (s.processing ? `W tle: przetwarzanie ${s.processing.tape_id} (${stPL(s.processing.status)})` : 'Brak aktywnego zgrywania.');
     $('#start').disabled = !!cap;
 
-    renderJobs(s.jobs || [], s.queue || []);
+    renderJobs(s.jobs || [], s.queue || [], s.compress || []);
+    if (currentRoute().section === 'duplikaty' && dupCache) {
+      const busy = (s.compress || []).some(b => b.mode === 'reprobe' && (b.status === 'QUEUED' || b.status === 'RUNNING'));
+      if (!busy && refresh._reprobeWasBusy) loadDuplicates(true);   // auto-refresh once the scans finish
+      refresh._reprobeWasBusy = busy;
+    }
     renderTapeGrid(t);
     renderLogs(s);
   } catch (e) {

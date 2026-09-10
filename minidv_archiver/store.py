@@ -18,7 +18,7 @@ import json
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 TERMINAL = {"COMPLETED", "ERROR", "CANCELLED"}
@@ -265,6 +265,12 @@ class JobStore:
     def delete_build(self, key: str) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM builds WHERE key=?", (key,))
+
+    def prune_builds(self, max_age_hours: float = 6) -> None:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+        with self._lock:
+            self._conn.execute("DELETE FROM builds WHERE status IN ('READY','ERROR') AND updated_at < ?",
+                               (cutoff,))
 
     def claim_next_build(self) -> dict | None:
         with self._lock, self._immediate():

@@ -333,6 +333,7 @@ class Engine:
                 from .media import compress_share, concat_mp4, restore_mp4
                 out.parent.mkdir(parents=True, exist_ok=True)
                 self._prune_share()
+                self.store.prune_builds()
                 srcs = [Path(s) for s in build["sources"]]
                 if build["mode"] == "reprobe":
                     self._reprobe_tape(build["sources"][0], force=build["token"].endswith("-F"))

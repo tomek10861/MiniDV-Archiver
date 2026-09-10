@@ -90,6 +90,19 @@ def test_builds_claim_and_drop(tmp_path):
     assert s.builds_for_tape("T") == []
 
 
+def test_prune_builds_drops_old_finished_only(tmp_path):
+    s = _store(tmp_path)
+    old = "2000-01-01T00:00:00+00:00"
+    s.put_build({"key": "T/a", "tape_id": "T", "status": "READY"})
+    s._conn.execute("UPDATE builds SET updated_at=? WHERE key='T/a'", (old,))
+    s.put_build({"key": "T/b", "tape_id": "T", "status": "RUNNING"})
+    s._conn.execute("UPDATE builds SET updated_at=? WHERE key='T/b'", (old,))   # old but not finished
+    s.put_build({"key": "T/c", "tape_id": "T", "status": "READY"})              # finished but fresh
+    s.prune_builds(max_age_hours=6)
+    keys = {b["key"] for b in s.list_builds()}
+    assert keys == {"T/b", "T/c"}
+
+
 def test_cam_command_flow(tmp_path):
     s = _store(tmp_path)
     cid = s.enqueue_cam_command("play")
