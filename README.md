@@ -8,9 +8,11 @@ scenes on the DV timecode/recording-date breaks, stored as `zstd`-compressed `.d
 and verified byte-for-byte after compression. Everything else (H.264 proxies, the
 whole-tape review file, thumbnails, JSON metadata) is a derivative you can regenerate.
 
-![dashboard](docs/screenshot.png)
+![dashboard](docs/dashboard.png)
+![timeline](docs/timeline.png)
 
-> UI language is Polish; API and docs are English. The dashboard is a
+> UI ships in English and Polish (switch it in the header); API and docs are
+> English. The dashboard is a
 > [TailAdmin](https://github.com/TailAdmin/tailadmin-free-tailwind-dashboard-template)
 > layout (MIT) — vendored under `frontend/vendor/`, so **no build step is needed to
 > run**. Everything else is configurable via environment variables.

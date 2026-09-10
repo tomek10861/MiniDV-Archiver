@@ -4,21 +4,13 @@ const scroller = document.querySelector('.overflow-y-auto');   // the scrolling 
 const gib = n => `${(n / 1024 ** 3).toFixed(1)} GiB`;
 const mb = n => n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(2)} GB` : `${(n / 1024 ** 2).toFixed(0)} MB`;
 const TERMINAL = new Set(['COMPLETED', 'ERROR', 'CANCELLED']);
-const STATE_PL = {
-  IDLE: 'BEZCZYNNY', CREATED: 'UTWORZONE', WAITING_FOR_PLAY: '▶ CZEKAM NA PLAY — naciśnij PLAY na kamerze',
-  CAPTURING: 'NAGRYWANIE', REWINDING: 'PRZEWIJANIE', CHECKING_STORAGE: 'SPRAWDZANIE DYSKU',
-  CHECKING_CAMERA: 'SPRAWDZANIE KAMERY', CAPTURED: 'ZGRANE — CZEKA NA PRZETWARZANIE', QUEUED: 'W KOLEJCE',
-  DETECTING_SCENES: 'WYKRYWANIE SCEN', COMPRESSING: 'KOMPRESJA', VERIFYING_ARCHIVES: 'WERYFIKACJA ARCHIWUM',
-  ENCODING_MP4: 'KODOWANIE MP4', VERIFYING_MP4: 'WERYFIKACJA MP4', ANALYZING_DV: 'ANALIZA DV',
-  BUILDING_TAPE_PROXY: 'SKLEJANIE PODGLĄDU TAŚMY', COMPLETED: 'GOTOWE', ERROR: 'BŁĄD', CANCELLED: 'PRZERWANE',
-};
-const stPL = s => STATE_PL[s] || s || '—';
+const stPL = s => (s ? L('state.' + s) : '—');
 const durTxt = (frames, std) => {
   const t = Math.round(frames / (std === 'NTSC' ? 30000 / 1001 : 25));
   return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
 };
 const badYear = d => d && !/^(19[89]\d|20[0-2]\d)-/.test(d);
-const PL_MON = ['sty', 'lut', 'mar', 'kwi', 'maj', 'cze', 'lip', 'sie', 'wrz', 'paź', 'lis', 'gru'];
+const PL_MON = window.MON_SHORT;
 function fmtTapeDates(t) {                       // iPhone-Photos style date / range
   const sane = d => /^(19[89]\d|20[0-2]\d)-\d\d-\d\d$/.test(d);
   if (sane(t.recording_date || '')) {
@@ -79,10 +71,10 @@ function renderTapeGrid(list) {
         ${tileMosaic(t)}
         <div class="mt-2 px-0.5">
           <div class="truncate font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${t.label || t.tape_id}</div>
-          <div class="truncate text-theme-xs text-gray-500 dark:text-gray-400">${t.label ? t.tape_id + ' · ' : ''}${t.scene_count} scen${date ? ` · ${date}` : ''}</div>
+          <div class="truncate text-theme-xs text-gray-500 dark:text-gray-400">${t.label ? t.tape_id + ' · ' : ''}${nScen(t.scene_count)}${date ? ` · ${date}` : ''}</div>
         </div>
       </button>`;
-    }).join('') || '<p class="col-span-full text-theme-sm text-gray-400">Brak zarchiwizowanych kaset.</p>';
+    }).join('') || `<p class="col-span-full text-theme-sm text-gray-400">${L('tapes.empty')}</p>`;
   }
   // keep an open detail view fresh
   if (openTapeId) {
@@ -96,8 +88,8 @@ function sceneCard(id, s, hasFull) {
     rec = s.recording || {}, v = s.video || {}, arch = f.archive || {}, prox = f.proxy || {};
   const at = ((s.source || {}).start_frame || 0) / (v.standard === 'NTSC' ? 30000 / 1001 : 25);
   const drops = (s.capture || {}).dropped_frames || 0, disc = ((s.capture || {}).source_discontinuities || []).length;
-  const flags = [drops && `⚠ ${drops} zgub. klatka`, disc && `⚠ ${disc}× nieciągłość`,
-    badYear(rec.datetime) && '⚠ zegar kamery błędny'].filter(Boolean);
+  const flags = [drops && L('flag.dropped', { n: drops }), disc && L('flag.disc', { n: disc }),
+    badYear(rec.datetime) && L('flag.badClock')].filter(Boolean);
   const file = n => `/api/tapes/${enc}/files/${encodeURIComponent(sid)}.${n}`;
   const on = selected.has(sid);
   return `<div data-scene-card="${sid}" class="flex gap-4 rounded-xl border ${on ? 'border-brand-500 bg-brand-50/60 dark:bg-brand-500/[0.08]' : 'border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-white/[0.02]'} p-3">
@@ -108,21 +100,21 @@ function sceneCard(id, s, hasFull) {
     </label>
     <div class="min-w-0 flex-1">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <strong class="text-gray-800 dark:text-white/90">Scena ${s.scene_index}</strong>
-        <span class="font-mono text-theme-xs text-gray-500 dark:text-gray-400">${tc.start || '?'} – ${tc.end || '?'} · ${durTxt(s.frame_count, v.standard)} · ${s.frame_count} kl.</span>
+        <strong class="text-gray-800 dark:text-white/90">${L('scene.n', { n: s.scene_index })}</strong>
+        <span class="font-mono text-theme-xs text-gray-500 dark:text-gray-400">${tc.start || '?'} – ${tc.end || '?'} · ${durTxt(s.frame_count, v.standard)} · ${L('scene.frames', { n: s.frame_count })}</span>
       </div>
       <div class="mt-1 text-theme-xs text-gray-500 dark:text-gray-400">${v.standard || ''} ${v.resolution || ''} ${v.frame_rate || ''} ·
-        nagrano ${rec.datetime ? rec.datetime.replace('T', ' ') : '—'} ·
+        ${L('scene.recorded', { dt: rec.datetime ? rec.datetime.replace('T', ' ') : '—' })} ·
         DV ${mb(arch.size_uncompressed || 0)} → zst ${mb(arch.size_compressed || 0)}${arch.verified_byte_for_byte ? ' ✓' : ''}</div>
       ${flags.length ? `<div class="mt-1 text-theme-xs text-orange-500">${flags.join(' · ')}</div>` : ''}
       <div class="mt-2 flex flex-wrap items-center gap-2 text-theme-xs">
-        ${hasFull ? `<button class="seek ${BTN}" data-seek="${at.toFixed(2)}">⏱ w całej taśmie</button>` : ''}
-        <button class="preview ${BTN}" data-src="${file('mp4')}">▶ Podgląd</button>
-        <button class="fb ${BTN_FB}" data-tape="${id}" data-scene="${sid}">⬇ FB (~90 MB)</button>
-        <button class="repair ${BTN}" data-tape="${id}" data-scene="${sid}" title="Odszumianie + deblock, kodowane z mastera .dv.zst">🧹 Napraw</button>
-        <a class="${LINK}" href="${file('dv.zst')}?dl=1">⬇ DV .dv.zst${arch.size_compressed ? ` (${mb(arch.size_compressed)})` : ''}</a>
-        <a class="${LINK}" href="${file('mp4')}?dl=1">⬇ MP4${prox.size ? ` (${mb(prox.size)})` : ''}</a>
-        <a class="${LINK}" href="${file('json')}?dl=1">⬇ JSON</a>
+        ${hasFull ? `<button class="seek ${BTN}" data-seek="${at.toFixed(2)}">${L('scene.seek')}</button>` : ''}
+        <button class="preview ${BTN}" data-src="${file('mp4')}">${L('scene.preview')}</button>
+        <button class="fb ${BTN_FB}" data-tape="${id}" data-scene="${sid}">${L('scene.fb')}</button>
+        <button class="repair ${BTN}" data-tape="${id}" data-scene="${sid}">${L('scene.repair')}</button>
+        <a class="${LINK}" href="${file('dv.zst')}?dl=1">${L('scene.dv')}${arch.size_compressed ? ` (${mb(arch.size_compressed)})` : ''}</a>
+        <a class="${LINK}" href="${file('mp4')}?dl=1">${L('scene.mp4')}${prox.size ? ` (${mb(prox.size)})` : ''}</a>
+        <a class="${LINK}" href="${file('json')}?dl=1">${L('scene.json')}</a>
       </div>
     </div></div>`;
 }
@@ -135,7 +127,7 @@ async function openTape(id, sceneId) {
   $('#tapeGrid').classList.add('hidden');
   $('#tapeDetail').classList.remove('hidden');
   if (switching || !scenesCache[id]) {
-    $('#tapeDetail').innerHTML = '<p class="text-theme-sm text-gray-400">Wczytywanie…</p>';
+    $('#tapeDetail').innerHTML = `<p class="text-theme-sm text-gray-400">${L('loading')}</p>`;
     try {
       scenesCache[id] = await api(`/api/tapes/${encodeURIComponent(id)}/scenes`);
     } catch (e) { $('#tapeDetail').innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
@@ -191,7 +183,7 @@ function restoreVideos(snap) {
   });
 }
 
-const PL_MON2 = ['stycznia', 'lutego', 'marca', 'kwietnia', 'maja', 'czerwca', 'lipca', 'sierpnia', 'września', 'października', 'listopada', 'grudnia'];
+const PL_MON2 = window.MON_GEN;
 let detailSig = '';
 function renderTapeDetail(t, force) {
   const id = t.tape_id, e = encodeURIComponent(id), full = t.proxy_full;
@@ -204,38 +196,38 @@ function renderTapeDetail(t, force) {
   $('#tapeDetail').dataset.tape = id;
   const snap = snapshotVideos();
   $('#tapeDetail').innerHTML = `
-    ${ft ? `<button id="backToTl" class="mb-2 inline-flex items-center gap-1 text-theme-xs text-gray-500 hover:text-brand-500 dark:text-gray-400">‹ Oś czasu · ${PL_MON2[ft.month - 1]} ${ft.year}</button>` : ''}
+    ${ft ? `<button id="backToTl" class="mb-2 inline-flex items-center gap-1 text-theme-xs text-gray-500 hover:text-brand-500 dark:text-gray-400">${L('fromTimeline', { month: (window.MON_GEN || [])[ft.month - 1], year: ft.year })}</button>` : ''}
     <div class="flex flex-wrap items-center gap-3">
       <h3 class="text-lg font-semibold text-brand-500">${id}</h3>
       ${t.label ? `<span class="rounded bg-gray-100 px-2 py-0.5 text-theme-xs text-gray-700 dark:bg-gray-800 dark:text-gray-200">🏷️ ${t.label}</span>` : ''}
-      <span class="font-mono text-theme-xs text-gray-500 dark:text-gray-400">${t.scene_count ?? scenes.length} scen · ${t.recording_date ? '📅 ' + t.recording_date : (t.capture_completed_at || '').slice(0, 19).replace('T', ' ')}</span>
+      <span class="font-mono text-theme-xs text-gray-500 dark:text-gray-400">${nScen(t.scene_count ?? scenes.length)} · ${t.recording_date ? '📅 ' + t.recording_date : (t.capture_completed_at || '').slice(0, 19).replace('T', ' ')}</span>
     </div>
     <div class="mt-2 flex flex-wrap items-center gap-2 text-theme-xs">
-      <button id="tapeRename" class="${BTN}">✏️ Zmień nazwę</button>
-      <button id="tapeLabel" class="${BTN}">🏷️ Etykieta</button>
-      <button id="tapeDate" class="${BTN}">📅 Data nagrania</button>
+      <button id="tapeRename" class="${BTN}">${L('tape.rename')}</button>
+      <button id="tapeLabel" class="${BTN}">${L('tape.label')}</button>
+      <button id="tapeDate" class="${BTN}">${L('tape.date')}</button>
     </div>
     <div class="tape-tools mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-theme-xs">
-      ${full ? `<button class="fulltape ${BTN_PRIMARY}">▶ Odtwórz całą taśmę${full.size ? ` (${mb(full.size)})` : ''}</button>` : '<span class="text-gray-400">Podgląd całej taśmy powstanie przy następnej archiwizacji.</span>'}
+      ${full ? `<button class="fulltape ${BTN_PRIMARY}">${L('tape.playFull')}${full.size ? ` (${mb(full.size)})` : ''}</button>` : `<span class="text-gray-400">${L('tape.fullSoon')}</span>`}
       <a class="${LINK}" href="/api/tapes/${e}/files/tape.json?dl=1">tape.json</a>
       <a class="${LINK}" href="/api/tapes/${e}/files/tape.sha256?dl=1">tape.sha256</a>
       <a class="${LINK}" href="/api/tapes/${e}/files/capture.log?dl=1">capture.log</a>
       ${full ? `<a class="${LINK}" href="/api/tapes/${e}/files/tape.mp4?dl=1">⬇ tape.mp4</a>` : ''}
-      ${full ? `<button class="fb ${BTN_FB}" data-tape="${id}">⬇ FB cała taśma</button>` : ''}
-      <button class="repair ${BTN}" data-tape="${id}" title="Odszumianie + deblock całej taśmy, kodowane z masterów .dv.zst — może potrwać">🧹 Napraw taśmę</button>
-      <button class="reprobe ${BTN}" data-tape="${id}" title="Policz błędy dekodowania i odcisk każdej sceny — potrzebne do wykrywania duplikatów">🔍 Sonduj jakość</button>
-      <button id="tapeDelete" class="${BTN_DANGER}">🗑 Usuń kasetę</button>
+      ${full ? `<button class="fb ${BTN_FB}" data-tape="${id}">${L('tape.fbFull')}</button>` : ''}
+      <button class="repair ${BTN}" data-tape="${id}">${L('tape.repairFull')}</button>
+      <button class="reprobe ${BTN}" data-tape="${id}">${L('tape.reprobe')}</button>
+      <button id="tapeDelete" class="${BTN_DANGER}">${L('tape.delete')}</button>
     </div>
     <div id="selBar" class="mt-3 hidden flex-wrap items-center gap-3 rounded-xl border border-brand-500/40 bg-brand-50/60 p-3 dark:bg-brand-500/[0.08]">
-      <span class="text-sm">Zaznaczono <b id="selCount">0</b></span>
-      <button id="selDownload" class="${BTN_PRIMARY}">⬇ Pobierz jako jeden film</button>
-      <button id="selFb" class="${BTN_FB}">⬇ FB (jeden film ~90 MB)</button>
-      <button id="selRepair" class="${BTN}">🧹 Napraw (z masterów)</button>
-      <button id="selDelete" class="${BTN_DANGER}">🗑 Usuń zaznaczone</button>
-      <button id="selAll" class="${BTN}">zaznacz wszystkie</button>
-      <button id="selClear" class="${BTN}">wyczyść</button>
+      <span class="text-sm">${L('sel.count')} <b id="selCount">0</b></span>
+      <button id="selDownload" class="${BTN_PRIMARY}">${L('sel.download')}</button>
+      <button id="selFb" class="${BTN_FB}">${L('sel.fb')}</button>
+      <button id="selRepair" class="${BTN}">${L('sel.repair')}</button>
+      <button id="selDelete" class="${BTN_DANGER}">${L('sel.delete')}</button>
+      <button id="selAll" class="${BTN}">${L('sel.all')}</button>
+      <button id="selClear" class="${BTN}">${L('sel.clear')}</button>
     </div>
-    <div id="detailScenes" class="playable mt-4 grid gap-3">${scenes.map(s => sceneCard(id, s, !!full)).join('') || '<p class="text-theme-sm text-gray-400">Brak scen.</p>'}</div>`;
+    <div id="detailScenes" class="playable mt-4 grid gap-3">${scenes.map(s => sceneCard(id, s, !!full)).join('') || `<p class="text-theme-sm text-gray-400">${L('scenes.empty')}</p>`}</div>`;
   restoreVideos(snap);
   syncSelBar();
 }
@@ -269,11 +261,11 @@ async function pollBuild(url, body, btn, label, downloadUrl) {
   try {
     let j = await api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
     while (j.status === 'QUEUED' || j.status === 'RUNNING') {
-      btn.textContent = j.status === 'QUEUED' ? '⏳ w kolejce…' : '⏳ przetwarzanie…';
+      btn.textContent = j.status === 'QUEUED' ? L('build.wait.queued') : L('build.wait.running');
       await new Promise(r => setTimeout(r, 2500));
       j = await api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
     }
-    if (j.status !== 'READY') throw Error(j.error || 'błąd przetwarzania');
+    if (j.status !== 'READY') throw Error(j.error || L('build.fail'));
     const href = downloadUrl && downloadUrl(j);
     if (href) {
       btn.textContent = `${label}${j.size ? ` (${mb(j.size)})` : ''}`;
@@ -308,15 +300,15 @@ async function reloadOpenTape() {
   if (openTapeId) renderTapeDetail(currentTape());
 }
 async function deleteWholeTape(id, count) {
-  if (!confirm(`Usunąć całą kasetę ${id} (${count} scen)?\nWszystkie mastery .dv.zst przepadną BEZPOWROTNIE.`)) return;
-  if (prompt(`Aby potwierdzić skasowanie, wpisz nazwę kasety:\n${id}`) !== id) { alert('Anulowano — nazwa nie zgadza się.'); return; }
+  if (!confirm(L('confirm.deleteTape', { id, n: count }))) return;
+  if (prompt(L('prompt.deleteTapeName', { id })) !== id) { alert(L('alert.nameMismatch')); return; }
   try {
     await api(`/api/tapes/${encodeURIComponent(id)}`, { method: 'DELETE' });
     go('#kasety'); await refresh();
   } catch (e) { alert(e.message); }
 }
 async function renameTape(id) {
-  const nn = (prompt('Nowa nazwa kasety (litery, cyfry, . _ -):', id) || '').trim();
+  const nn = (prompt(L('prompt.rename'), id) || '').trim();
   if (!nn || nn === id) return;
   try {
     const r = await api(`/api/tapes/${encodeURIComponent(id)}/rename`,
@@ -326,7 +318,7 @@ async function renameTape(id) {
 }
 async function editTapeMeta(id, field) {
   const cur = currentTape()[field] || '';
-  const q = field === 'label' ? 'Etykieta / opis kasety (puste = usuń):' : 'Data nagrania RRRR-MM-DD (puste = usuń):';
+  const q = field === 'label' ? L('prompt.label') : L('prompt.date');
   const v = prompt(q, cur);
   if (v === null) return;
   try {
@@ -338,8 +330,8 @@ async function editTapeMeta(id, field) {
 async function deleteSelectedScenes() {
   if (!openTapeId || selected.size === 0) return;
   const n = selected.size;
-  if (!confirm(`Usunąć ${n} zaznaczonych scen z ${openTapeId}?\nMastery .dv.zst tych scen przepadną BEZPOWROTNIE.`)) return;
-  if (!confirm(`Na pewno? Tej operacji NIE DA SIĘ cofnąć.`)) return;
+  if (!confirm(L('confirm.deleteScenes', { n, tape: openTapeId }))) return;
+  if (!confirm(L('confirm.irreversible'))) return;
   try {
     await api(`/api/tapes/${encodeURIComponent(openTapeId)}/scenes`,
       { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenes: [...selected] }) });
@@ -394,11 +386,13 @@ $('#tapeDetail').addEventListener('click', e => {
 const currentTape = () => (window.__tapes || []).find(x => x.tape_id === openTapeId) || { tape_id: openTapeId };
 
 // ============ timeline: years -> months -> scenes (iPhone-Photos style) ============
-const PL_MON_FULL = ['Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec', 'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień'];
+const PL_MON_FULL = window.MON_LONG;
 const tlThumb = t => t && t.scene_id
   ? `<img loading="lazy" class="h-full w-full object-cover" src="/api/tapes/${encodeURIComponent(t.tape_id)}/files/thumbnails/${encodeURIComponent(t.scene_id)}.jpg" alt="">`
   : '<div class="grid h-full w-full place-items-center bg-gray-100 text-gray-300 dark:bg-white/[0.04]">—</div>';
-const nScen = n => `${n} ${n === 1 ? 'scena' : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'sceny' : 'scen')}`;
+const nScen = n => window.i18n.lang === 'pl'
+  ? `${n} ${n === 1 ? 'scena' : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'sceny' : 'scen')}`
+  : `${n} ${n === 1 ? 'scene' : 'scenes'}`;
 let tl = { level: 'years', year: null, month: null, data: null, loading: false };
 
 async function loadTimeline(force) {
@@ -425,11 +419,11 @@ async function renderTimeline() {
         <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(y.thumb)}</div>
         <div class="mt-2 px-0.5"><div class="text-lg font-bold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${y.year}</div>
         <div class="text-theme-xs text-gray-500 dark:text-gray-400">${nScen(y.count)}</div></div>
-      </button>`).join('') || '<p class="col-span-full text-theme-sm text-gray-400">Brak datowanych nagrań. Uzupełnij daty kaset albo poczekaj na odświeżenie indeksu.</p>')
+      </button>`).join('') || `<p class="col-span-full text-theme-sm text-gray-400">${L('tl.noDated')}</p>`)
       + ((tl.data && tl.data.undated) ? `<button data-go="#kasety" class="${TLTILE}">
         <div class="grid aspect-square place-items-center rounded-xl bg-gray-100 text-4xl text-gray-300 dark:bg-white/[0.04]">?</div>
-        <div class="mt-2 px-0.5"><div class="font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">Bez daty</div>
-        <div class="text-theme-xs text-gray-500 dark:text-gray-400">${nScen(tl.data.undated)} · szukaj w Kasetach</div></div></button>` : '');
+        <div class="mt-2 px-0.5"><div class="font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${L('tl.noDate')}</div>
+        <div class="text-theme-xs text-gray-500 dark:text-gray-400">${L('tl.noDateSub', { n: nScen(tl.data.undated) })}</div></div></button>` : '');
     return;
   }
   if (tl.level === 'year') {
@@ -439,12 +433,12 @@ async function renderTimeline() {
       <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(m.thumb)}</div>
       <div class="mt-2 px-0.5"><div class="font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${PL_MON_FULL[m.month - 1]}</div>
       <div class="text-theme-xs text-gray-500 dark:text-gray-400">${nScen(m.count)}</div></div>
-    </button>`).join('') || '<p class="col-span-full text-theme-sm text-gray-400">Brak scen w tym roku.</p>';
+    </button>`).join('') || `<p class="col-span-full text-theme-sm text-gray-400">${L('tl.noScenes')}</p>`;
     return;
   }
   // scenes: each tile opens the tape at that exact scene (preview + downloads)
   view.className = 'p-5';
-  view.innerHTML = '<p class="text-theme-sm text-gray-400">Wczytywanie…</p>';
+  view.innerHTML = `<p class="text-theme-sm text-gray-400">${L('loading')}</p>`;
   let scenes;
   try { scenes = await api(`/api/timeline/${tl.year}/${tl.month}`); }
   catch (e) { view.innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
@@ -455,7 +449,7 @@ async function renderTimeline() {
         <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(s)}</div>
         <div class="mt-1.5 px-0.5">
           <div class="truncate text-theme-xs font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${s.label || s.tape_id}</div>
-          <div class="truncate text-[11px] text-gray-500 dark:text-gray-400">${s.date} · scena ${s.scene_index}</div>
+          <div class="truncate text-[11px] text-gray-500 dark:text-gray-400">${s.date} · ${L('tl.scene', { n: s.scene_index })}</div>
           <div class="truncate font-mono text-[11px] text-gray-400">${tc.start || ''}${tc.end ? ' – ' + tc.end : ''}</div>
         </div>
       </button>`;
@@ -486,36 +480,36 @@ async function loadDuplicates(force) {
 function renderDuplicates() {
   const d = dupCache || { groups: [], unprobed: 0, scenes_indexed: 0 };
   const head = `<div class="mb-4 flex flex-wrap items-center gap-3 text-theme-xs text-gray-500 dark:text-gray-400">
-    <span>${d.groups.length} grup możliwych duplikatów · ${d.scenes_indexed} scen z odciskiem${d.unprobed ? ` · <b class="text-orange-500">${d.unprobed} bez odcisku</b>` : ''}</span>
-    <button id="dupReprobeAll" class="${BTN}">🔍 Sonduj wszystkie taśmy</button>
-    <button id="dupRefresh" class="${BTN}">↻ Odśwież</button></div>`;
+    <span>${L('dup.summary', { g: d.groups.length, n: d.scenes_indexed, unp: d.unprobed ? L('dup.unprobed', { n: d.unprobed }) : '' })}</span>
+    <button id="dupReprobeAll" class="${BTN}">${L('dup.scanAll')}</button>
+    <button id="dupRefresh" class="${BTN}">${L('dup.refresh')}</button></div>`;
   const groups = d.groups.map((g, gi) => `
     <div class="mb-4 rounded-xl border border-gray-200 p-3 dark:border-gray-800">
-      <div class="mb-2 text-theme-xs text-gray-500 dark:text-gray-400">${g.count} wersje tego samego nagrania</div>
+      <div class="mb-2 text-theme-xs text-gray-500 dark:text-gray-400">${L('dup.groupCount', { n: g.count })}</div>
       <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       ${g.members.map((m, mi) => `
         <div class="rounded-lg border ${m.best ? 'border-success-500 bg-success-50/40 dark:bg-success-500/[0.08]' : 'border-gray-200 dark:border-gray-800'} p-2">
           <img loading="lazy" class="mb-2 aspect-video w-full rounded bg-black object-cover"
                src="/api/tapes/${encodeURIComponent(m.tape_id)}/files/thumbnails/${encodeURIComponent(m.scene_id)}.jpg" alt="">
-          <div class="truncate text-theme-xs font-semibold text-gray-800 dark:text-white/90">${m.tape_id} · scena ${m.scene_index}</div>
-          <div class="text-[11px] text-gray-500 dark:text-gray-400">${m.date || '—'} · ${m.frame_count ?? '?'} kl.</div>
+          <div class="truncate text-theme-xs font-semibold text-gray-800 dark:text-white/90">${m.tape_id} · ${L('tl.scene', { n: m.scene_index })}</div>
+          <div class="text-[11px] text-gray-500 dark:text-gray-400">${m.date || '—'} · ${L('dup.frames', { n: m.frame_count ?? '?' })}</div>
           <div class="text-[11px] ${m.error_score ? 'text-orange-500' : 'text-success-600 dark:text-success-400'}">
-            błędy: ${m.error_score ?? '?'}${m.decode_errors != null ? ` · dekod. ${m.decode_errors}, zgub. ${m.dropped_frames || 0}, nieciąg. ${m.discontinuities || 0}` : ''}${m.best ? ' · najlepsza' : ''}</div>
+            ${L('dup.errors', { score: m.error_score ?? '?' })}${m.decode_errors != null ? ' · ' + L('dup.errBreakdown', { d: m.decode_errors, dr: m.dropped_frames || 0, di: m.discontinuities || 0 }) : ''}${m.best ? L('dup.best') : ''}</div>
           <div class="mt-1.5 flex flex-wrap gap-1.5">
-            <button class="dupkeep ${BTN}" data-g="${gi}" data-m="${mi}">Zostaw tę, usuń resztę</button>
-            <a class="${LINK} text-[11px]" href="#kasety/${encodeURIComponent(m.tape_id)}/${encodeURIComponent(m.scene_id)}">podgląd</a>
+            <button class="dupkeep ${BTN}" data-g="${gi}" data-m="${mi}">${L('dup.keep')}</button>
+            <a class="${LINK} text-[11px]" href="#kasety/${encodeURIComponent(m.tape_id)}/${encodeURIComponent(m.scene_id)}">${L('dup.preview')}</a>
           </div>
         </div>`).join('')}
       </div>
-    </div>`).join('') || `<p class="text-theme-sm text-gray-400">Nie znaleziono duplikatów.${d.unprobed ? ' Masz sceny bez odcisku — kliknij „Sonduj wszystkie taśmy", potem odśwież.' : ''}</p>`;
+    </div>`).join('') || `<p class="text-theme-sm text-gray-400">${L('dup.none')}${d.unprobed ? L('dup.noneHint') : ''}</p>`;
   $('#dupView').innerHTML = head + groups;
 }
 async function resolveDuplicate(gi, keepIdx) {
   const g = (dupCache.groups || [])[gi]; if (!g) return;
   const keep = g.members[keepIdx], drop = g.members.filter((_, i) => i !== keepIdx);
-  if (!confirm(`Zostawić wersję z ${keep.tape_id} (błędy: ${keep.error_score ?? '?'}) i usunąć ${drop.length}?\n`
-    + drop.map(m => `• ${m.tape_id} / scena ${m.scene_index} — błędy: ${m.error_score ?? '?'}`).join('\n'))) return;
-  if (!confirm('Na pewno? Mastery .dv.zst usuwanych scen przepadną BEZPOWROTNIE.')) return;
+  if (!confirm(L('dup.confirmKeep', { keep: keep.tape_id, keepScore: keep.error_score ?? '?', n: drop.length,
+      list: drop.map(m => L('dup.confirmItem', { tape: m.tape_id, idx: m.scene_index, score: m.error_score ?? '?' })).join('\n') }))) return;
+  if (!confirm(L('confirm.irreversible'))) return;
   const byTape = {};
   drop.forEach(m => (byTape[m.tape_id] = byTape[m.tape_id] || []).push(m.scene_id));
   try {
@@ -529,7 +523,7 @@ async function resolveDuplicate(gi, keepIdx) {
 $('#dupView').addEventListener('click', async e => {
   if (e.target.id === 'dupRefresh') { loadDuplicates(true); return; }
   if (e.target.id === 'dupReprobeAll') {
-    e.target.disabled = true; e.target.textContent = '⏳ zlecam…';
+    e.target.disabled = true; e.target.textContent = L('build.wait.queued');
     let n = 0;
     try {
       for (const t of (window.__tapes || [])) {
@@ -538,10 +532,10 @@ $('#dupView').addEventListener('click', async e => {
         n++;
       }
     } catch (err) { alert(err.message); }
-    finally { e.target.disabled = false; e.target.textContent = '🔍 Sonduj wszystkie taśmy'; }
+    finally { e.target.disabled = false; e.target.textContent = L('dup.scanAll'); }
     await refresh();
     go('#zadania');            // show the queue that just started
-    alert(`Zlecono sondę dla ${n} taśm — postęp widać w „Zadania". Wyniki pojawią się tu automatycznie po zakończeniu.`);
+    alert(L('dup.reprobeDone', { n }));
     return;
   }
   const k = e.target.closest('.dupkeep');
@@ -550,15 +544,15 @@ $('#dupView').addEventListener('click', async e => {
 
 // ============ jobs ============
 function jobBadge(j, queue) {
-  if (j.stage === 'capture') return ['ZGRYWANIE', 'bg-brand-500 text-white'];
-  if (j.status === 'QUEUED' || queue.includes(j.tape_id)) return ['W KOLEJCE', 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200'];
-  if (j.status === 'COMPLETED') return ['GOTOWE', 'bg-success-50 text-success-700 dark:bg-success-500/15 dark:text-success-400'];
-  if (j.status === 'ERROR') return ['BŁĄD', 'bg-error-50 text-error-700 dark:bg-error-500/15 dark:text-error-400'];
-  if (j.status === 'CANCELLED') return ['PRZERWANE', 'bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300'];
-  return ['PRZETWARZANIE', 'bg-blue-light-50 text-blue-light-700 dark:bg-blue-light-500/15 dark:text-blue-light-400'];
+  if (j.stage === 'capture') return [L('job.badge.capture'), 'bg-brand-500 text-white'];
+  if (j.status === 'QUEUED' || queue.includes(j.tape_id)) return [L('job.badge.queued'), 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200'];
+  if (j.status === 'COMPLETED') return [L('job.badge.done'), 'bg-success-50 text-success-700 dark:bg-success-500/15 dark:text-success-400'];
+  if (j.status === 'ERROR') return [L('job.badge.error'), 'bg-error-50 text-error-700 dark:bg-error-500/15 dark:text-error-400'];
+  if (j.status === 'CANCELLED') return [L('job.badge.cancelled'), 'bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300'];
+  return [L('job.badge.processing'), 'bg-blue-light-50 text-blue-light-700 dark:bg-blue-light-500/15 dark:text-blue-light-400'];
 }
-const BUILD_PL = { reprobe: 'SONDA JAKOŚCI', restore: 'NAPRAWA', share: 'UDOSTĘPNIANIE', concat: 'SKLEJANIE' };
-const BUILD_ST = { QUEUED: 'w kolejce', RUNNING: 'przetwarzanie…', READY: 'gotowe', ERROR: 'błąd' };
+const buildMode = m => L('build.mode.' + m) || m.toUpperCase();
+const buildSt = st => L('build.st.' + st) || st;
 const buildLabel = b => {
   const t = b.token || '';
   if (t.startsWith('REPROBE') || t.startsWith('SEL-') || ['TAPE', 'tape'].includes(t)) return b.tape_id;
@@ -580,9 +574,9 @@ function renderJobs(list, queue, builds) {
       <div class="flex flex-wrap items-center gap-2">
         <span class="${BADGE} ${cls}">${txt}</span>
         <strong class="text-gray-800 dark:text-white/90">${j.tape_id}</strong>
-        <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${stPL(j.status)}${j.current_scene ? ` · ${j.current_scene}` : ''}${j.dropped_frames ? ` · ⚠ ${j.dropped_frames} zgub.` : ''}</span>
+        <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${stPL(j.status)}${j.current_scene ? ` · ${j.current_scene}` : ''}${j.dropped_frames ? ' · ' + L('job.drop', { n: j.dropped_frames }) : ''}</span>
         <span class="ml-auto font-mono text-[11px] text-gray-400">${(j.updated_at || '').slice(11, 19)}</span>
-        ${run ? `<button class="jstop ${BTN}" data-tape="${j.tape_id}">Przerwij</button>` : ''}
+        ${run ? `<button class="jstop ${BTN}" data-tape="${j.tape_id}">${L('job.stop')}</button>` : ''}
       </div>
       ${j.error ? `<div class="mt-1.5 text-theme-xs text-error-500">${j.error}</div>` : ''}
     </div>`;
@@ -594,19 +588,19 @@ function renderJobs(list, queue, builds) {
       : 'bg-blue-light-50 text-blue-light-700 dark:bg-blue-light-500/15 dark:text-blue-light-400';
     return `<div class="rounded-xl border border-gray-200 p-3 dark:border-gray-800">
       <div class="flex flex-wrap items-center gap-2">
-        <span class="${BADGE} ${cls}">${BUILD_PL[b.mode] || b.mode.toUpperCase()}</span>
+        <span class="${BADGE} ${cls}">${buildMode(b.mode)}</span>
         <strong class="text-gray-800 dark:text-white/90">${buildLabel(b)}</strong>
-        <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${BUILD_ST[b.status] || b.status}</span>
+        <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${buildSt(b.status)}</span>
         <span class="ml-auto font-mono text-[11px] text-gray-400">${(b.updated_at || '').slice(11, 19)}</span>
       </div>
       ${b.error ? `<div class="mt-1.5 text-theme-xs text-error-500">${b.error}</div>` : ''}
     </div>`;
   }).join('');
-  $('#jobs').innerHTML = (jobRows + buildRows) || '<p class="text-theme-sm text-gray-400">Brak zadań.</p>';
+  $('#jobs').innerHTML = (jobRows + buildRows) || `<p class="text-theme-sm text-gray-400">${L('jobs.empty')}</p>`;
 }
 $('#jobs').addEventListener('click', async e => {
   const b = e.target.closest('.jstop'); if (!b) return;
-  if (!confirm(`Przerwać zadanie ${b.dataset.tape}?`)) return;
+  if (!confirm(L('job.confirmStop', { tape: b.dataset.tape }))) return;
   try {
     await api('/api/capture/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tape_id: b.dataset.tape }) });
     refresh();
@@ -618,14 +612,14 @@ let logPickSig = '';
 function renderLogs(s) {
   const jobs = s.jobs || [];
   const opts = [];
-  if (s.capture) opts.push(['__capture__', `▶ zgrywanie ${s.capture.tape_id}`]);
+  if (s.capture) opts.push(['__capture__', L('log.opt.capture', { tape: s.capture.tape_id })]);
   jobs.forEach(j => opts.push([j.tape_id, `${j.tape_id} — ${stPL(j.status)}`]));
   const sig = JSON.stringify(opts.map(o => o[0]));
   const pick = $('#logPick');
   if (sig !== logPickSig) {
     logPickSig = sig;
     const cur = pick.value;
-    pick.innerHTML = opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('') || '<option>brak zadań</option>';
+    pick.innerHTML = opts.map(([v, txt]) => `<option value="${v}">${txt}</option>`).join('') || `<option>${L('logs.none')}</option>`;
     if ([...pick.options].some(o => o.value === cur)) pick.value = cur;
   }
   const key = pick.value;
@@ -646,25 +640,25 @@ async function refresh() {
     const [s, d, t] = await Promise.all([api('/api/status'), api('/api/storage'), api('/api/tapes')]);
     window.__tapes = t;
     const c = s.camera, on = c.connected;
-    $('#camPill').textContent = on ? 'KAMERA ONLINE' : 'BRAK KAMERY';
+    $('#camPill').textContent = on ? L('cam.pill.online') : L('cam.pill.offline');
     $('#camPill').className = `inline-flex items-center rounded-full border px-3 py-1.5 text-theme-xs font-medium ${on ? 'border-success-500 text-success-600 dark:text-success-400' : 'border-error-500 text-error-600 dark:text-error-400'}`;
-    $('#stCam').textContent = on ? (c.model_name || 'KAMERA') : 'OFFLINE';
-    $('#stCamSub').textContent = on ? `${c.transport} · ${c.mode === 'manual' ? 'ręczny' : 'auto AV/C'}`
-      : (c.guid ? `guid ${c.guid}` : 'brak urządzenia AV/C');
-    $('#sideCam').textContent = on ? `${c.model_name || 'camera'}\n${c.device || ''}` : 'kamera offline';
+    $('#stCam').textContent = on ? (c.model_name || L('card.camera')) : L('cam.offline');
+    $('#stCamSub').textContent = on ? `${c.transport} · ${c.mode === 'manual' ? L('cam.mode.manual') : L('cam.mode.auto')}`
+      : (c.guid ? L('cam.guid', { x: c.guid }) : L('cam.noDevice'));
+    $('#sideCam').textContent = on ? `${c.model_name || 'camera'}\n${c.device || ''}` : L('cam.side.offline');
 
-    $('#diskPill').textContent = `${gib(d.free)} wolne`;
+    $('#diskPill').textContent = L('disk.free', { x: gib(d.free) });
     $('#stFree').textContent = gib(d.free);
     $('#stBar').style.width = `${100 * d.used / d.total}%`;
-    $('#stHours').textContent = `≈ ${d.estimated_dv_hours} h DV · próg ${gib(d.min_free)}`;
+    $('#stHours').textContent = L('disk.hours', { h: d.estimated_dv_hours, min: gib(d.min_free) });
 
     const active = (s.jobs || []).filter(j => !TERMINAL.has(j.status));
     const bq = (s.compress || []).filter(b => b.status === 'QUEUED' || b.status === 'RUNNING');
     const total = active.length + bq.length;
     $('#stJobs').textContent = total;
-    $('#stJobsSub').textContent = s.processing ? `przetwarzanie ${s.processing.tape_id}`
-      : bq.length ? `${bq.length} w tle (${BUILD_PL[bq[0].mode] ? BUILD_PL[bq[0].mode].toLowerCase() : bq[0].mode}…)`
-      : (active.length ? 'w toku' : 'brak');
+    $('#stJobsSub').textContent = s.processing ? L('jobs.sub.processing', { tape: s.processing.tape_id })
+      : bq.length ? L('jobs.sub.background', { n: bq.length, what: buildMode(bq[0].mode).toLowerCase() })
+      : (active.length ? L('jobs.sub.running') : L('jobs.sub.none'));
     $('#navJobs').textContent = total || '';
     $('#navJobs').hidden = !total;
     $('#stTapes').textContent = t.length;
@@ -681,9 +675,9 @@ async function refresh() {
     if (!avc) { m.checked = true; m.disabled = true; } else m.disabled = false;
 
     const cap = s.capture;
-    $('#capState').textContent = cap ? stPL(cap.status) : 'BEZCZYNNY';
+    $('#capState').textContent = cap ? stPL(cap.status) : L('state.IDLE');
     $('#capLog').textContent = cap ? (cap.logs || '—')
-      : (s.processing ? `W tle: przetwarzanie ${s.processing.tape_id} (${stPL(s.processing.status)})` : 'Brak aktywnego zgrywania.');
+      : (s.processing ? L('capture.background', { tape: s.processing.tape_id, status: stPL(s.processing.status) }) : L('capture.idle'));
     $('#start').disabled = !!cap;
 
     renderJobs(s.jobs || [], s.queue || [], s.compress || []);
@@ -695,7 +689,7 @@ async function refresh() {
     renderTapeGrid(t);
     renderLogs(s);
   } catch (e) {
-    $('#camPill').textContent = 'BŁĄD API'; $('#capLog').textContent = e.message;
+    $('#camPill').textContent = L('apiError'); $('#capLog').textContent = e.message;
   }
 }
 
@@ -715,7 +709,6 @@ $('#cancel').onclick = () => api('/api/capture/stop', { method: 'POST', headers:
 
 // ============ hash router: one section at a time, deep-linkable ============
 const SECTIONS = ['pulpit', 'zadania', 'kasety', 'duplikaty', 'timeline', 'logi', 'info'];
-const SEC_PL = { pulpit: 'Pulpit', zadania: 'Zadania', kasety: 'Kasety', duplikaty: 'Duplikaty', timeline: 'Oś czasu', logi: 'Logi', info: 'Informacje' };
 
 function currentRoute() {
   const parts = location.hash.replace(/^#/, '').split('/').map(decodeURIComponent);
@@ -733,10 +726,10 @@ function renderSubbar() {
   const r = currentRoute(), bar = $('#subbar');
   let html = '';
   if (r.section === 'kasety' && r.tape) {
-    html = `<button data-go="#kasety" class="inline-flex items-center gap-1 text-gray-600 hover:text-brand-500 dark:text-gray-300">← Wszystkie kasety</button>
-      <span class="text-gray-300 dark:text-gray-600">/</span><span class="truncate text-gray-700 dark:text-gray-200">${r.tape}${r.scene ? ' · scena' : ''}</span>`;
+    html = `<button data-go="#kasety" class="inline-flex items-center gap-1 text-gray-600 hover:text-brand-500 dark:text-gray-300">${L('tape.crumbAll')}</button>
+      <span class="text-gray-300 dark:text-gray-600">/</span><span class="truncate text-gray-700 dark:text-gray-200">${r.tape}${r.scene ? ' ' + L('tape.crumbScene') : ''}</span>`;
   } else if (r.section === 'timeline' && r.year) {
-    html = `<button data-go="#timeline" class="text-gray-600 hover:text-brand-500 dark:text-gray-300">Wszystkie lata</button>
+    html = `<button data-go="#timeline" class="text-gray-600 hover:text-brand-500 dark:text-gray-300">${L('tl.crumbAll')}</button>
       <span class="text-gray-300 dark:text-gray-600">/</span>`
       + (r.month
         ? `<button data-go="#timeline/${r.year}" class="text-gray-600 hover:text-brand-500 dark:text-gray-300">${r.year}</button>
@@ -760,7 +753,7 @@ function applyRoute() {
     svg?.classList.toggle('menu-item-icon-active', on);
     svg?.classList.toggle('menu-item-icon-inactive', !on);
   });
-  $('#hdrLoc').textContent = SEC_PL[r.section];
+  $('#hdrLoc').textContent = L('sec.' + r.section);
 
   if (r.section === 'kasety') {
     if (r.tape) openTape(r.tape, r.scene);
@@ -780,5 +773,6 @@ $('#subbar').addEventListener('click', e => {
 });
 addEventListener('hashchange', applyRoute);
 
+const _lp = $('#langPick'); if (_lp) { _lp.value = window.i18n.lang; _lp.addEventListener('change', () => window.i18n.setLang(_lp.value)); }
 refresh().then(() => { if (!location.hash) location.hash = '#pulpit'; applyRoute(); });
 setInterval(refresh, 3000);
