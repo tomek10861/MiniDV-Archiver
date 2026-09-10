@@ -83,17 +83,19 @@ and starts it. Edit `/etc/minidv-archive.env` for configuration.
 
 ```bash
 sudo ./scripts/install.sh            # single process on :8080
-sudo ./scripts/install.sh --split    # grabber + converter + api (127.0.0.1:8080) + nginx UI
+sudo ./scripts/install.sh --split    # grabber + converter + api as separate units
 ```
 
 Both layouts share the same storage and `state/jobs.db`; `--split` just runs the
-loops as separate units (`minidv-grabber`, `minidv-converter`, `minidv-api`) with
-nginx serving `frontend/` and proxying `/api`. Switch back and forth freely — the
-units `Conflicts=` each other.
+loops as separate units (`minidv-grabber`, `minidv-converter`, `minidv-api`), so
+you can restart the api or move the converter without touching a running capture.
+Switch back and forth freely — the units `Conflicts=` each other.
 
-A container UI proxy is also provided (`docker compose up -d`, port 8088); capture
-always stays on the host — passing a FireWire device into a container is less
-reliable than talking to `/dev/fw*` directly.
+The **UI** is a container nginx fronting the api (`docker compose up -d`, port
+8088); `--split` brings it up for you. The api also serves `frontend/` directly on
+:8080, so nginx is optional — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Capture always stays on the host — passing a FireWire device into a container is
+less reliable than talking to `/dev/fw*` directly.
 
 > There is no authentication. Expose it only on a trusted LAN.
 

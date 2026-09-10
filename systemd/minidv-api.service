@@ -10,8 +10,9 @@ User=root
 WorkingDirectory=/opt/minidv-archive
 EnvironmentFile=-/etc/minidv-archive.env
 Environment=PYTHONUNBUFFERED=1
-# only nginx should reach the api directly
-Environment=MINIDV_BIND=127.0.0.1
+# Binds MINIDV_BIND from the env file (default 0.0.0.0). With a bare-metal nginx in
+# the same netns you can set MINIDV_BIND=127.0.0.1; the container ui-proxy reaches
+# the host via host-gateway, so it needs 0.0.0.0 (firewall :8080 to the LAN).
 ExecStart=/usr/bin/python3 -m minidv_archiver.api
 Restart=on-failure
 RestartSec=3

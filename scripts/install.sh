@@ -36,15 +36,18 @@ if [ "$SPLIT" -eq 1 ]; then
                   "$SOURCE_DIR"/systemd/minidv-api.service /etc/systemd/system/
   systemctl daemon-reload
   systemctl enable --now minidv-grabber.service minidv-converter.service minidv-api.service
-  if [ -d /etc/nginx/sites-available ]; then
+  if docker compose version >/dev/null 2>&1 && [ -f "$APP_DIR/compose.yaml" ]; then
+    ( cd "$APP_DIR" && docker compose up -d )   # container nginx on :8088 proxying the api
+    echo "UI via container: http://<host>:8088"
+  elif [ -d /etc/nginx/sites-available ]; then
     install -m 0644 "$SOURCE_DIR/deploy/nginx-minidv.conf" /etc/nginx/sites-available/minidv
     ln -sf ../sites-available/minidv /etc/nginx/sites-enabled/minidv
     nginx -t && systemctl reload nginx
-    echo "nginx UI enabled — front it however you expose this host"
+    echo "UI via bare-metal nginx (serves frontend/, proxies /api)"
   else
-    echo "install nginx and load deploy/nginx-minidv.conf to serve the UI"
+    echo "no nginx found — the api itself serves the UI on :${MINIDV_PORT:-8080}"
   fi
-  echo "split deployment up: grabber + converter + api (127.0.0.1:${MINIDV_PORT:-8080}) + nginx"
+  echo "split deployment up: grabber + converter + api (:${MINIDV_PORT:-8080})"
 else
   systemctl disable --now minidv-grabber.service minidv-converter.service minidv-api.service 2>/dev/null || true
   install -m 0644 "$SOURCE_DIR/systemd/minidv-archive.service" /etc/systemd/system/

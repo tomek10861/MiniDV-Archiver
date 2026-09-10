@@ -28,8 +28,8 @@ a small SQLite job store.
 |---|---|---|---|
 | **grabber** | `python -m minidv_archiver.grabber` | `/dev/fw*` | claims `CREATED` capture jobs, runs `dvgrab`, end-of-tape detection, writes raw DV to `working/<id>/`, hands the job to the converter queue. Holds `state/grabber.lock` (one grabber). Also serves AV/C transport requests the api enqueues. |
 | **converter** | `python -m minidv_archiver.converter` | CPU/disk | drains two queues: processing (`split → zstd master + byte verify → H.264 proxies → tape.json / tape.sha256`) and share/concat re-encodes. |
-| **api** | `python -m minidv_archiver.api` | filesystem, `jobs.db` | HTTP/JSON. Read endpoints hit the filesystem directly. `capture/start|stop` write a job row; `tape/{play,stop,rewind}` enqueue a camera command; `rename` / `meta` / delete are fast filesystem ops guarded by a `tape_busy()` check. Bind to `127.0.0.1` and put nginx in front. |
-| **ui** | nginx | — | serves the static `frontend/` bundle and proxies `/api` to the api process. `frontend/` is plain HTML/JS + vendored TailAdmin — no build step. |
+| **api** | `python -m minidv_archiver.api` | filesystem, `jobs.db` | HTTP/JSON **and** the static `frontend/`. Read endpoints hit the filesystem directly. `capture/start|stop` write a job row; `tape/{play,stop,rewind}` enqueue a camera command; `rename` / `meta` / delete are fast filesystem ops guarded by a `tape_busy()` check. |
+| **ui** | nginx (`compose.yaml`, container on `:8088`) | — | fronts the api. The api already serves `frontend/`, so nginx just proxies everything through (and terminates TLS / adds auth if you want). A bare-metal alternative that serves `frontend/` itself and proxies only `/api` is in [`../deploy/nginx-minidv.conf`](../deploy/nginx-minidv.conf). `frontend/` is plain HTML/JS + vendored TailAdmin — no build step. |
 
 `python -m minidv_archiver.server` (and `minidv-archive.service`) runs **all of the
 above in one process** (`role="all"`): the api in the main thread, the capture and
