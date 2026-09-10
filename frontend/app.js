@@ -1,5 +1,6 @@
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
+const scroller = document.querySelector('.overflow-y-auto');   // the scrolling content column
 const gib = n => `${(n / 1024 ** 3).toFixed(1)} GiB`;
 const mb = n => n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(2)} GB` : `${(n / 1024 ** 2).toFixed(0)} MB`;
 const TERMINAL = new Set(['COMPLETED', 'ERROR', 'CANCELLED']);
@@ -99,7 +100,7 @@ function sceneCard(id, s, hasFull) {
     badYear(rec.datetime) && '⚠ zegar kamery błędny'].filter(Boolean);
   const file = n => `/api/tapes/${enc}/files/${encodeURIComponent(sid)}.${n}`;
   const on = selected.has(sid);
-  return `<div class="flex gap-4 rounded-xl border ${on ? 'border-brand-500 bg-brand-50/60 dark:bg-brand-500/[0.08]' : 'border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-white/[0.02]'} p-3">
+  return `<div data-scene-card="${sid}" class="flex gap-4 rounded-xl border ${on ? 'border-brand-500 bg-brand-50/60 dark:bg-brand-500/[0.08]' : 'border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-white/[0.02]'} p-3">
     <label class="relative shrink-0 cursor-pointer">
       <img loading="lazy" src="/api/tapes/${enc}/files/thumbnails/${encodeURIComponent(sid)}.jpg" alt=""
         class="h-24 w-32 rounded-lg bg-black object-cover ${hasFull ? 'group-[.playable]:cursor-pointer' : ''}">
@@ -125,38 +126,84 @@ function sceneCard(id, s, hasFull) {
     </div></div>`;
 }
 
-async function openTape(id) {
-  openTapeId = id; selected.clear();
+let fromTimeline = null;              // {year, month} when a tape was opened from the timeline
+async function openTape(id, sceneId) {
+  const switching = openTapeId !== id;
+  openTapeId = id;
+  if (switching) { selected.clear(); detailSig = ''; }
   $('#tapeGrid').classList.add('hidden');
   $('#tapeDetail').classList.remove('hidden');
-  $('#tapeBack').classList.remove('hidden');
-  $('#tapeDetail').innerHTML = '<p class="text-theme-sm text-gray-400">Wczytywanie…</p>';
-  try {
-    scenesCache[id] = await api(`/api/tapes/${encodeURIComponent(id)}/scenes`);
-  } catch (e) { $('#tapeDetail').innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
-  const t = (window.__tapes || []).find(x => x.tape_id === id) || { tape_id: id };
-  renderTapeDetail(t, true);
+  if (switching || !scenesCache[id]) {
+    $('#tapeDetail').innerHTML = '<p class="text-theme-sm text-gray-400">Wczytywanie…</p>';
+    try {
+      scenesCache[id] = await api(`/api/tapes/${encodeURIComponent(id)}/scenes`);
+    } catch (e) { $('#tapeDetail').innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
+  }
+  if (openTapeId !== id) return;      // route changed while we awaited
+  renderTapeDetail(currentTape(), true);
+  focusScene(sceneId);
+}
+function focusScene(sid) {
+  const host = $('#tapeDetail');
+  if (!sid) { host.focus({ preventScroll: true }); scroller?.scrollTo({ top: 0 }); return; }
+  requestAnimationFrame(() => {
+    const card = host.querySelector(`[data-scene-card="${CSS.escape(sid)}"]`);
+    if (!card) { scroller?.scrollTo({ top: 0 }); return; }
+    card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    card.classList.add('ring-2', 'ring-brand-500');
+    setTimeout(() => card.classList.remove('ring-2', 'ring-brand-500'), 2200);
+    const pv = card.querySelector('.preview');
+    if (pv && !(card.nextElementSibling && card.nextElementSibling.tagName === 'VIDEO')) pv.click();
+  });
 }
 function closeTape() {
-  openTapeId = null; selected.clear(); detailSig = '';
+  openTapeId = null; selected.clear(); detailSig = ''; fromTimeline = null;
   $('#tapeDetail').dataset.tape = '';
   $('#tapeGrid').classList.remove('hidden');
   $('#tapeDetail').classList.add('hidden');
-  $('#tapeBack').classList.add('hidden');
 }
 
+// preserve any open <video> (scene previews + whole-tape player) across a re-render
+function snapshotVideos() {
+  const host = $('#tapeDetail'), snap = { previews: [], full: null };
+  host.querySelectorAll('#detailScenes > video').forEach(v => {
+    const sid = v.previousElementSibling && v.previousElementSibling.dataset.sceneCard;
+    if (sid) snap.previews.push({ sid, src: v.src, t: v.currentTime, paused: v.paused });
+  });
+  const fv = host.querySelector('video.tapefull');
+  if (fv) snap.full = { t: fv.currentTime, paused: fv.paused };
+  return snap;
+}
+function restoreVideos(snap) {
+  const host = $('#tapeDetail');
+  const resume = (v, s) => {
+    const go = () => { try { v.currentTime = s.t; } catch (_) {} if (!s.paused) v.play().catch(() => {}); };
+    v.readyState >= 1 ? go() : v.addEventListener('loadedmetadata', go, { once: true });
+  };
+  if (snap.full) { tapePlayer(); const fv = host.querySelector('video.tapefull'); if (fv) resume(fv, snap.full); }
+  snap.previews.forEach(p => {
+    const card = host.querySelector(`[data-scene-card="${CSS.escape(p.sid)}"]`);
+    if (!card || (card.nextElementSibling && card.nextElementSibling.tagName === 'VIDEO')) return;
+    const v = document.createElement('video'); v.controls = true; v.preload = 'metadata';
+    v.className = 'mt-2 w-full max-w-2xl rounded-lg bg-black'; v.src = p.src;
+    card.after(v); resume(v, p);
+  });
+}
+
+const PL_MON2 = ['stycznia', 'lutego', 'marca', 'kwietnia', 'maja', 'czerwca', 'lipca', 'sierpnia', 'września', 'października', 'listopada', 'grudnia'];
 let detailSig = '';
 function renderTapeDetail(t, force) {
   const id = t.tape_id, e = encodeURIComponent(id), full = t.proxy_full;
   const scenes = scenesCache[id] || [];
-  // Only rebuild when something actually changed — otherwise the 3 s refresh would
-  // wipe any open <video> the user just started ("preview closes after a second").
+  const ft = fromTimeline && fromTimeline.tape === id ? fromTimeline : null;
   const sig = JSON.stringify([id, t.scene_count, t.label, t.recording_date, !!full,
-    (full || {}).size, scenes.length, [...selected].sort()]);
+    (full || {}).size, scenes.length, [...selected].sort(), ft && [ft.year, ft.month]]);
   if (!force && sig === detailSig && $('#tapeDetail').dataset.tape === id) return;
   detailSig = sig;
   $('#tapeDetail').dataset.tape = id;
+  const snap = snapshotVideos();
   $('#tapeDetail').innerHTML = `
+    ${ft ? `<button id="backToTl" class="mb-2 inline-flex items-center gap-1 text-theme-xs text-gray-500 hover:text-brand-500 dark:text-gray-400">‹ Oś czasu · ${PL_MON2[ft.month - 1]} ${ft.year}</button>` : ''}
     <div class="flex flex-wrap items-center gap-3">
       <h3 class="text-lg font-semibold text-brand-500">${id}</h3>
       ${t.label ? `<span class="rounded bg-gray-100 px-2 py-0.5 text-theme-xs text-gray-700 dark:bg-gray-800 dark:text-gray-200">🏷️ ${t.label}</span>` : ''}
@@ -185,6 +232,7 @@ function renderTapeDetail(t, force) {
       <button id="selClear" class="${BTN}">wyczyść</button>
     </div>
     <div id="detailScenes" class="playable mt-4 grid gap-3">${scenes.map(s => sceneCard(id, s, !!full)).join('') || '<p class="text-theme-sm text-gray-400">Brak scen.</p>'}</div>`;
+  restoreVideos(snap);
   syncSelBar();
 }
 
@@ -251,7 +299,7 @@ async function deleteWholeTape(id, count) {
   if (prompt(`Aby potwierdzić skasowanie, wpisz nazwę kasety:\n${id}`) !== id) { alert('Anulowano — nazwa nie zgadza się.'); return; }
   try {
     await api(`/api/tapes/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    closeTape(); await refresh();
+    go('#kasety'); await refresh();
   } catch (e) { alert(e.message); }
 }
 async function renameTape(id) {
@@ -260,7 +308,7 @@ async function renameTape(id) {
   try {
     const r = await api(`/api/tapes/${encodeURIComponent(id)}/rename`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ new_id: nn }) });
-    openTapeId = r.tape_id; await refresh(); openTape(r.tape_id);
+    await refresh(); go('#kasety/' + encodeURIComponent(r.tape_id));
   } catch (e) { alert(e.message); }
 }
 async function editTapeMeta(id, field) {
@@ -287,11 +335,11 @@ async function deleteSelectedScenes() {
   } catch (e) { alert(e.message); }
 }
 
-$('#tapeBack').onclick = closeTape;
 $('#tapeGrid').addEventListener('click', e => {
-  const tile = e.target.closest('.tile'); if (tile) openTape(tile.dataset.id);
+  const tile = e.target.closest('.tile'); if (tile) go('#kasety/' + encodeURIComponent(tile.dataset.id));
 });
 $('#tapeDetail').addEventListener('click', e => {
+  if (e.target.id === 'backToTl' && fromTimeline) { go('#timeline/' + fromTimeline.year + '/' + fromTimeline.month); return; }
   const cb = e.target.closest('.scenesel');
   if (cb) {
     cb.checked ? selected.add(cb.dataset.scene) : selected.delete(cb.dataset.scene);
@@ -344,36 +392,37 @@ async function loadTimeline(force) {
   renderTimeline();
 }
 
+const TLTILE = 'tltile group rounded-xl border border-gray-200 p-2 text-left transition hover:border-brand-500 hover:shadow-theme-md dark:border-gray-800';
 async function renderTimeline() {
-  const view = $('#tlView'), crumb = $('#tlCrumb');
-  const links = [`<button data-tl="years" class="hover:text-brand-500">Wszystkie lata</button>`];
-  if (tl.level !== 'years') links.push(`<span>/</span><button data-tl="year:${tl.year}" class="hover:text-brand-500">${tl.year}</button>`);
-  if (tl.level === 'scenes') links.push(`<span>/</span><span class="text-gray-700 dark:text-gray-200">${PL_MON_FULL[tl.month - 1]}</span>`);
-  crumb.innerHTML = tl.level === 'years' ? '' : links.join(' ');
+  const view = $('#tlView');
+  tl.level = tl.month ? 'scenes' : tl.year ? 'year' : 'years';
 
   if (tl.level === 'years') {
     const yrs = (tl.data && tl.data.years) || [];
+    view.className = 'grid grid-cols-2 gap-4 p-5 sm:grid-cols-3 lg:grid-cols-4';
     view.innerHTML =
-      (yrs.map(y => `<button data-tl="year:${y.year}" class="tltile group rounded-xl border border-gray-200 p-2 text-left transition hover:border-brand-500 hover:shadow-theme-md dark:border-gray-800">
+      (yrs.map(y => `<button data-go="#timeline/${y.year}" class="${TLTILE}">
         <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(y.thumb)}</div>
         <div class="mt-2 px-0.5"><div class="text-lg font-bold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${y.year}</div>
         <div class="text-theme-xs text-gray-500 dark:text-gray-400">${nScen(y.count)}</div></div>
       </button>`).join('') || '<p class="col-span-full text-theme-sm text-gray-400">Brak datowanych nagrań. Uzupełnij daty kaset albo poczekaj na odświeżenie indeksu.</p>')
-      + ((tl.data && tl.data.undated) ? `<p class="col-span-full mt-2 text-theme-xs text-gray-400">+ ${nScen(tl.data.undated)} bez rozpoznanej daty (widoczne w „Kasety”).</p>` : '');
-    view.className = 'grid grid-cols-2 gap-4 p-5 sm:grid-cols-3 lg:grid-cols-4';
+      + ((tl.data && tl.data.undated) ? `<button data-go="#kasety" class="${TLTILE}">
+        <div class="grid aspect-square place-items-center rounded-xl bg-gray-100 text-4xl text-gray-300 dark:bg-white/[0.04]">?</div>
+        <div class="mt-2 px-0.5"><div class="font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">Bez daty</div>
+        <div class="text-theme-xs text-gray-500 dark:text-gray-400">${nScen(tl.data.undated)} · szukaj w Kasetach</div></div></button>` : '');
     return;
   }
   if (tl.level === 'year') {
-    const y = (tl.data.years || []).find(x => x.year === tl.year) || { months: [] };
-    view.innerHTML = y.months.map(m => `<button data-tl="month:${tl.year}:${m.month}" class="tltile group rounded-xl border border-gray-200 p-2 text-left transition hover:border-brand-500 hover:shadow-theme-md dark:border-gray-800">
+    const y = ((tl.data || {}).years || []).find(x => x.year === tl.year) || { months: [] };
+    view.className = 'grid grid-cols-2 gap-4 p-5 sm:grid-cols-3 lg:grid-cols-4';
+    view.innerHTML = y.months.map(m => `<button data-go="#timeline/${tl.year}/${m.month}" class="${TLTILE}">
       <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(m.thumb)}</div>
       <div class="mt-2 px-0.5"><div class="font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${PL_MON_FULL[m.month - 1]}</div>
       <div class="text-theme-xs text-gray-500 dark:text-gray-400">${nScen(m.count)}</div></div>
-    </button>`).join('');
-    view.className = 'grid grid-cols-2 gap-4 p-5 sm:grid-cols-3 lg:grid-cols-4';
+    </button>`).join('') || '<p class="col-span-full text-theme-sm text-gray-400">Brak scen w tym roku.</p>';
     return;
   }
-  // scenes
+  // scenes: each tile opens the tape at that exact scene (preview + downloads)
   view.className = 'p-5';
   view.innerHTML = '<p class="text-theme-sm text-gray-400">Wczytywanie…</p>';
   let scenes;
@@ -382,7 +431,7 @@ async function renderTimeline() {
   view.innerHTML = `<div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">` +
     scenes.map(s => {
       const tc = s.tc || {};
-      return `<button data-open-tape="${s.tape_id}" class="tltile group rounded-xl border border-gray-200 p-2 text-left transition hover:border-brand-500 hover:shadow-theme-md dark:border-gray-800">
+      return `<button data-open-tape="${encodeURIComponent(s.tape_id)}" data-open-scene="${encodeURIComponent(s.scene_id || '')}" class="${TLTILE}">
         <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(s)}</div>
         <div class="mt-1.5 px-0.5">
           <div class="truncate text-theme-xs font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${s.label || s.tape_id}</div>
@@ -394,23 +443,15 @@ async function renderTimeline() {
 }
 
 $('#tlRefresh').onclick = () => loadTimeline(true);
-$('#tlCrumb').addEventListener('click', e => {
-  const b = e.target.closest('[data-tl]'); if (!b) return;
-  const [k, a] = b.dataset.tl.split(':');
-  if (k === 'years') tl = { ...tl, level: 'years', year: null, month: null };
-  else if (k === 'year') tl = { ...tl, level: 'year', year: +a, month: null };
-  renderTimeline();
-});
 $('#tlView').addEventListener('click', e => {
-  const nav = e.target.closest('[data-tl]');
-  if (nav) {
-    const p = nav.dataset.tl.split(':');
-    if (p[0] === 'year') tl = { ...tl, level: 'year', year: +p[1], month: null };
-    else if (p[0] === 'month') tl = { ...tl, level: 'scenes', year: +p[1], month: +p[2] };
-    renderTimeline(); return;
-  }
+  const nav = e.target.closest('[data-go]');
+  if (nav) { go(nav.dataset.go); return; }
   const ot = e.target.closest('[data-open-tape]');
-  if (ot) { location.hash = '#kasety'; openTape(ot.dataset.openTape); }
+  if (ot) {
+    fromTimeline = { year: tl.year, month: tl.month, tape: decodeURIComponent(ot.dataset.openTape) };
+    const sc = ot.dataset.openScene;
+    go('#kasety/' + ot.dataset.openTape + (sc ? '/' + sc : ''));
+  }
 });
 
 // ============ jobs ============
@@ -469,9 +510,9 @@ function renderLogs(s) {
   const txt = (job && job.logs) || (s.capture ? s.capture.logs : '') || '—';
   const view = $('#logView');
   if (view.textContent !== txt) {
-    const atBottom = $('#logFollow').checked;
+    const nearBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 40;
     view.textContent = txt;
-    if (atBottom) view.scrollTop = view.scrollHeight;
+    if ($('#logFollow').checked && nearBottom) view.scrollTop = view.scrollHeight;
   }
 }
 $('#logPick').addEventListener('change', () => { logPickSig = ''; refresh(); });
@@ -498,8 +539,15 @@ async function refresh() {
     $('#stJobs').textContent = active.length;
     $('#stJobsSub').textContent = s.processing ? `przetwarzanie ${s.processing.tape_id}` : (active.length ? 'w toku' : 'brak');
     $('#navJobs').textContent = active.length || '';
+    $('#navJobs').hidden = !active.length;
     $('#stTapes').textContent = t.length;
     $('#navTapes').textContent = t.length || '';
+    $('#navTapes').hidden = !t.length;
+
+    // timeline is derived from the tape set — refresh it when that changes and it's on screen
+    const tsig = JSON.stringify(t.map(x => [x.tape_id, x.scene_count, x.recording_date, x.label]));
+    if (tapesSig && tsig !== tapesSig && currentRoute().section === 'timeline') { tl.data = null; loadTimeline(false); }
+    tapesSig = tsig;
 
     const avc = !!c.avc_enabled, m = $('#manual');
     $('#avc').hidden = !avc; $('#manualHint').hidden = avc; $('#manualSteps').hidden = avc;
@@ -533,34 +581,71 @@ $('#start').onclick = async () => {
 };
 $('#cancel').onclick = () => api('/api/capture/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(refresh);
 
-// load the timeline when its section is first shown (and on direct #timeline link)
-function maybeLoadTimeline() {
-  const s = $('#timeline'); if (!s) return;
-  const r = s.getBoundingClientRect();
-  if (location.hash === '#timeline' || (r.top < innerHeight && r.bottom > 0)) loadTimeline(false);
-}
-addEventListener('hashchange', maybeLoadTimeline);
-
-// active-nav highlight (TailAdmin menu-item state classes)
+// ============ hash router: one section at a time, deep-linkable ============
 const SECTIONS = ['pulpit', 'zadania', 'kasety', 'timeline', 'logi', 'info'];
-const scroller = document.querySelector('.overflow-y-auto');
-function syncNav() {
-  const y = (scroller?.scrollTop || window.scrollY || 0) + 140;
-  let cur = SECTIONS[0];
-  for (const id of SECTIONS) { const el = document.getElementById(id); if (el && el.offsetTop <= y) cur = id; }
+const SEC_PL = { pulpit: 'Pulpit', zadania: 'Zadania', kasety: 'Kasety', timeline: 'Oś czasu', logi: 'Logi', info: 'Informacje' };
+
+function currentRoute() {
+  const parts = location.hash.replace(/^#/, '').split('/').map(decodeURIComponent);
+  const section = SECTIONS.includes(parts[0]) ? parts[0] : 'pulpit';
+  const r = { section, tape: null, scene: null, year: null, month: null };
+  if (section === 'kasety' && parts[1]) { r.tape = parts[1]; r.scene = parts[2] || null; }
+  if (section === 'timeline' && /^\d{4}$/.test(parts[1] || '')) { r.year = +parts[1]; if (/^\d{1,2}$/.test(parts[2] || '')) r.month = +parts[2]; }
+  return r;
+}
+function go(hash) {
+  if (('#' + hash.replace(/^#/, '')) === location.hash) applyRoute();
+  else location.hash = hash;                       // triggers hashchange -> applyRoute (+ history entry)
+}
+function renderSubbar() {
+  const r = currentRoute(), bar = $('#subbar');
+  let html = '';
+  if (r.section === 'kasety' && r.tape) {
+    html = `<button data-go="#kasety" class="inline-flex items-center gap-1 text-gray-600 hover:text-brand-500 dark:text-gray-300">← Wszystkie kasety</button>
+      <span class="text-gray-300 dark:text-gray-600">/</span><span class="truncate text-gray-700 dark:text-gray-200">${r.tape}${r.scene ? ' · scena' : ''}</span>`;
+  } else if (r.section === 'timeline' && r.year) {
+    html = `<button data-go="#timeline" class="text-gray-600 hover:text-brand-500 dark:text-gray-300">Wszystkie lata</button>
+      <span class="text-gray-300 dark:text-gray-600">/</span>`
+      + (r.month
+        ? `<button data-go="#timeline/${r.year}" class="text-gray-600 hover:text-brand-500 dark:text-gray-300">${r.year}</button>
+           <span class="text-gray-300 dark:text-gray-600">/</span><span class="text-gray-700 dark:text-gray-200">${PL_MON_FULL[r.month - 1]}</span>`
+        : `<span class="text-gray-700 dark:text-gray-200">${r.year}</span>`);
+  }
+  bar.innerHTML = html;
+  bar.classList.toggle('hidden', !html);
+  bar.classList.toggle('flex', !!html);
+}
+let tapesSig = '';
+function applyRoute() {
+  const r = currentRoute();
+  if (r.section !== 'kasety') fromTimeline = null;
+  SECTIONS.forEach(id => $('#' + id).classList.toggle('hidden', id !== r.section));
   $$('.navlink').forEach(a => {
-    const on = a.getAttribute('href') === '#' + cur;
+    const on = a.getAttribute('href') === '#' + r.section;
     a.classList.toggle('menu-item-active', on);
     a.classList.toggle('menu-item-inactive', !on);
     const svg = a.querySelector('svg');
     svg?.classList.toggle('menu-item-icon-active', on);
     svg?.classList.toggle('menu-item-icon-inactive', !on);
   });
-}
-scroller?.addEventListener('scroll', syncNav);
-addEventListener('scroll', syncNav);
-scroller?.addEventListener('scroll', maybeLoadTimeline);
+  $('#hdrLoc').textContent = SEC_PL[r.section];
 
-refresh();
+  if (r.section === 'kasety') {
+    if (r.tape) openTape(r.tape, r.scene);
+    else { closeTape(); scroller?.scrollTo({ top: 0 }); }
+  } else if (r.section === 'timeline') {
+    tl.year = r.year; tl.month = r.month;
+    loadTimeline(false);
+    scroller?.scrollTo({ top: 0 });
+  } else {
+    scroller?.scrollTo({ top: 0 });
+  }
+  renderSubbar();
+}
+$('#subbar').addEventListener('click', e => {
+  const b = e.target.closest('[data-go]'); if (b) go(b.dataset.go);
+});
+addEventListener('hashchange', applyRoute);
+
+refresh().then(() => { if (!location.hash) location.hash = '#pulpit'; applyRoute(); });
 setInterval(refresh, 3000);
-maybeLoadTimeline();
