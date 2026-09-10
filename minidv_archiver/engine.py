@@ -192,7 +192,8 @@ class Engine:
     def _prune_share(self) -> None:
         share = self.config.storage / "tmp" / "share"
         cutoff = time.time() - 2 * 3600
-        for p in share.glob("*.mp4") if share.exists() else []:
+        globs = ("*.mp4", "*.src.dv", "*.join.txt", "*.concat.txt")
+        for p in (q for g in globs for q in share.glob(g)) if share.exists() else []:
             try:
                 if p.stat().st_mtime < cutoff:
                     p.unlink()
@@ -220,26 +221,43 @@ class Engine:
             raise FileNotFoundError(f"nie ma kasety {tape_id}")
         return d
 
-    def start_compress(self, tape_id: str, scene_id: str | None) -> dict:
-        """FB-size re-encode of one scene, or the whole tape (scene_id=None)."""
+    def start_compress(self, tape_id: str, scene_id: str | None, restore: bool = False) -> dict:
+        """FB-size re-encode of one scene / the whole tape (scene_id=None), or —
+        with restore=True — a denoise/repair MP4 built from the DV master(s)."""
         d = self._tape_dir(tape_id)
+        label = (f" · scena {scene_id}" if scene_id else " — cała taśma")
+        if restore:
+            if scene_id is None:
+                srcs = sorted(d.glob("[0-9]*.dv.zst"))
+                if not srcs:
+                    raise FileNotFoundError("brak masterów .dv.zst")
+            else:
+                src = d / f"{scene_id}.dv.zst"
+                if not src.exists():
+                    raise FileNotFoundError(f"nie ma pliku {src.name}")
+                srcs = [src]
+            return self._enqueue_build(tape_id, (scene_id or "TAPE") + "-RES", srcs, "restore",
+                                       f"{tape_id}{label} · naprawiony")
         src = d / ("tape.mp4" if scene_id is None else f"{scene_id}.mp4")
         if not src.exists():
             raise FileNotFoundError(f"nie ma pliku {src.name}")
-        title = f"{tape_id}" + (f" · scena {scene_id}" if scene_id else " — cała taśma")
-        return self._enqueue_build(tape_id, scene_id or "TAPE", [src], "share", title)
+        return self._enqueue_build(tape_id, scene_id or "TAPE", [src], "share", f"{tape_id}{label}")
 
-    def start_selection(self, tape_id: str, scene_ids: list[str], share: bool = False) -> dict:
-        """Join several scenes into one MP4 — lossless stream copy, or a ~FB-size re-encode."""
+    def start_selection(self, tape_id: str, scene_ids: list[str], share: bool = False,
+                        restore: bool = False) -> dict:
+        """Join several scenes into one MP4 — stream copy, ~FB-size re-encode, or a
+        repair pass from those scenes' DV masters (restore=True)."""
         d = self._tape_dir(tape_id)
         ids = sorted({s for s in scene_ids if re.fullmatch(r"[0-9A-Za-z._-]{1,80}", s or "")})
-        srcs = [d / f"{s}.mp4" for s in ids]
+        suffix = ".dv.zst" if restore else ".mp4"
+        srcs = [d / f"{s}{suffix}" for s in ids]
         missing = [p.name for p in srcs if not p.exists()]
         if not srcs or missing:
             raise FileNotFoundError("brak scen: " + ", ".join(missing) if missing else "pusta lista scen")
-        token = "SEL-" + hashlib.sha1("\n".join(ids).encode()).hexdigest()[:12] + ("-FB" if share else "")
-        return self._enqueue_build(tape_id, token, srcs, "share" if share else "concat",
-                                   f"{tape_id} · {len(ids)} scen")
+        tag = "-RES" if restore else "-FB" if share else ""
+        token = "SEL-" + hashlib.sha1("\n".join(ids).encode()).hexdigest()[:12] + tag
+        mode = "restore" if restore else "share" if share else "concat"
+        return self._enqueue_build(tape_id, token, srcs, mode, f"{tape_id} · {len(ids)} scen")
 
     def _compress_worker(self) -> None:
         poll = self.role != "all"
@@ -258,12 +276,16 @@ class Engine:
                     continue
             out = Path(build["path"])
             try:
-                from .media import compress_share, concat_mp4
+                from .media import compress_share, concat_mp4, restore_mp4
                 out.parent.mkdir(parents=True, exist_ok=True)
                 self._prune_share()
                 srcs = [Path(s) for s in build["sources"]]
                 if build["mode"] == "concat":
                     concat_mp4(srcs, out, meta={"title": build["title"]}, log=lambda m: None)
+                elif build["mode"] == "restore":
+                    restore_mp4(srcs, out, vf=self.config.restore_filters, crf=self.config.restore_crf,
+                                preset=self.config.restore_preset, decimate=self.config.restore_decimate,
+                                meta={"title": build["title"]}, log=lambda m: None)
                 else:
                     compress_share(srcs if len(srcs) > 1 else srcs[0], out, max_mb=self.config.share_max_mb,
                                    crf=self.config.share_crf, preset=self.config.share_preset,

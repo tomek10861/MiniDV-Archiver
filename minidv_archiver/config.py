@@ -41,6 +41,16 @@ class Config:
     share_max_mb: int = int(os.getenv("MINIDV_SHARE_MAX_MB", "90"))
     share_crf: int = int(os.getenv("MINIDV_SHARE_CRF", "23"))
     share_preset: str = os.getenv("MINIDV_SHARE_PRESET", "veryfast")
+    # Optional "restore" variant: a denoise/repair MP4 encoded from the DV master(s),
+    # never the proxy. Tune the whole filter chain here (bwdif does the deinterlace).
+    restore_filters: str = os.getenv(
+        "MINIDV_RESTORE_FILTERS",
+        "bwdif=mode=send_field:parity=bff:deint=all,atadenoise,deblock=filter=strong:block=8")
+    restore_crf: int = int(os.getenv("MINIDV_RESTORE_CRF", "18"))
+    restore_preset: str = os.getenv("MINIDV_RESTORE_PRESET", "medium")
+    # mpdecimate: drop duplicated frames (dvgrab fills capture drops with repeats) —
+    # off by default because it makes the stream VFR.
+    restore_decimate: bool = os.getenv("MINIDV_RESTORE_DECIMATE", "0") == "1"
     bind: str = os.getenv("MINIDV_BIND", "0.0.0.0")
     port: int = int(os.getenv("MINIDV_PORT", "8080"))
     # How often the background pass refreshes the tape/scene index (state/jobs.db);

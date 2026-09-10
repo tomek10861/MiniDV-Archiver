@@ -119,6 +119,7 @@ function sceneCard(id, s, hasFull) {
         ${hasFull ? `<button class="seek ${BTN}" data-seek="${at.toFixed(2)}">⏱ w całej taśmie</button>` : ''}
         <button class="preview ${BTN}" data-src="${file('mp4')}">▶ Podgląd</button>
         <button class="fb ${BTN_FB}" data-tape="${id}" data-scene="${sid}">⬇ FB (~90 MB)</button>
+        <button class="repair ${BTN}" data-tape="${id}" data-scene="${sid}" title="Odszumianie + deblock, kodowane z mastera .dv.zst">🧹 Napraw</button>
         <a class="${LINK}" href="${file('dv.zst')}?dl=1">⬇ DV .dv.zst${arch.size_compressed ? ` (${mb(arch.size_compressed)})` : ''}</a>
         <a class="${LINK}" href="${file('mp4')}?dl=1">⬇ MP4${prox.size ? ` (${mb(prox.size)})` : ''}</a>
         <a class="${LINK}" href="${file('json')}?dl=1">⬇ JSON</a>
@@ -221,12 +222,14 @@ function renderTapeDetail(t, force) {
       <a class="${LINK}" href="/api/tapes/${e}/files/capture.log?dl=1">capture.log</a>
       ${full ? `<a class="${LINK}" href="/api/tapes/${e}/files/tape.mp4?dl=1">⬇ tape.mp4</a>` : ''}
       ${full ? `<button class="fb ${BTN_FB}" data-tape="${id}">⬇ FB cała taśma</button>` : ''}
+      <button class="repair ${BTN}" data-tape="${id}" title="Odszumianie + deblock całej taśmy, kodowane z masterów .dv.zst — może potrwać">🧹 Napraw taśmę</button>
       <button id="tapeDelete" class="${BTN_DANGER}">🗑 Usuń kasetę</button>
     </div>
     <div id="selBar" class="mt-3 hidden flex-wrap items-center gap-3 rounded-xl border border-brand-500/40 bg-brand-50/60 p-3 dark:bg-brand-500/[0.08]">
       <span class="text-sm">Zaznaczono <b id="selCount">0</b></span>
       <button id="selDownload" class="${BTN_PRIMARY}">⬇ Pobierz jako jeden film</button>
       <button id="selFb" class="${BTN_FB}">⬇ FB (jeden film ~90 MB)</button>
+      <button id="selRepair" class="${BTN}">🧹 Napraw (z masterów)</button>
       <button id="selDelete" class="${BTN_DANGER}">🗑 Usuń zaznaczone</button>
       <button id="selAll" class="${BTN}">zaznacz wszystkie</button>
       <button id="selClear" class="${BTN}">wyczyść</button>
@@ -275,16 +278,20 @@ async function pollBuild(url, body, btn, label, downloadUrl) {
   } catch (e) { alert(e.message); btn.textContent = label; }
   finally { btn.disabled = false; }
 }
-function fbCompress(btn) {
+function fbCompress(btn) { variantCompress(btn, { share: true }); }
+function repairCompress(btn) { variantCompress(btn, { restore: true }); }
+function variantCompress(btn, opt) {
   const tape = btn.dataset.tape, scene = btn.dataset.scene || null, label = btn.textContent;
   const base = scene ? `/api/tapes/${encodeURIComponent(tape)}/scenes/${encodeURIComponent(scene)}` : `/api/tapes/${encodeURIComponent(tape)}`;
-  const name = scene ? encodeURIComponent(scene) + '.mp4' : 'TAPE.mp4';
-  pollBuild(base + '/compress', null, btn, label, () => `/api/tapes/${encodeURIComponent(tape)}/compressed/${name}`);
+  const tok = (scene ? encodeURIComponent(scene) : 'TAPE') + (opt.restore ? '-RES' : '');
+  pollBuild(base + '/compress', opt.restore ? { restore: true } : null, btn, label,
+    () => `/api/tapes/${encodeURIComponent(tape)}/compressed/${tok}.mp4`);
 }
-function downloadSelection(btn, share) {
+function downloadSelection(btn, opt) {
   if (!openTapeId || selected.size === 0) return;
   const tape = openTapeId, scenes = [...selected], label = btn.textContent;
-  pollBuild(`/api/tapes/${encodeURIComponent(tape)}/compress`, { scenes, share: !!share }, btn, label,
+  pollBuild(`/api/tapes/${encodeURIComponent(tape)}/compress`,
+    { scenes, share: !!(opt && opt.share), restore: !!(opt && opt.restore) }, btn, label,
     j => `/api/tapes/${encodeURIComponent(tape)}/compressed/${j.token}.mp4`);
 }
 
@@ -348,13 +355,15 @@ $('#tapeDetail').addEventListener('click', e => {
   }
   if (e.target.id === 'selClear') { selected.clear(); renderTapeDetail(currentTape()); return; }
   if (e.target.id === 'selAll') { (scenesCache[openTapeId] || []).forEach(s => selected.add(s.scene_id)); renderTapeDetail(currentTape()); return; }
-  if (e.target.id === 'selDownload') { downloadSelection(e.target, false); return; }
-  if (e.target.id === 'selFb') { downloadSelection(e.target, true); return; }
+  if (e.target.id === 'selDownload') { downloadSelection(e.target, {}); return; }
+  if (e.target.id === 'selFb') { downloadSelection(e.target, { share: true }); return; }
+  if (e.target.id === 'selRepair') { downloadSelection(e.target, { restore: true }); return; }
   if (e.target.id === 'selDelete') { deleteSelectedScenes(); return; }
   if (e.target.id === 'tapeDelete') { deleteWholeTape(openTapeId, (scenesCache[openTapeId] || []).length); return; }
   if (e.target.id === 'tapeRename') { renameTape(openTapeId); return; }
   if (e.target.id === 'tapeLabel') { editTapeMeta(openTapeId, 'label'); return; }
   if (e.target.id === 'tapeDate') { editTapeMeta(openTapeId, 'recording_date'); return; }
+  const rp = e.target.closest('.repair'); if (rp) { repairCompress(rp); return; }
   const fb = e.target.closest('.fb'); if (fb) { fbCompress(fb); return; }
   if (e.target.closest('.fulltape')) {
     const v = $('#tapeDetail').querySelector('video.tapefull');

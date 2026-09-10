@@ -169,13 +169,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(ENGINE.stop(self.body().get("tape_id")))
             cparts = path.strip("/").split("/")
             if len(cparts) >= 4 and cparts[:2] == ["api", "tapes"] and cparts[-1] == "compress":
-                if len(cparts) == 6 and cparts[3] == "scenes":
-                    return self.json(ENGINE.start_compress(cparts[2], cparts[4]), 202)
                 data = self.body()
+                restore = bool(data.get("restore"))
+                if len(cparts) == 6 and cparts[3] == "scenes":
+                    return self.json(ENGINE.start_compress(cparts[2], cparts[4], restore=restore), 202)
                 scenes = data.get("scenes")
                 if isinstance(scenes, list) and scenes:
-                    return self.json(ENGINE.start_selection(cparts[2], scenes, bool(data.get("share"))), 202)
-                return self.json(ENGINE.start_compress(cparts[2], None), 202)
+                    return self.json(ENGINE.start_selection(cparts[2], scenes, bool(data.get("share")),
+                                                            restore=restore), 202)
+                return self.json(ENGINE.start_compress(cparts[2], None, restore=restore), 202)
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "rename":
                 return self.json(ENGINE.rename_tape(cparts[2], self.body().get("new_id", "")))
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "meta":

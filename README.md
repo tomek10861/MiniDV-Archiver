@@ -47,6 +47,10 @@ whole-tape review file, thumbnails, JSON metadata) is a derivative you can regen
 - **Share export**: an on-demand "⬇ FB" button re-encodes a scene (or the whole
   tape) to a ~90 MB, same-resolution MP4 for Messenger/Facebook, then hands you the
   file. Temporary, one at a time, auto-pruned.
+- **Restore variant**: an optional "🧹 Napraw" button builds a denoise/repair MP4
+  **decoded from the DV master** (not the proxy) — `bwdif` deinterlace with the
+  probed field parity, then `atadenoise` + `deblock` (whole chain configurable via
+  `MINIDV_RESTORE_FILTERS`). Master and normal proxy are never touched.
 
 Never sends a `RECORD` opcode. The tape is treated as read-only.
 

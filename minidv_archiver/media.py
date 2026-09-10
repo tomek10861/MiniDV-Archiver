@@ -125,13 +125,41 @@ def scene_metadata(tape_id: str, index: int, dt: str | None, dt_source: str,
 
 
 def encode_mp4(source: Path, target: Path, interlaced: bool, log, preset: str = "medium",
-               meta: dict | None = None) -> None:
+               meta: dict | None = None, top_field_first: bool | None = None) -> None:
     cmd = ["ffmpeg", "-y", "-v", "warning", "-i", str(source), "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264",
            "-preset", preset, "-crf", "16", "-pix_fmt", "yuv420p"]
     if interlaced:
-        cmd += ["-vf", "bwdif=mode=send_field:parity=auto:deint=interlaced"]
+        # DV is always bottom-field-first; pass the probed parity explicitly rather
+        # than trusting bwdif's "auto" (a wrong guess = juddery motion).
+        parity = "tff" if top_field_first else "bff" if top_field_first is False else "auto"
+        cmd += ["-vf", f"bwdif=mode=send_field:parity={parity}:deint=interlaced"]
     cmd += ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"] + _meta_args(meta) + [str(target)]
     run(cmd, log=log)
+
+
+def restore_mp4(sources: list[Path], target: Path, *, vf: str, crf: int, preset: str,
+                decimate: bool = False, meta: dict | None = None, log=None) -> None:
+    """Denoise / repair variant — decoded from the DV master(s), filtered, re-encoded.
+    `sources` are .dv.zst archive paths (raw DV concatenates, so several = one pass)."""
+    global NICE_PREFIX
+    NICE_PREFIX = ["nice", "-n", "10"] if shutil.which("nice") else []
+    raw = target.with_suffix(".src.dv")
+    try:
+        with raw.open("wb") as out:
+            for z in sources:
+                if subprocess.run(["zstd", "-q", "-dc", str(z)], stdout=out).returncode:
+                    raise RuntimeError(f"zstd decompression failed: {z}")
+        chain = f"mpdecimate,{vf}" if decimate else vf
+        cmd = ["ffmpeg", "-y", "-v", "warning", "-f", "dv", "-i", str(raw), "-map", "0:v:0", "-map", "0:a?",
+               "-vf", chain]
+        if decimate:
+            cmd += ["-fps_mode", "vfr", "-af", "aresample=async=1"]
+        cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"] + _meta_args(meta) + [str(target)]
+        run(cmd, log=log)
+    finally:
+        raw.unlink(missing_ok=True)
+        NICE_PREFIX = []
 
 
 def compress_share(source, target: Path, *, max_mb: int, crf: int, preset: str,
@@ -233,7 +261,8 @@ def _process_capture(capture: Path, tape_id: str, storage: Path, zstd_level: int
         timecode_end = last_frame_timecode(scene, frame_size, storage / "tmp")
         state("ENCODING_MP4", scene_id)
         encode_mp4(scene, proxy, interlaced, log, mp4_preset,
-                   scene_metadata(tape_id, index, dt, dt_source, timecode_start, timecode_end))
+                   scene_metadata(tape_id, index, dt, dt_source, timecode_start, timecode_end),
+                   top_field_first=top_first)
         state("VERIFYING_MP4", scene_id)
         proxy_probe = ffprobe(proxy)
         if not proxy_probe.get("streams"):

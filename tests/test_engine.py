@@ -216,6 +216,46 @@ def test_start_compress_registers_job_and_serves_when_ready(tmp_path, monkeypatc
     assert pathlib.Path(done["path"]).read_bytes() == b"small-mp4"
 
 
+def test_start_compress_restore_builds_from_the_dv_masters(tmp_path, monkeypatch):
+    import minidv_archiver.media as mm
+    seen = {}
+
+    def fake_restore(sources, out, **k):
+        seen["sources"] = [pathlib.Path(s).name for s in sources]
+        seen["vf"] = k.get("vf")
+        pathlib.Path(out).write_bytes(b"restored")
+
+    monkeypatch.setattr(mm, "restore_mp4", fake_restore)
+    eng = _engine(tmp_path)
+    td = eng.config.tapes / "TAPE-2"
+    td.mkdir(parents=True)
+    (td / "tape.json").write_text("{}")
+    (td / "0001_a.dv.zst").write_bytes(b"m1")
+    (td / "0002_b.dv.zst").write_bytes(b"m2")
+    (td / "0001_a.mp4").write_bytes(b"proxy")          # must NOT be picked for restore
+
+    j = eng.start_compress("TAPE-2", "0001_a", restore=True)
+    assert j["token"] == "0001_a-RES" and j["mode"] == "restore"
+    for _ in range(100):
+        if eng.compress_status("TAPE-2", "0001_a-RES")["status"] in ("READY", "ERROR"):
+            break
+        time.sleep(0.05)
+    done = eng.compress_status("TAPE-2", "0001_a-RES")
+    assert done["status"] == "READY" and pathlib.Path(done["path"]).read_bytes() == b"restored"
+    assert seen["sources"] == ["0001_a.dv.zst"]         # the master, not the proxy
+    assert "bwdif" in seen["vf"] and "atadenoise" in seen["vf"]
+
+    # whole tape -> all masters, sorted
+    jt = eng.start_compress("TAPE-2", None, restore=True)
+    assert jt["token"] == "TAPE-RES"
+    for _ in range(100):
+        if eng.compress_status("TAPE-2", "TAPE-RES")["status"] in ("READY", "ERROR"):
+            break
+        time.sleep(0.05)
+    assert eng.compress_status("TAPE-2", "TAPE-RES")["status"] == "READY"
+    assert seen["sources"] == ["0001_a.dv.zst", "0002_b.dv.zst"]
+
+
 def test_start_selection_concatenates_chosen_scenes(tmp_path, monkeypatch):
     import minidv_archiver.media as mm
     monkeypatch.setattr(mm, "concat_mp4",
