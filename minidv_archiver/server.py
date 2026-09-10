@@ -84,8 +84,12 @@ class Handler(BaseHTTPRequestHandler):
                 job = ENGINE.job_by_ref(path.rsplit("/", 1)[-1])
                 return self.json(job or {"error": "not found"}, 200 if job else 404)
             if path == "/api/tapes":
-                return self.json([json.loads(p.read_text()) for p in sorted(CONFIG.tapes.glob("*/tape.json"))])
+                return self.json(ENGINE.tapes())
+            if path == "/api/timeline":
+                return self.json(ENGINE.timeline())
             parts = path.strip("/").split("/")
+            if len(parts) == 4 and parts[:2] == ["api", "timeline"] and parts[2].isdigit() and parts[3].isdigit():
+                return self.json(ENGINE.timeline_month(int(parts[2]), int(parts[3])))
             if len(parts) >= 5 and parts[:2] == ["api", "tapes"] and parts[3] == "files":
                 target = archive_file(parts[2], "/".join(parts[4:]))
                 if not target:

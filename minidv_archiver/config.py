@@ -43,6 +43,9 @@ class Config:
     share_preset: str = os.getenv("MINIDV_SHARE_PRESET", "veryfast")
     bind: str = os.getenv("MINIDV_BIND", "0.0.0.0")
     port: int = int(os.getenv("MINIDV_PORT", "8080"))
+    # How often the background pass refreshes the tape/scene index (state/jobs.db);
+    # unchanged tapes are skipped, so this stays cheap even with thousands of them.
+    index_interval: int = int(os.getenv("MINIDV_INDEX_INTERVAL", "300"))
     # AV/C transport control (auto PLAY/STOP/REW). On by default — most decks and
     # camcorders handle it fine. Set MINIDV_ALLOW_FCP=0 for cameras whose AV/C stack
     # is flaky and resets the 1394 bus on FCP (e.g. Sony DCR-PC2E) -> manual PLAY/STOP.

@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS cam_commands (
     result     TEXT,
     created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS library (
+    tape_id    TEXT PRIMARY KEY,
+    source_sig TEXT,
+    indexed_at TEXT,
+    payload    TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 """
 
@@ -271,6 +277,38 @@ class JobStore:
             self._conn.execute("UPDATE builds SET status='RUNNING', updated_at=?, payload=? WHERE key=?",
                                (build["updated_at"], json.dumps(build), build["key"]))
             return build
+
+    # ---- tape / scene index (rebuilt periodically; keeps /api/tapes + timeline fast) ----
+    def put_index(self, tape_id: str, sig: str, doc: dict) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO library (tape_id, source_sig, indexed_at, payload) VALUES (?,?,?,?) "
+                "ON CONFLICT(tape_id) DO UPDATE SET source_sig=excluded.source_sig, "
+                "indexed_at=excluded.indexed_at, payload=excluded.payload",
+                (tape_id, sig, now(), json.dumps(doc)))
+
+    def get_index(self, tape_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT payload FROM library WHERE tape_id=?", (tape_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def index_sig(self, tape_id: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute("SELECT source_sig FROM library WHERE tape_id=?", (tape_id,)).fetchone()
+        return row[0] if row else None
+
+    def list_index(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT payload FROM library ORDER BY tape_id").fetchall()
+        return [json.loads(r[0]) for r in rows]
+
+    def index_tape_ids(self) -> set[str]:
+        with self._lock:
+            return {r[0] for r in self._conn.execute("SELECT tape_id FROM library")}
+
+    def delete_index(self, tape_id: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM library WHERE tape_id=?", (tape_id,))
 
     # ---- camera transport requests (api -> grabber) --------------------
     def enqueue_cam_command(self, name: str) -> int:

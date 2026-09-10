@@ -325,6 +325,94 @@ $('#tapeDetail').addEventListener('click', e => {
 });
 const currentTape = () => (window.__tapes || []).find(x => x.tape_id === openTapeId) || { tape_id: openTapeId };
 
+// ============ timeline: years -> months -> scenes (iPhone-Photos style) ============
+const PL_MON_FULL = ['Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec', 'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień'];
+const tlThumb = t => t && t.scene_id
+  ? `<img loading="lazy" class="h-full w-full object-cover" src="/api/tapes/${encodeURIComponent(t.tape_id)}/files/thumbnails/${encodeURIComponent(t.scene_id)}.jpg" alt="">`
+  : '<div class="grid h-full w-full place-items-center bg-gray-100 text-gray-300 dark:bg-white/[0.04]">—</div>';
+const nScen = n => `${n} ${n === 1 ? 'scena' : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'sceny' : 'scen')}`;
+let tl = { level: 'years', year: null, month: null, data: null, loading: false };
+
+async function loadTimeline(force) {
+  if (tl.loading) return;
+  tl.loading = true;
+  if (force || !tl.data) {
+    try { tl.data = await api('/api/timeline'); }
+    catch (e) { $('#tlView').innerHTML = `<p class="text-error-500">${e.message}</p>`; tl.loading = false; return; }
+  }
+  tl.loading = false;
+  renderTimeline();
+}
+
+async function renderTimeline() {
+  const view = $('#tlView'), crumb = $('#tlCrumb');
+  const links = [`<button data-tl="years" class="hover:text-brand-500">Wszystkie lata</button>`];
+  if (tl.level !== 'years') links.push(`<span>/</span><button data-tl="year:${tl.year}" class="hover:text-brand-500">${tl.year}</button>`);
+  if (tl.level === 'scenes') links.push(`<span>/</span><span class="text-gray-700 dark:text-gray-200">${PL_MON_FULL[tl.month - 1]}</span>`);
+  crumb.innerHTML = tl.level === 'years' ? '' : links.join(' ');
+
+  if (tl.level === 'years') {
+    const yrs = (tl.data && tl.data.years) || [];
+    view.innerHTML =
+      (yrs.map(y => `<button data-tl="year:${y.year}" class="tltile group rounded-xl border border-gray-200 p-2 text-left transition hover:border-brand-500 hover:shadow-theme-md dark:border-gray-800">
+        <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(y.thumb)}</div>
+        <div class="mt-2 px-0.5"><div class="text-lg font-bold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${y.year}</div>
+        <div class="text-theme-xs text-gray-500 dark:text-gray-400">${nScen(y.count)}</div></div>
+      </button>`).join('') || '<p class="col-span-full text-theme-sm text-gray-400">Brak datowanych nagrań. Uzupełnij daty kaset albo poczekaj na odświeżenie indeksu.</p>')
+      + ((tl.data && tl.data.undated) ? `<p class="col-span-full mt-2 text-theme-xs text-gray-400">+ ${nScen(tl.data.undated)} bez rozpoznanej daty (widoczne w „Kasety”).</p>` : '');
+    view.className = 'grid grid-cols-2 gap-4 p-5 sm:grid-cols-3 lg:grid-cols-4';
+    return;
+  }
+  if (tl.level === 'year') {
+    const y = (tl.data.years || []).find(x => x.year === tl.year) || { months: [] };
+    view.innerHTML = y.months.map(m => `<button data-tl="month:${tl.year}:${m.month}" class="tltile group rounded-xl border border-gray-200 p-2 text-left transition hover:border-brand-500 hover:shadow-theme-md dark:border-gray-800">
+      <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(m.thumb)}</div>
+      <div class="mt-2 px-0.5"><div class="font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${PL_MON_FULL[m.month - 1]}</div>
+      <div class="text-theme-xs text-gray-500 dark:text-gray-400">${nScen(m.count)}</div></div>
+    </button>`).join('');
+    view.className = 'grid grid-cols-2 gap-4 p-5 sm:grid-cols-3 lg:grid-cols-4';
+    return;
+  }
+  // scenes
+  view.className = 'p-5';
+  view.innerHTML = '<p class="text-theme-sm text-gray-400">Wczytywanie…</p>';
+  let scenes;
+  try { scenes = await api(`/api/timeline/${tl.year}/${tl.month}`); }
+  catch (e) { view.innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
+  view.innerHTML = `<div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">` +
+    scenes.map(s => {
+      const tc = s.tc || {};
+      return `<button data-open-tape="${s.tape_id}" class="tltile group rounded-xl border border-gray-200 p-2 text-left transition hover:border-brand-500 hover:shadow-theme-md dark:border-gray-800">
+        <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(s)}</div>
+        <div class="mt-1.5 px-0.5">
+          <div class="truncate text-theme-xs font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${s.label || s.tape_id}</div>
+          <div class="truncate text-[11px] text-gray-500 dark:text-gray-400">${s.date} · scena ${s.scene_index}</div>
+          <div class="truncate font-mono text-[11px] text-gray-400">${tc.start || ''}${tc.end ? ' – ' + tc.end : ''}</div>
+        </div>
+      </button>`;
+    }).join('') + '</div>';
+}
+
+$('#tlRefresh').onclick = () => loadTimeline(true);
+$('#tlCrumb').addEventListener('click', e => {
+  const b = e.target.closest('[data-tl]'); if (!b) return;
+  const [k, a] = b.dataset.tl.split(':');
+  if (k === 'years') tl = { ...tl, level: 'years', year: null, month: null };
+  else if (k === 'year') tl = { ...tl, level: 'year', year: +a, month: null };
+  renderTimeline();
+});
+$('#tlView').addEventListener('click', e => {
+  const nav = e.target.closest('[data-tl]');
+  if (nav) {
+    const p = nav.dataset.tl.split(':');
+    if (p[0] === 'year') tl = { ...tl, level: 'year', year: +p[1], month: null };
+    else if (p[0] === 'month') tl = { ...tl, level: 'scenes', year: +p[1], month: +p[2] };
+    renderTimeline(); return;
+  }
+  const ot = e.target.closest('[data-open-tape]');
+  if (ot) { location.hash = '#kasety'; openTape(ot.dataset.openTape); }
+});
+
 // ============ jobs ============
 function jobBadge(j, queue) {
   if (j.stage === 'capture') return ['ZGRYWANIE', 'bg-brand-500 text-white'];
@@ -445,8 +533,16 @@ $('#start').onclick = async () => {
 };
 $('#cancel').onclick = () => api('/api/capture/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(refresh);
 
+// load the timeline when its section is first shown (and on direct #timeline link)
+function maybeLoadTimeline() {
+  const s = $('#timeline'); if (!s) return;
+  const r = s.getBoundingClientRect();
+  if (location.hash === '#timeline' || (r.top < innerHeight && r.bottom > 0)) loadTimeline(false);
+}
+addEventListener('hashchange', maybeLoadTimeline);
+
 // active-nav highlight (TailAdmin menu-item state classes)
-const SECTIONS = ['pulpit', 'zadania', 'kasety', 'logi', 'info'];
+const SECTIONS = ['pulpit', 'zadania', 'kasety', 'timeline', 'logi', 'info'];
 const scroller = document.querySelector('.overflow-y-auto');
 function syncNav() {
   const y = (scroller?.scrollTop || window.scrollY || 0) + 140;
@@ -463,6 +559,8 @@ function syncNav() {
 }
 scroller?.addEventListener('scroll', syncNav);
 addEventListener('scroll', syncNav);
+scroller?.addEventListener('scroll', maybeLoadTimeline);
 
 refresh();
 setInterval(refresh, 3000);
+maybeLoadTimeline();

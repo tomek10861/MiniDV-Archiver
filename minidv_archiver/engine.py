@@ -13,6 +13,7 @@ from collections.abc import MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import library_index
 from .camera import Camera, CameraError
 from .config import Config
 from .media import process_capture, sha256
@@ -81,6 +82,7 @@ class Engine:
         if role in ("all", "converter"):
             threading.Thread(target=self._process_worker, daemon=True).start()
             threading.Thread(target=self._compress_worker, daemon=True).start()
+            threading.Thread(target=self._index_worker, daemon=True).start()
 
     # ---- storage -----------------------------------------------------------
     def storage(self) -> dict:
@@ -161,6 +163,30 @@ class Engine:
         return {"capture": self.store.capture_job(), "processing": self.store.processing_job(),
                 "queue": self.store.pending(), "jobs": self.store.list_jobs(),
                 "compress": self.store.list_builds()}
+
+    # ---- tape / scene index (fast /api/tapes + year/month timeline) -------
+    def _index_worker(self) -> None:
+        while True:
+            try:
+                library_index.reindex(self.config, self.store)
+            except Exception:  # noqa: BLE001 - indexing must never take the process down
+                pass
+            time.sleep(max(30, self.config.index_interval))
+
+    def _reindex(self, tape_id: str) -> None:
+        try:
+            library_index.reindex_one(self.config, self.store, tape_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def tapes(self) -> list[dict]:
+        return library_index.tapes_list(self.config, self.store)
+
+    def timeline(self) -> dict:
+        return library_index.timeline(self.config, self.store)
+
+    def timeline_month(self, year: int, month: int) -> list[dict]:
+        return library_index.month_scenes(self.config, self.store, year, month)
 
     # ---- on-demand re-encode / download builds ----------------------------
     def _prune_share(self) -> None:
@@ -272,6 +298,7 @@ class Engine:
             shutil.rmtree(self.config.working / tape_id, ignore_errors=True)
             self.store.delete_job(tape_id)
             self._drop_share(tape_id)
+            self.store.delete_index(tape_id)
         return {"deleted": tape_id}
 
     def delete_scenes(self, tape_id: str, scene_ids: list[str]) -> dict:
@@ -311,6 +338,7 @@ class Engine:
             sha.write_text("\n".join(lines) + "\n")
         with self.lock:
             self._drop_share(tape_id)
+        self._reindex(tape_id)
         return {"tape_id": tape_id, "removed": removed, "remaining": tape["scene_count"]}
 
     def _refresh_sha_lines(self, tape_dir: Path, new_hashes: dict[str, str]) -> None:
@@ -359,7 +387,9 @@ class Engine:
                 job["tape_id"] = new_id
                 self.store.put_job(job)
             self._drop_share(tape_id)
+            self.store.delete_index(tape_id)
             self._persist()
+        self._reindex(new_id)
         return {"tape_id": new_id}
 
     def set_tape_meta(self, tape_id: str, *, label=None, recording_date=None) -> dict:
@@ -382,6 +412,7 @@ class Engine:
                 tape.pop("recording_date", None)
         tp.write_text(json.dumps(tape, indent=2) + "\n")
         self._refresh_sha_lines(d, {"tape.json": sha256(tp)})
+        self._reindex(tape_id)
         return {"tape_id": tape_id, "label": tape.get("label"), "recording_date": tape.get("recording_date")}
 
     # ---- id helpers ----------------------------------------------------
@@ -681,6 +712,7 @@ class Engine:
             checksum_path.write_text("\n".join(lines) + "\n")
             capture.unlink()
             shutil.rmtree(work, ignore_errors=True)
+            self._reindex(tape_id)
             self._set(job, "COMPLETED")
         except Exception as exc:
             self._log(job, f"ERROR: {type(exc).__name__}: {exc}")
@@ -709,5 +741,6 @@ class Engine:
                                  nice=self.config.nice_processing, mp4_preset=self.config.mp4_preset)
         capture.unlink()
         shutil.rmtree(work, ignore_errors=True)
+        self._reindex(tape_id)
         self._set(job, "COMPLETED")
         return result

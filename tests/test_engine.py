@@ -143,6 +143,7 @@ def test_acquire_dv_relaunches_and_concatenates_segments(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(em.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(Engine, "_index_worker", lambda self: None)  # keep it off the fake clock
     eng = _engine(tmp_path, no_signal_timeout=5, blank_tail_timeout=8, capture_idle_timeout=20,
                   play_wait_timeout=100, max_dvgrab_restarts=10)
     eng.camera = type("C", (), {"info": staticmethod(lambda: {"connected": True}),
