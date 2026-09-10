@@ -38,18 +38,26 @@ whole-tape review file, thumbnails, JSON metadata) is a derivative you can regen
 - **Concurrent pipeline**: capture holds the FireWire slot exclusively; splitting +
   compression + encoding run in a background queue, so you can start the next tape
   while the previous one is still processing.
-- **Runs as one process or four**: `grabber` (FireWire), `converter` (background
-  processing / re-encodes), `api` (HTTP/JSON) and a static `ui` coordinate through a
-  small SQLite job store (`state/jobs.db`), so you can restart the api or move the
-  converter to another box without interrupting a capture. See
-  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-- **Dashboard**: live capture status, background job list with logs, a tape browser
-  with per-scene thumbnails, in-page video preview, whole-tape playback with
-  click-to-seek chapters, and downloads (master `.dv.zst`, proxy, JSON).
+- **Runs as one process or four containers**: `grabber` (FireWire), `converter`
+  (background processing / re-encodes), `api` (HTTP/JSON) and an `nginx` `ui`
+  coordinate through a small SQLite job store (`state/jobs.db`), so you can restart
+  the api or move the converter to another box without interrupting a capture. The
+  same code also runs as a single process. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+- **Dashboard**: live capture status, background task list (captures + queued
+  re-encodes / scans) with logs, a tape browser with per-scene thumbnails, in-page
+  video preview, whole-tape playback with click-to-seek chapters, and downloads
+  (master `.dv.zst`, proxy, JSON). English / Polish, switchable in the header.
+- **Timeline & metadata**: a per-tape/scene index (refreshed in the background)
+  powers an iPhone-Photos-style year → month → scene browser; rename tapes and edit
+  labels / recording dates from the UI.
+- **Duplicate detection**: an optional quality scan records per-scene decode-error
+  counts and a content fingerprint; the *Duplicates* view groups the same recording
+  across separate captures of one tape and marks the version with fewer errors so
+  you can keep the cleanest and delete the rest.
 - **Share export**: an on-demand "⬇ FB" button re-encodes a scene (or the whole
   tape) to a ~90 MB, same-resolution MP4 for Messenger/Facebook, then hands you the
   file. Temporary, one at a time, auto-pruned.
-- **Restore variant**: an optional "🧹 Napraw" button builds a denoise/repair MP4
+- **Restore variant**: an optional "🧹 Restore" button builds a denoise/repair MP4
   **decoded from the DV master** (not the proxy) — `bwdif` deinterlace with the
   probed field parity, then `atadenoise` + `deblock` (whole chain configurable via
   `MINIDV_RESTORE_FILTERS`). Master and normal proxy are never touched.
@@ -58,85 +66,88 @@ Never sends a `RECORD` opcode. The tape is treated as read-only.
 
 ## Requirements
 
-- Linux with the `firewire_ohci` / `firewire_core` kernel stack and a working OHCI
-  1394 controller (`/dev/fw*`).
-- A MiniDV camcorder or deck with a DV/i.LINK port, in **PLAYER / VCR** mode.
-- Tools on `PATH`: `dvgrab`, `ffmpeg` + `ffprobe`, `zstd`, `firewire-request`
-  (`linux-firewire-utils`), optionally `nice` / `ionice` (`util-linux`).
-- Python **3.11+** (standard library only — no pip dependencies).
+The host is always **Linux with the `firewire_ohci` / `firewire_core` kernel stack**
+and a working OHCI 1394 controller (`/dev/fw*`), plus a MiniDV camcorder or deck
+with a DV/i.LINK port, in **PLAYER / VCR** mode.
 
-```bash
-sudo apt install dvgrab ffmpeg zstd linux-firewire-utils util-linux python3
-```
+- **Docker** (recommended): Docker Engine + Compose. `dvgrab`, `ffmpeg`, `zstd`,
+  `linux-firewire-utils` all ship in the image — nothing else to install.
+- **Bare-metal**: Python **3.11+** (standard library only, no pip deps) and those
+  tools on `PATH`:
 
-## Quick start
+  ```bash
+  sudo apt install dvgrab ffmpeg zstd linux-firewire-utils util-linux python3
+  ```
+
+## Quick start (Docker)
 
 ```bash
 git clone https://github.com/tomek10861/MiniDV-Archiver
 cd MiniDV-Archiver
-cp .env.example .env          # edit if you want; all values have defaults
-sudo mkdir -p /srv/minidv && sudo chown "$USER" /srv/minidv
-
-MINIDV_STORAGE=/srv/minidv python3 -m minidv_archiver.server
-# dashboard + API on http://localhost:8080
-```
-
-### Install as a service
-
-`scripts/install.sh` copies the app to `/opt/minidv-archive`, installs a systemd
-unit and a udev rule (gives the camera's device node group `video`, mode `0660`),
-and starts it. Edit `/etc/minidv-archive.env` for configuration.
-
-```bash
-sudo ./scripts/install.sh            # single process on :8080 (systemd)
-```
-
-### Split deployment (Docker)
-
-Four containers — `grabber` (FireWire), `converter` (background processing),
-`api` (HTTP/JSON) and `ui` (nginx) — sharing `/srv/minidv` and its `state/jobs.db`:
-
-```bash
-cp .env.example .env       # optional; set MINIDV_ALLOW_FCP=0 for a Sony DCR-PC2E, etc.
+cp .env.example .env          # optional; e.g. MINIDV_ALLOW_FCP=0 for a Sony DCR-PC2E
+sudo mkdir -p /srv/minidv
 docker compose up -d --build
 # UI on http://<host>:8088
 ```
 
-`grabber` runs `privileged` with host `/dev` + `/sys/bus/firewire` so it can reach
-the camera's hot-plugged `/dev/fw*` node. Restart any one service without touching
-the others (`docker compose restart api`). Switch between single-process and split
-freely — same storage, same job store, and the systemd unit `Conflicts=` nothing
-Docker does.
+Four containers share `/srv/minidv` (and its `state/jobs.db`):
 
-A bare-metal split (systemd units + `deploy/nginx-minidv.conf`) is also in the
-repo; see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+| service | container | does |
+|---|---|---|
+| `grabber` | `privileged`, host `/dev` + `/sys` | owns FireWire, runs `dvgrab` |
+| `converter` | — | scene split, zstd + byte-verify, proxies, re-encodes, quality scans |
+| `api` | `expose: 8080` (not published) | HTTP/JSON; reads the filesystem + job store |
+| `ui` | `nginx`, publishes `:8088` | serves `frontend/`, proxies `/api` → `api:8080` |
 
-> There is no authentication. Expose it only on a trusted LAN.
+Restart any one without touching the others (`docker compose restart api`). Only
+`ui` publishes a port — there is **no authentication**, so firewall `:8088` to a
+trusted LAN. `grabber` is `privileged` because the camera's `/dev/fw*` node is
+hot-plugged; it and the api/converter also mount host `/sys` read-only so
+`camera.info()` can resolve the FireWire node.
+
+### Other ways to run
+
+```bash
+sudo ./scripts/install.sh            # systemd, single process on :8080
+sudo ./scripts/install.sh --split    # systemd, bare-metal grabber + converter + api + nginx
+MINIDV_STORAGE=$HOME/minidv python3 -m minidv_archiver.server   # no install, single process
+```
+
+`scripts/install.sh` copies the app to `/opt/minidv-archive`, installs the udev
+rule (`systemd/99-minidv-firewire.rules`) and the unit(s), and starts them; edit
+`/etc/minidv-archive.env` for configuration. The systemd split units and the
+bare-metal nginx config (`deploy/nginx-minidv.conf`) are the no-Docker equivalent
+of the four containers — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Configuration
 
 All via environment variables — see [`.env.example`](.env.example) for the full list
 with defaults. The ones you are most likely to touch:
 
+With Docker, put them in `.env` (compose reads it). With systemd they go in
+`/etc/minidv-archive.env`.
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `MINIDV_STORAGE` | `/srv/minidv` | archive root |
+| `MINIDV_STORAGE` | `/srv/minidv` | archive root (bind-mounted into every container) |
 | `MINIDV_CAMERA_GUID` | *(auto)* | empty = first AV/C tape device on the bus; set a GUID if several are connected |
 | `MINIDV_ALLOW_FCP` | `1` | `1` = drive transport over AV/C; `0` = manual PLAY/STOP on the camera |
 | `MINIDV_MP4_PRESET` | `medium` | x264 preset for proxies (`veryfast` is ~4–6× quicker, larger files) |
 | `MINIDV_SHARE_MAX_MB` | `90` | target size for the "share" re-encode |
-| `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | HTTP listener |
+| `MINIDV_RESTORE_FILTERS` | `bwdif…,atadenoise,deblock…` | ffmpeg `-vf` chain for the "restore" variant |
+| `MINIDV_INDEX_INTERVAL` | `300` | seconds between background refreshes of the tape/scene index |
+| `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | api HTTP listener (inside its container) |
 
 ## Usage
 
 1. Put the tape in, switch the camera to **PLAYER / VCR**, connect FireWire.
-2. Dashboard → **Nowe zgrywanie** → *Rozpocznij* (tape id is auto-assigned, e.g.
-   `TAPE-0001`).
+2. Open the dashboard (`:8088` with Docker, `:8080` single-process) → **New
+   capture** → *Start* (the tape id is auto-assigned, e.g. `TAPE-0001`).
 3. **Auto mode** (`MINIDV_ALLOW_FCP=1`): it rewinds and presses PLAY for you.
-   **Manual mode**: wait for `CZEKAM NA PLAY`, press **PLAY** on the camera; when the
-   material ends, press **STOP** (or it stops itself after the blank-tail timeout).
+   **Manual mode**: wait for `WAITING FOR PLAY`, press **PLAY** on the camera; when
+   the material ends press **STOP** (or it stops itself after the blank-tail timeout).
 4. The capture hands off to the background pipeline; start the next tape whenever
-   you like. Browse results under **Kasety**.
+   you like. Browse results under **Tapes** / **Timeline**.
 
 ### CLI
 
@@ -164,16 +175,30 @@ A complete sample archive (one real ~6 s scene, ~20 MB) lives in
 
 ## API
 
-`GET` `/api/status` · `/api/storage` · `/api/jobs` · `/api/jobs/{id}` ·
-`/api/tapes` · `/api/tapes/{id}` · `/api/tapes/{id}/scenes` ·
-`/api/tapes/{id}/scenes/{scene_id}` ·
-`/api/tapes/{id}/files/{name}` (archive files; `Range` supported for MP4; `?dl=1`
-forces download) · `/api/tapes/{id}/compressed/{scene|TAPE}.mp4` (share re-encode).
+JSON over HTTP (served by the `api` process; `nginx` proxies `/api` to it).
 
-`POST` `/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?}` ·
-`/api/capture/stop` `{tape_id?}` · `/api/tape/{play,stop,rewind}` (409 unless
-`MINIDV_ALLOW_FCP=1`) · `/api/tapes/{id}/scenes/{scene}/compress` ·
-`/api/tapes/{id}/compress`.
+**`GET`**
+`/api/status` · `/api/storage` · `/api/jobs` · `/api/jobs/{id}` ·
+`/api/tapes` (from the index) · `/api/tapes/{id}` · `/api/tapes/{id}/scenes` ·
+`/api/tapes/{id}/scenes/{scene_id}` ·
+`/api/timeline` · `/api/timeline/{year}/{month}` · `/api/duplicates` ·
+`/api/tapes/{id}/files/{name}` (archive files; `Range` for MP4; `?dl=1` forces
+download) ·
+`/api/tapes/{id}/compressed/{token}.mp4` — serves an on-demand build; `token` is
+`TAPE`, `<scene_id>`, `<scene_id>-RES` (restore), or `SEL-<hash>[-FB|-RES]`.
+
+**`POST`**
+`/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?}` ·
+`/api/capture/stop` `{tape_id?}` ·
+`/api/tape/{play,stop,rewind}` (409 unless `MINIDV_ALLOW_FCP=1`) ·
+`/api/tapes/{id}/scenes/{scene}/compress` `{restore?}` ·
+`/api/tapes/{id}/compress` `{scenes?, share?, restore?}` (no body = whole tape) ·
+`/api/tapes/{id}/rename` `{new_id}` ·
+`/api/tapes/{id}/meta` `{label?, recording_date?}` ·
+`/api/tapes/{id}/reprobe` `{force?}` (quality scan / fingerprint).
+
+**`DELETE`**
+`/api/tapes/{id}` · `/api/tapes/{id}/scenes` `{scenes: [...]}`.
 
 ## Camera compatibility & FireWire notes
 
@@ -201,9 +226,12 @@ python3 -m pytest -q
 ```
 
 Standard library only; the app talks to `dvgrab` / `ffmpeg` / `zstd` as subprocesses.
+The container image is rebuilt with `docker compose up -d --build` after any code
+change.
 
-The front-end is a single `frontend/index.html` + `frontend/app.js` (vanilla JS) styled
-with the vendored TailAdmin CSS. After editing markup or classes, rebuild the CSS:
+The front-end is `frontend/index.html` + `frontend/app.js` + `frontend/i18n.js`
+(vanilla JS, English/Polish) styled with the vendored TailAdmin CSS. After editing
+markup or classes, rebuild the CSS:
 
 ```bash
 scripts/build-css.sh          # needs Node + npm; rewrites frontend/vendor/tailadmin.css

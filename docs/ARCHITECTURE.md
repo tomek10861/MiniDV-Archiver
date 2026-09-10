@@ -26,9 +26,9 @@ nothing but the storage directory and a small SQLite job store.
 
 | component | command | container | touches | responsibility |
 |---|---|---|---|---|
-| **grabber** | `python -m minidv_archiver.grabber` | `privileged`, host `/dev` + `/sys/bus/firewire` | `/dev/fw*` | claims `CREATED` capture jobs, runs `dvgrab`, end-of-tape detection, writes raw DV to `working/<id>/`, hands the job to the converter queue. Holds `state/grabber.lock` (one grabber). Also serves AV/C transport requests the api enqueues. |
-| **converter** | `python -m minidv_archiver.converter` | plain, `/srv/minidv` volume | CPU/disk | drains two queues: processing (`split → zstd master + byte verify → H.264 proxies → tape.json / tape.sha256`) and share/concat re-encodes. |
-| **api** | `python -m minidv_archiver.api` | plain, `/srv/minidv` volume, `expose: 8080` | filesystem, `jobs.db` | HTTP/JSON **and** the static `frontend/` (fallback). Read endpoints hit the filesystem directly. `capture/start|stop` write a job row; `tape/{play,stop,rewind}` enqueue a camera command; `rename` / `meta` / delete are fast filesystem ops guarded by a `tape_busy()` check. |
+| **grabber** | `python -m minidv_archiver.grabber` | `privileged`, host `/dev` + `/sys` | `/dev/fw*` | claims `CREATED` capture jobs, runs `dvgrab`, end-of-tape detection, writes raw DV to `working/<id>/`, hands the job to the converter queue. Holds `state/grabber.lock` (one grabber). Also serves AV/C transport requests the api enqueues. |
+| **converter** | `python -m minidv_archiver.converter` | plain, `/srv/minidv` volume, host `/sys:ro` | CPU/disk | processing (`split → zstd master + byte verify → H.264 proxies → tape.json / tape.sha256`), the on-demand build queue (share / concat / restore re-encodes, quality-scan / fingerprint), and the periodic tape/scene index refresh. |
+| **api** | `python -m minidv_archiver.api` | plain, `/srv/minidv` volume, host `/sys:ro`, `expose: 8080` | filesystem, `jobs.db` | HTTP/JSON **and** the static `frontend/` (fallback). Read endpoints hit the filesystem / index directly. `capture/start|stop` write a job row; `tape/{play,stop,rewind}` enqueue a camera command; `rename` / `meta` / `reprobe` / delete are fast filesystem ops guarded by a `tape_busy()` check. |
 | **ui** | `nginx:1.29-alpine` | publishes `:8088` | — | serves the mounted `frontend/` and proxies `/api` to `http://api:8080` over the compose network. `frontend/` is plain HTML/JS + vendored TailAdmin — no build step. A bare-metal equivalent is [`../deploy/nginx-minidv.conf`](../deploy/nginx-minidv.conf). |
 
 Bare-metal split: `systemd/minidv-{grabber,converter,api}.service` run the same three
@@ -44,13 +44,16 @@ same data, or vice versa (`Conflicts=` keeps you from running both).
 ## The job store — `state/jobs.db`
 
 SQLite in WAL mode with `busy_timeout`, so several processes read and write
-concurrently. Three tables:
+concurrently:
 
 - **jobs** — one row per tape. The full job dict lives in a JSON `payload`; `status`,
   `stage`, `cancel`, `updated_at` are lifted out for querying. `claim_next_capture()`
   / `claim_next_process()` move a row out of its queue inside one `BEGIN IMMEDIATE`
   transaction, so two processes never take the same job.
-- **builds** — on-demand share / concat re-encodes, keyed `<tape>/<token>`.
+- **builds** — on-demand jobs keyed `<tape>/<token>`: share / concat / restore
+  re-encodes and quality scans. Finished rows older than 6 h are pruned.
+- **library** — the precomputed tape/scene index (`/api/tapes`, timeline,
+  duplicates), refreshed by the converter; keyed by tape, skipped when unchanged.
 - **cam_commands** — AV/C transport requests from the api to the grabber, with the
   response written back.
 
