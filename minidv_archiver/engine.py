@@ -188,6 +188,60 @@ class Engine:
     def timeline_month(self, year: int, month: int) -> list[dict]:
         return library_index.month_scenes(self.config, self.store, year, month)
 
+    def duplicates(self) -> dict:
+        return library_index.duplicates(self.config, self.store)
+
+    # ---- quality re-probe: decode-error count + content fingerprint per scene ----
+    def start_reprobe(self, tape_id: str, force: bool = False) -> dict:
+        self._tape_dir(tape_id)
+        return self._enqueue_build(tape_id, "REPROBE-F" if force else "REPROBE",
+                                   [tape_id], "reprobe", f"{tape_id} · ponowna sonda jakości")
+
+    def _reprobe_tape(self, tape_id: str, force: bool = False) -> dict:
+        from .media import scene_probe_quality
+        d = self.config.tapes / tape_id
+        if d.parent != self.config.tapes or not (d / "tape.json").exists():
+            return {"tape_id": tape_id, "updated": 0}
+        tmp_root = self.config.storage / "tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        hashes, updated = {}, 0
+        for sj in sorted(d.glob("[0-9]*.json")):
+            try:
+                meta = json.loads(sj.read_text())
+            except (OSError, ValueError):
+                continue
+            cap = meta.get("capture") or {}
+            if not force and meta.get("fingerprint") and cap.get("decode_errors") is not None:
+                continue
+            arch = (meta.get("files") or {}).get("archive") or {}
+            zst = d / (arch.get("filename") or f"{sj.stem}.dv.zst")
+            if not zst.exists():
+                continue
+            raw = tmp_root / f"reprobe-{tape_id}-{sj.stem}.dv"
+            try:
+                with raw.open("wb") as out:
+                    if subprocess.run(["zstd", "-q", "-dc", str(zst)], stdout=out).returncode:
+                        continue
+                fc = meta.get("frame_count") or (raw.stat().st_size // 144000)
+                decode_errors, frame_hashes = scene_probe_quality(raw, fc)
+            finally:
+                raw.unlink(missing_ok=True)
+            cap = meta.setdefault("capture", {})
+            cap["decode_errors"] = decode_errors
+            cap["error_score"] = ((cap.get("dropped_frames") or 0)
+                                  + len(cap.get("source_discontinuities") or []) + decode_errors)
+            meta["fingerprint"] = {"datetime": (meta.get("recording") or {}).get("datetime"),
+                                   "tc_start": (meta.get("timecode") or {}).get("start"),
+                                   "tc_end": (meta.get("timecode") or {}).get("end"),
+                                   "frame_count": meta.get("frame_count"), "frame_hashes": frame_hashes}
+            sj.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
+            hashes[sj.name] = sha256(sj)
+            updated += 1
+        if hashes:
+            self._refresh_sha_lines(d, hashes)
+            self._reindex(tape_id)
+        return {"tape_id": tape_id, "updated": updated}
+
     # ---- on-demand re-encode / download builds ----------------------------
     def _prune_share(self) -> None:
         share = self.config.storage / "tmp" / "share"
@@ -280,7 +334,9 @@ class Engine:
                 out.parent.mkdir(parents=True, exist_ok=True)
                 self._prune_share()
                 srcs = [Path(s) for s in build["sources"]]
-                if build["mode"] == "concat":
+                if build["mode"] == "reprobe":
+                    self._reprobe_tape(build["sources"][0], force=build["token"].endswith("-F"))
+                elif build["mode"] == "concat":
                     concat_mp4(srcs, out, meta={"title": build["title"]}, log=lambda m: None)
                 elif build["mode"] == "restore":
                     restore_mp4(srcs, out, vf=self.config.restore_filters, crf=self.config.restore_crf,
@@ -290,7 +346,7 @@ class Engine:
                     compress_share(srcs if len(srcs) > 1 else srcs[0], out, max_mb=self.config.share_max_mb,
                                    crf=self.config.share_crf, preset=self.config.share_preset,
                                    meta={"title": build["title"]}, log=lambda m: None)
-                build.update(status="READY", size=out.stat().st_size)
+                build.update(status="READY", size=None if build["mode"] == "reprobe" else out.stat().st_size)
                 self.store.put_build(build)
             except Exception as exc:
                 build.update(status="ERROR", error=str(exc))

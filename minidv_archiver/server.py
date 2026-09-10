@@ -87,6 +87,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(ENGINE.tapes())
             if path == "/api/timeline":
                 return self.json(ENGINE.timeline())
+            if path == "/api/duplicates":
+                return self.json(ENGINE.duplicates())
             parts = path.strip("/").split("/")
             if len(parts) == 4 and parts[:2] == ["api", "timeline"] and parts[2].isdigit() and parts[3].isdigit():
                 return self.json(ENGINE.timeline_month(int(parts[2]), int(parts[3])))
@@ -178,6 +180,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json(ENGINE.start_selection(cparts[2], scenes, bool(data.get("share")),
                                                             restore=restore), 202)
                 return self.json(ENGINE.start_compress(cparts[2], None, restore=restore), 202)
+            if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "reprobe":
+                return self.json(ENGINE.start_reprobe(cparts[2], bool(self.body().get("force"))), 202)
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "rename":
                 return self.json(ENGINE.rename_tape(cparts[2], self.body().get("new_id", "")))
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "meta":

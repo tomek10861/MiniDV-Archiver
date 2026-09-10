@@ -61,11 +61,17 @@ def build_tape_doc(tape_dir: Path) -> dict:
             dates.append(d)
         arch = (s.get("files") or {}).get("archive") or {}
         total_dv += arch.get("size_compressed") or 0
+        cap = s.get("capture") or {}
         idx_scenes.append({
             "scene_id": s.get("scene_id"), "scene_index": s.get("scene_index"),
             "date": d, "tc": s.get("timecode") or {}, "frame_count": s.get("frame_count"),
             "standard": (s.get("video") or {}).get("standard"),
             "dv": arch.get("size_compressed"),
+            "dropped_frames": cap.get("dropped_frames") or 0,
+            "discontinuities": len(cap.get("source_discontinuities") or []),
+            "decode_errors": cap.get("decode_errors"),
+            "error_score": cap.get("error_score"),
+            "fingerprint": s.get("fingerprint"),
         })
     dates.sort()
     doc = dict(tape)
@@ -146,6 +152,85 @@ def timeline(config, store) -> dict:
         yr["months"] = [yr["months"][m] for m in sorted(yr["months"], reverse=True)]
         out.append(yr)
     return {"years": out, "undated": undated}
+
+
+def _hashes_match(a: dict, b: dict) -> bool:
+    ah, bh = a.get("frame_hashes") or [], b.get("frame_hashes") or []
+    if len(ah) < 2 or len(bh) < 2:
+        return False
+    return sum(1 for x, y in zip(ah, bh) if x and x == y) >= 2
+
+
+def _same_recording(a: dict, b: dict) -> bool:
+    """Two scene fingerprints that are very likely the same footage from separate captures."""
+    if _hashes_match(a, b):
+        return True
+    ad = (a.get("datetime") or "")
+    if ad and ad == b.get("datetime") and _SANE_DATE.match(ad[:10]) \
+            and a.get("tc_start") and a.get("tc_start") == b.get("tc_start"):
+        return True
+    if a.get("tc_start") and a.get("tc_start") == b.get("tc_start") \
+            and a.get("tc_end") == b.get("tc_end") \
+            and abs((a.get("frame_count") or 0) - (b.get("frame_count") or 0)) <= 5:
+        return True
+    return False
+
+
+def duplicates(config, store) -> dict:
+    """Group scenes across tapes that look like the same recording, ordered best-first
+    by error score (dropped + discontinuities + decode errors). Nothing is deleted."""
+    _ensure(config, store)
+    scenes, unprobed = [], 0
+    for doc in store.list_index():
+        tid = doc.get("tape_id")
+        for s in (doc.get("_index") or {}).get("scenes") or []:
+            fp = s.get("fingerprint") or {}
+            if not (fp.get("frame_hashes") or fp.get("tc_start") or fp.get("datetime")):
+                unprobed += 1
+                continue
+            scenes.append({"tape_id": tid, "scene_id": s.get("scene_id"), "scene_index": s.get("scene_index"),
+                           "date": s.get("date"), "frame_count": s.get("frame_count"),
+                           "error_score": s.get("error_score"), "decode_errors": s.get("decode_errors"),
+                           "dropped_frames": s.get("dropped_frames"), "discontinuities": s.get("discontinuities"),
+                           "fp": fp})
+    parent = list(range(len(scenes)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    buckets: dict[str, list[int]] = {}
+    for i, sc in enumerate(scenes):
+        fp = sc["fp"]
+        for k, h in enumerate(fp.get("frame_hashes") or []):
+            if h:
+                buckets.setdefault(f"h{k}:{h}", []).append(i)
+        dt = fp.get("datetime") or ""
+        if _SANE_DATE.match(dt[:10]) and fp.get("tc_start"):
+            buckets.setdefault(f"dt:{dt[:16]}|{fp['tc_start']}", []).append(i)
+    for members in buckets.values():
+        for x in range(len(members)):
+            for y in range(x + 1, len(members)):
+                if _same_recording(scenes[members[x]]["fp"], scenes[members[y]]["fp"]):
+                    parent[find(members[x])] = find(members[y])
+
+    grouped: dict[int, list[dict]] = {}
+    for i in range(len(scenes)):
+        grouped.setdefault(find(i), []).append(scenes[i])
+    BIG, out = 10 ** 9, []
+    for members in grouped.values():
+        if len(members) < 2 or len({m["tape_id"] for m in members}) < 2:
+            continue
+        members.sort(key=lambda m: (m["error_score"] if m["error_score"] is not None else BIG,
+                                    m["tape_id"], m["scene_index"] or 0))
+        for k, m in enumerate(members):
+            m.pop("fp", None)
+            m["best"] = k == 0
+        out.append({"count": len(members), "members": members})
+    out.sort(key=lambda g: (-g["count"], g["members"][0]["tape_id"]))
+    return {"groups": out, "unprobed": unprobed, "scenes_indexed": len(scenes)}
 
 
 def month_scenes(config, store, year: int, month: int) -> list[dict]:

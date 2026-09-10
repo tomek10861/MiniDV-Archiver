@@ -70,6 +70,31 @@ def last_frame_timecode(path: Path, frame_size: int, temp_root: Path) -> str | N
     return data.get("format", {}).get("tags", {}).get("timecode")
 
 
+_DECODE_ERR = re.compile(rb"conceal|error while decoding|corrupt|Invalid data found|damaged", re.I)
+
+
+def scene_probe_quality(path: Path, frame_count: int) -> tuple[int, list[str]]:
+    """One decode pass over a raw DV scene: count concealment / decode errors (tape /
+    head damage — distinct from capture-transport dropped frames) and hash three
+    16x16 grayscale frames (start / middle / end) as a content fingerprint, so the
+    same footage can be matched across separate captures."""
+    n = max(1, frame_count)
+    picks = sorted({0, n // 2, n - 1})
+    sel = "+".join(rf"eq(n\,{p})" for p in picks)
+    try:
+        cp = subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "warning", "-i", str(path),
+             "-vf", f"select='{sel}',scale=16:16,format=gray", "-vsync", "0", "-f", "rawvideo", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
+    except (subprocess.TimeoutExpired, OSError):
+        return 0, []
+    errors = sum(1 for ln in (cp.stderr or b"").splitlines() if _DECODE_ERR.search(ln))
+    data, size = cp.stdout or b"", 16 * 16
+    hashes = [hashlib.sha1(data[i * size:(i + 1) * size]).hexdigest()[:12]
+              for i in range(len(data) // size)]
+    return errors, hashes
+
+
 def first_frame_interlaced(path: Path) -> tuple[bool, bool | None]:
     frames = probe_json(["ffprobe", "-v", "quiet", "-select_streams", "v:0", "-read_intervals", "%+#1",
                          "-show_frames", "-show_entries", "frame=interlaced_frame,top_field_first", "-of", "json",
@@ -267,6 +292,9 @@ def _process_capture(capture: Path, tape_id: str, storage: Path, zstd_level: int
         proxy_probe = ffprobe(proxy)
         if not proxy_probe.get("streams"):
             raise RuntimeError(f"invalid MP4: {proxy}")
+        state("PROBING_QUALITY", scene_id)
+        decode_errors, frame_hashes = scene_probe_quality(scene, frame_count)
+        error_score = len(capture_drop_lines) + len(discontinuities) + decode_errors
         meta = {
             "schema_version": 1, "scene_index": index, "scene_id": scene_id, "tape_id": tape_id,
             "recording": {"datetime": dt, "datetime_source": dt_source, "datetime_valid": bool(dt)},
@@ -277,7 +305,10 @@ def _process_capture(capture: Path, tape_id: str, storage: Path, zstd_level: int
                       "pixel_format": video.get("pix_fmt"), "interlaced": interlaced, "top_field_first": top_first},
             "audio": [{"codec": a.get("codec_name"), "sample_rate": a.get("sample_rate"), "channels": a.get("channels")} for a in audios],
             "capture": {"dropped_frames": len(capture_drop_lines), "errors": capture_drop_lines,
-                        "source_discontinuities": discontinuities},
+                        "source_discontinuities": discontinuities,
+                        "decode_errors": decode_errors, "error_score": error_score},
+            "fingerprint": {"datetime": dt, "tc_start": timecode_start, "tc_end": timecode_end,
+                            "frame_count": frame_count, "frame_hashes": frame_hashes},
             "source": {"start_frame": sum(r["frame_count"] for r in results), "end_frame": sum(r["frame_count"] for r in results) + frame_count - 1},
             "files": {"archive": {"filename": archive.name, "sha256_uncompressed": source_hash,
                        "sha256_compressed": sha256(archive), "size_uncompressed": scene.stat().st_size,

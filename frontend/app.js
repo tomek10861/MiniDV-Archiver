@@ -223,6 +223,7 @@ function renderTapeDetail(t, force) {
       ${full ? `<a class="${LINK}" href="/api/tapes/${e}/files/tape.mp4?dl=1">⬇ tape.mp4</a>` : ''}
       ${full ? `<button class="fb ${BTN_FB}" data-tape="${id}">⬇ FB cała taśma</button>` : ''}
       <button class="repair ${BTN}" data-tape="${id}" title="Odszumianie + deblock całej taśmy, kodowane z masterów .dv.zst — może potrwać">🧹 Napraw taśmę</button>
+      <button class="reprobe ${BTN}" data-tape="${id}" title="Policz błędy dekodowania i odcisk każdej sceny — potrzebne do wykrywania duplikatów">🔍 Sonduj jakość</button>
       <button id="tapeDelete" class="${BTN_DANGER}">🗑 Usuń kasetę</button>
     </div>
     <div id="selBar" class="mt-3 hidden flex-wrap items-center gap-3 rounded-xl border border-brand-500/40 bg-brand-50/60 p-3 dark:bg-brand-500/[0.08]">
@@ -273,8 +274,13 @@ async function pollBuild(url, body, btn, label, downloadUrl) {
       j = await api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
     }
     if (j.status !== 'READY') throw Error(j.error || 'błąd przetwarzania');
-    btn.textContent = `${label}${j.size ? ` (${mb(j.size)})` : ''}`;
-    const a = document.createElement('a'); a.href = downloadUrl(j); document.body.appendChild(a); a.click(); a.remove();
+    const href = downloadUrl && downloadUrl(j);
+    if (href) {
+      btn.textContent = `${label}${j.size ? ` (${mb(j.size)})` : ''}`;
+      const a = document.createElement('a'); a.href = href; document.body.appendChild(a); a.click(); a.remove();
+    } else {
+      btn.textContent = label + ' ✓';
+    }
   } catch (e) { alert(e.message); btn.textContent = label; }
   finally { btn.disabled = false; }
 }
@@ -364,6 +370,11 @@ $('#tapeDetail').addEventListener('click', e => {
   if (e.target.id === 'tapeLabel') { editTapeMeta(openTapeId, 'label'); return; }
   if (e.target.id === 'tapeDate') { editTapeMeta(openTapeId, 'recording_date'); return; }
   const rp = e.target.closest('.repair'); if (rp) { repairCompress(rp); return; }
+  const rpb = e.target.closest('.reprobe');
+  if (rpb) {
+    pollBuild(`/api/tapes/${encodeURIComponent(rpb.dataset.tape)}/reprobe`, {}, rpb, rpb.textContent, null);
+    return;
+  }
   const fb = e.target.closest('.fb'); if (fb) { fbCompress(fb); return; }
   if (e.target.closest('.fulltape')) {
     const v = $('#tapeDetail').querySelector('video.tapefull');
@@ -461,6 +472,76 @@ $('#tlView').addEventListener('click', e => {
     const sc = ot.dataset.openScene;
     go('#kasety/' + ot.dataset.openTape + (sc ? '/' + sc : ''));
   }
+});
+
+// ============ duplicates: same recording across re-captures, keep the cleanest ============
+let dupCache = null;
+async function loadDuplicates(force) {
+  if (force || !dupCache) {
+    try { dupCache = await api('/api/duplicates'); }
+    catch (e) { $('#dupView').innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
+  }
+  renderDuplicates();
+}
+function renderDuplicates() {
+  const d = dupCache || { groups: [], unprobed: 0, scenes_indexed: 0 };
+  const head = `<div class="mb-4 flex flex-wrap items-center gap-3 text-theme-xs text-gray-500 dark:text-gray-400">
+    <span>${d.groups.length} grup możliwych duplikatów · ${d.scenes_indexed} scen z odciskiem${d.unprobed ? ` · <b class="text-orange-500">${d.unprobed} bez odcisku</b>` : ''}</span>
+    <button id="dupReprobeAll" class="${BTN}">🔍 Sonduj wszystkie taśmy</button>
+    <button id="dupRefresh" class="${BTN}">↻ Odśwież</button></div>`;
+  const groups = d.groups.map((g, gi) => `
+    <div class="mb-4 rounded-xl border border-gray-200 p-3 dark:border-gray-800">
+      <div class="mb-2 text-theme-xs text-gray-500 dark:text-gray-400">${g.count} wersje tego samego nagrania</div>
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      ${g.members.map((m, mi) => `
+        <div class="rounded-lg border ${m.best ? 'border-success-500 bg-success-50/40 dark:bg-success-500/[0.08]' : 'border-gray-200 dark:border-gray-800'} p-2">
+          <img loading="lazy" class="mb-2 aspect-video w-full rounded bg-black object-cover"
+               src="/api/tapes/${encodeURIComponent(m.tape_id)}/files/thumbnails/${encodeURIComponent(m.scene_id)}.jpg" alt="">
+          <div class="truncate text-theme-xs font-semibold text-gray-800 dark:text-white/90">${m.tape_id} · scena ${m.scene_index}</div>
+          <div class="text-[11px] text-gray-500 dark:text-gray-400">${m.date || '—'} · ${m.frame_count ?? '?'} kl.</div>
+          <div class="text-[11px] ${m.error_score ? 'text-orange-500' : 'text-success-600 dark:text-success-400'}">
+            błędy: ${m.error_score ?? '?'}${m.decode_errors != null ? ` · dekod. ${m.decode_errors}, zgub. ${m.dropped_frames || 0}, nieciąg. ${m.discontinuities || 0}` : ''}${m.best ? ' · najlepsza' : ''}</div>
+          <div class="mt-1.5 flex flex-wrap gap-1.5">
+            <button class="dupkeep ${BTN}" data-g="${gi}" data-m="${mi}">Zostaw tę, usuń resztę</button>
+            <a class="${LINK} text-[11px]" href="#kasety/${encodeURIComponent(m.tape_id)}/${encodeURIComponent(m.scene_id)}">podgląd</a>
+          </div>
+        </div>`).join('')}
+      </div>
+    </div>`).join('') || `<p class="text-theme-sm text-gray-400">Nie znaleziono duplikatów.${d.unprobed ? ' Masz sceny bez odcisku — kliknij „Sonduj wszystkie taśmy", potem odśwież.' : ''}</p>`;
+  $('#dupView').innerHTML = head + groups;
+}
+async function resolveDuplicate(gi, keepIdx) {
+  const g = (dupCache.groups || [])[gi]; if (!g) return;
+  const keep = g.members[keepIdx], drop = g.members.filter((_, i) => i !== keepIdx);
+  if (!confirm(`Zostawić wersję z ${keep.tape_id} (błędy: ${keep.error_score ?? '?'}) i usunąć ${drop.length}?\n`
+    + drop.map(m => `• ${m.tape_id} / scena ${m.scene_index} — błędy: ${m.error_score ?? '?'}`).join('\n'))) return;
+  if (!confirm('Na pewno? Mastery .dv.zst usuwanych scen przepadną BEZPOWROTNIE.')) return;
+  const byTape = {};
+  drop.forEach(m => (byTape[m.tape_id] = byTape[m.tape_id] || []).push(m.scene_id));
+  try {
+    for (const [tid, sids] of Object.entries(byTape)) {
+      await api(`/api/tapes/${encodeURIComponent(tid)}/scenes`,
+        { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenes: sids }) });
+    }
+    await refresh(); await loadDuplicates(true);
+  } catch (e) { alert(e.message); }
+}
+$('#dupView').addEventListener('click', async e => {
+  if (e.target.id === 'dupRefresh') { loadDuplicates(true); return; }
+  if (e.target.id === 'dupReprobeAll') {
+    e.target.disabled = true; e.target.textContent = '⏳ zlecam…';
+    try {
+      for (const t of (window.__tapes || [])) {
+        await api(`/api/tapes/${encodeURIComponent(t.tape_id)}/reprobe`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      }
+      e.target.textContent = 'zlecone — odśwież za chwilę';
+    } catch (err) { alert(err.message); e.target.textContent = '🔍 Sonduj wszystkie taśmy'; }
+    finally { e.target.disabled = false; }
+    return;
+  }
+  const k = e.target.closest('.dupkeep');
+  if (k) resolveDuplicate(+k.dataset.g, +k.dataset.m);
 });
 
 // ============ jobs ============
@@ -591,8 +672,8 @@ $('#start').onclick = async () => {
 $('#cancel').onclick = () => api('/api/capture/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(refresh);
 
 // ============ hash router: one section at a time, deep-linkable ============
-const SECTIONS = ['pulpit', 'zadania', 'kasety', 'timeline', 'logi', 'info'];
-const SEC_PL = { pulpit: 'Pulpit', zadania: 'Zadania', kasety: 'Kasety', timeline: 'Oś czasu', logi: 'Logi', info: 'Informacje' };
+const SECTIONS = ['pulpit', 'zadania', 'kasety', 'duplikaty', 'timeline', 'logi', 'info'];
+const SEC_PL = { pulpit: 'Pulpit', zadania: 'Zadania', kasety: 'Kasety', duplikaty: 'Duplikaty', timeline: 'Oś czasu', logi: 'Logi', info: 'Informacje' };
 
 function currentRoute() {
   const parts = location.hash.replace(/^#/, '').split('/').map(decodeURIComponent);
@@ -647,6 +728,7 @@ function applyRoute() {
     loadTimeline(false);
     scroller?.scrollTo({ top: 0 });
   } else {
+    if (r.section === 'duplikaty') loadDuplicates(false);
     scroller?.scrollTo({ top: 0 });
   }
   renderSubbar();

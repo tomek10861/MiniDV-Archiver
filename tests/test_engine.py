@@ -256,6 +256,69 @@ def test_start_compress_restore_builds_from_the_dv_masters(tmp_path, monkeypatch
     assert seen["sources"] == ["0001_a.dv.zst", "0002_b.dv.zst"]
 
 
+def test_reprobe_tape_writes_fingerprint_and_error_score(tmp_path, monkeypatch):
+    import shutil as _sh
+    import subprocess as _sp
+    import minidv_archiver.media as mm
+    if not _sh.which("zstd"):
+        import pytest
+        pytest.skip("zstd not installed")
+    monkeypatch.setattr(mm, "scene_probe_quality", lambda p, fc: (3, ["h0", "h1", "h2"]))
+    eng = _engine(tmp_path)
+    d = eng.config.tapes / "TAPE-1"
+    (d / "thumbnails").mkdir(parents=True)
+    (d / "tape.json").write_text(json.dumps({"tape_id": "TAPE-1", "scene_count": 1,
+                                             "scenes": [{"scene_index": 1, "scene_id": "0001_x", "frame_count": 100}]}))
+    _sp.run(["zstd", "-q", "-o", str(d / "0001_x.dv.zst"), "-"], input=b"\x00" * 4096, check=True)
+    (d / "0001_x.json").write_text(json.dumps({
+        "scene_index": 1, "scene_id": "0001_x", "tape_id": "TAPE-1", "frame_count": 100,
+        "recording": {"datetime": "2004-07-11T10:00:00"}, "timecode": {"start": "00:00:00:00", "end": "00:00:04:00"},
+        "capture": {"dropped_frames": 2, "source_discontinuities": ["x"]},
+        "files": {"archive": {"filename": "0001_x.dv.zst"}}}))
+    (d / "tape.sha256").write_text("h  0001_x.dv.zst\nh  0001_x.json\nh  tape.json\n")
+
+    assert eng._reprobe_tape("TAPE-1")["updated"] == 1
+    m = json.loads((d / "0001_x.json").read_text())
+    assert m["capture"]["decode_errors"] == 3
+    assert m["capture"]["error_score"] == 2 + 1 + 3            # dropped + discontinuities + decode
+    assert m["fingerprint"]["frame_hashes"] == ["h0", "h1", "h2"]
+    assert m["fingerprint"]["tc_start"] == "00:00:00:00"
+    assert "h  0001_x.json" not in (d / "tape.sha256").read_text()   # sha line refreshed
+    # second run is a no-op unless forced
+    assert eng._reprobe_tape("TAPE-1")["updated"] == 0
+    assert eng._reprobe_tape("TAPE-1", force=True)["updated"] == 1
+
+
+def test_duplicates_groups_same_recording_across_tapes_best_first(tmp_path):
+    from minidv_archiver import library_index as li
+    eng = _engine(tmp_path)
+
+    def tape(tid, score, hashes):
+        d = eng.config.tapes / tid
+        (d / "thumbnails").mkdir(parents=True)
+        (d / "tape.json").write_text(json.dumps({"tape_id": tid, "scene_count": 1,
+            "scenes": [{"scene_index": 1, "scene_id": "0001_s", "frame_count": 500}]}))
+        (d / "0001_s.json").write_text(json.dumps({
+            "scene_index": 1, "scene_id": "0001_s", "tape_id": tid, "frame_count": 500,
+            "timecode": {"start": "00:05:00:00", "end": "00:05:20:00"},
+            "recording": {"datetime": "2004-07-11T10:00:00"},
+            "capture": {"dropped_frames": score, "source_discontinuities": [], "decode_errors": 0,
+                        "error_score": score},
+            "fingerprint": {"datetime": "2004-07-11T10:00:00", "tc_start": "00:05:00:00",
+                            "tc_end": "00:05:20:00", "frame_count": 500, "frame_hashes": hashes}}))
+
+    tape("TAPE-0001", 5, ["aaa", "bbb", "ccc"])
+    tape("TAPE-0012", 0, ["aaa", "bbb", "zzz"])   # 2/3 hashes match -> same recording
+    li.reindex(eng.config, eng.store, force=True)
+
+    dup = eng.duplicates()
+    assert dup["unprobed"] == 0 and len(dup["groups"]) == 1
+    members = dup["groups"][0]["members"]
+    assert [m["tape_id"] for m in members] == ["TAPE-0012", "TAPE-0001"]   # lower error_score first
+    assert members[0]["best"] is True and members[1]["best"] is False
+    assert members[0]["error_score"] == 0
+
+
 def test_start_selection_concatenates_chosen_scenes(tmp_path, monkeypatch):
     import minidv_archiver.media as mm
     monkeypatch.setattr(mm, "concat_mp4",
