@@ -377,11 +377,17 @@ class JobStore:
             pass
         return True
 
-    def reconcile(self, config) -> None:
+    def reconcile(self, config, stages: tuple[str, ...] = ("capture", "process")) -> None:
         """No capture survives a restart; resume processing where the raw DV is still
-        on disk. Same three cases as the old Engine._load_jobs."""
+        on disk. Same three cases as the old Engine._load_jobs.
+
+        `stages` scopes this to the job stages *this process* actually owns: a capture
+        job is only really orphaned if the grabber restarted, a process job only if the
+        converter restarted. A restarting api (or any role that doesn't own that stage)
+        must pass an empty/narrower tuple — otherwise it would rmtree a tapes/<id> dir a
+        sibling converter/grabber process is actively writing to, mid-job, and crash it."""
         for job in self.list_jobs():
-            if job.get("status") in TERMINAL:
+            if job.get("status") in TERMINAL or job.get("stage") not in stages:
                 continue
             tape_id = job["tape_id"]
             tape_dir = config.tapes / tape_id

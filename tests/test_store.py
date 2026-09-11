@@ -126,6 +126,30 @@ def test_prune_keeps_recent_and_drops_old_terminal(tmp_path):
     assert len(ids) <= 31
 
 
+def test_reconcile_only_touches_stages_it_owns(tmp_path):
+    """A restarting api (stages=()) — or any role that doesn't own a stage — must
+    never rmtree a tapes/<id> dir a sibling grabber/converter is still writing to."""
+    cfg = Config(storage=tmp_path)
+    cfg.ensure_dirs()
+    s = JobStore(cfg.state / "jobs.db")
+    s.put_job({"tape_id": "CAP-1", "stage": "capture", "status": "CAPTURING",
+              "history": [], "logs": "", "updated_at": "t"})
+    s.put_job({"tape_id": "PROC-1", "stage": "process", "status": "ENCODING_MP4",
+              "history": [], "logs": "", "updated_at": "t"})
+    (cfg.tapes / "PROC-1").mkdir(parents=True)
+    (cfg.tapes / "PROC-1" / "0083_x.mp4").write_bytes(b"mid-write")   # converter mid-scene
+
+    s.reconcile(cfg, stages=())                          # api role: touch nothing
+    assert s.get_job("CAP-1")["status"] == "CAPTURING"
+    assert s.get_job("PROC-1")["status"] == "ENCODING_MP4"
+    assert (cfg.tapes / "PROC-1" / "0083_x.mp4").exists()  # NOT wiped out from under converter
+
+    s.reconcile(cfg, stages=("capture",))                 # grabber role: only capture-stage
+    assert s.get_job("CAP-1")["status"] == "ERROR"        # no raw DV -> orphaned capture
+    assert s.get_job("PROC-1")["status"] == "ENCODING_MP4"  # still untouched
+    assert (cfg.tapes / "PROC-1" / "0083_x.mp4").exists()
+
+
 def test_import_legacy_then_reconcile(tmp_path):
     (tmp_path / "state").mkdir(parents=True)
     legacy = tmp_path / "state" / "jobs.json"

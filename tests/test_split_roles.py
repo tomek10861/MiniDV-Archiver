@@ -16,6 +16,30 @@ def _fake_camera(connected=True):
                           "command": staticmethod(lambda x: {"command": x})})()
 
 
+def test_api_restart_does_not_disturb_a_converter_owned_job(tmp_path):
+    """Regression: starting an api-role Engine used to run a full reconcile() on
+    *every* non-terminal job regardless of who owns it — including a process-stage
+    job a sibling converter was actively mid-way through — and rmtree the partial
+    tapes/<id> dir out from under it, crashing the converter's in-flight write."""
+    storage = tmp_path
+    cfg = _cfg(storage)
+    cfg.ensure_dirs()
+    (cfg.working / "Chorwacja01").mkdir(parents=True)
+    (cfg.working / "Chorwacja01" / "capture001.dv").write_bytes(b"x" * 1000)  # raw master, intact
+    (cfg.tapes / "Chorwacja01").mkdir(parents=True)
+    (cfg.tapes / "Chorwacja01" / "0083_x.mp4").write_bytes(b"mid-write")     # converter is here right now
+    eng = Engine(cfg, role="converter")
+    eng.store.put_job({"tape_id": "Chorwacja01", "stage": "process", "status": "ENCODING_MP4",
+                       "history": [], "logs": "", "updated_at": "t", "scene_index": 83, "scene_total": 300})
+
+    Engine(cfg, role="api")   # <-- this used to be the crash: an api restart mid-processing
+
+    job = eng.store.get_job("Chorwacja01")
+    assert job["status"] == "ENCODING_MP4"                       # untouched
+    assert (cfg.tapes / "Chorwacja01" / "0083_x.mp4").exists()    # not wiped out from under converter
+    assert (cfg.working / "Chorwacja01" / "capture001.dv").exists()
+
+
 def test_grabber_hands_capture_to_converter(tmp_path, monkeypatch):
     # converter side: stub the heavy pipeline, just drop a tape.json + sha file
     def fake_process(capture, tape_id, storage, level, log, state, *a, **k):

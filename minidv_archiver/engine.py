@@ -78,7 +78,12 @@ class Engine:
         self.capture_cancel = threading.Event()
         self.processing_tape: str | None = None  # this process's live conversion (converter/all)
         self.store.import_legacy(config.state / "jobs.json")
-        self.store.reconcile(config)
+        # Only reconcile the stages this process actually owns: a restarting api (or
+        # any role) must never rmtree a tapes/<id> dir a sibling grabber/converter is
+        # actively writing to. See JobStore.reconcile.
+        own_stages = tuple(s for role_ok, s in ((role in ("all", "grabber"), "capture"),
+                                                (role in ("all", "converter"), "process")) if role_ok)
+        self.store.reconcile(config, stages=own_stages)
         if role in ("all", "converter"):
             threading.Thread(target=self._process_worker, daemon=True).start()
             threading.Thread(target=self._compress_worker, daemon=True).start()
