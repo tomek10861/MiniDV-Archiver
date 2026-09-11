@@ -122,18 +122,27 @@ function viewToggleHTML() {
     ${btn('list', '☰', L('view.list'))}${btn('grid', '▦', L('view.grid'))}
   </div>`;
 }
-const GRIDTILE = 'group relative aspect-square overflow-hidden rounded-lg bg-black';
-function sceneGridHTML(items) {   // items: [{tapeId, s}]
+function sceneGridHTML(items) {   // items: [{tapeId, s}] -- s is a full scene record
   if (!items.length) return `<p class="text-theme-sm text-gray-400">${L('scenes.empty')}</p>`;
-  return `<div class="grid grid-cols-3 gap-1.5 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">` +
-    items.map((it, i) => `<button data-mkey="${i}" class="${GRIDTILE}">
-      <img loading="lazy" src="/api/tapes/${encodeURIComponent(it.tapeId)}/files/thumbnails/${encodeURIComponent(it.s.scene_id)}.jpg" alt=""
-        class="h-full w-full object-cover transition group-hover:scale-105">
-    </button>`).join('') + '</div>';
+  return `<div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">` +
+    items.map((it, i) => {
+      const s = it.s, tc = s.timecode || {}, rec = s.recording || {};
+      return `<button data-mkey="${i}" class="${TLTILE}">
+        <div class="aspect-square overflow-hidden rounded-xl bg-black">
+          <img loading="lazy" src="/api/tapes/${encodeURIComponent(it.tapeId)}/files/thumbnails/${encodeURIComponent(s.scene_id)}.jpg" alt=""
+            class="h-full w-full object-cover">
+        </div>
+        <div class="mt-1.5 px-0.5">
+          <div class="truncate text-theme-xs font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${it.tapeId}</div>
+          <div class="truncate text-[11px] text-gray-500 dark:text-gray-400">${rec.datetime ? rec.datetime.replace('T', ' ').slice(0, 16) : ''} · ${L('tl.scene', { n: s.scene_index })}</div>
+          <div class="truncate font-mono text-[11px] text-gray-400">${tc.start || ''}${tc.end ? ' – ' + tc.end : ''}</div>
+        </div>
+      </button>`;
+    }).join('') + '</div>';
 }
-let modalItems = [], modalIdx = -1;
-function openSceneModal(items, idx) {
-  modalItems = items; modalIdx = idx;
+let modalItems = [], modalIdx = -1, modalOpenTape = false;
+function openSceneModal(items, idx, openTapeLink) {
+  modalItems = items; modalIdx = idx; modalOpenTape = !!openTapeLink;
   $('#scModal').classList.remove('hidden'); $('#scModal').classList.add('flex');
   renderSceneModal();
 }
@@ -160,7 +169,8 @@ function renderSceneModal() {
     <button class="repair ${BTN}" data-tape="${tapeId}" data-scene="${sid}">${L('scene.repair')}</button>
     <a class="${LINK}" href="${file('dv.zst')}?dl=1">${L('scene.dv')}${arch.size_compressed ? ` (${mb(arch.size_compressed)})` : ''}</a>
     <a class="${LINK}" href="${file('mp4')}?dl=1">${L('scene.mp4')}${prox.size ? ` (${mb(prox.size)})` : ''}</a>
-    <a class="${LINK}" href="${file('json')}?dl=1">${L('scene.json')}</a>`;
+    <a class="${LINK}" href="${file('json')}?dl=1">${L('scene.json')}</a>
+    ${modalOpenTape ? `<button data-open-tape="${enc}" data-open-scene="${encodeURIComponent(sid)}" class="${BTN}">${L('tl.openInTapes')}</button>` : ''}`;
   $('#scModalPrev').disabled = modalIdx <= 0;
   $('#scModalNext').disabled = modalIdx >= modalItems.length - 1;
   $('#scModalCount').textContent = `${modalIdx + 1} / ${modalItems.length}`;
@@ -177,6 +187,13 @@ $('#scModal').addEventListener('click', e => {
   if (e.target.id === 'scModal') { closeSceneModal(); return; }
   const fb = e.target.closest('.fb'); if (fb) { fbCompress(fb); return; }
   const rp = e.target.closest('.repair'); if (rp) { repairCompress(rp); return; }
+  const ot = e.target.closest('[data-open-tape]');
+  if (ot) {
+    closeSceneModal();
+    fromTimeline = tl.year && tl.month ? { year: tl.year, month: tl.month, tape: decodeURIComponent(ot.dataset.openTape) } : fromTimeline;
+    const sc = ot.dataset.openScene;
+    go('#kasety/' + ot.dataset.openTape + (sc ? '/' + sc : ''));
+  }
 });
 document.addEventListener('keydown', e => {
   if ($('#scModal').classList.contains('hidden')) return;
@@ -628,7 +645,7 @@ $('#tlView').addEventListener('click', e => {
   const vt = e.target.closest('.viewToggle');
   if (vt) { setSceneView(vt.dataset.view); renderTlScenes(); return; }
   const gt = e.target.closest('[data-mkey]');
-  if (gt) { openSceneModal(tlGridItems, +gt.dataset.mkey); return; }
+  if (gt) { openSceneModal(tlGridItems, +gt.dataset.mkey, true); return; }
   const cb = e.target.closest('.tlsel');
   if (cb) {
     const key = tlKey(cb.dataset.tape, cb.dataset.scene);

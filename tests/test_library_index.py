@@ -117,6 +117,57 @@ def test_month_scenes_interleave_by_time_across_tapes(tmp_path):
     ]
 
 
+def _tape_with_fingerprint(cfg, tape_id, scene_hashes: dict[str, list[str]]):
+    """scene_hashes: {scene_id: [hash0, hash1, hash2]} -- builds one tape with those scenes,
+    all sharing an (unmatched) recording datetime so only frame_hashes drive matching."""
+    d = cfg.tapes / tape_id
+    (d / "thumbnails").mkdir(parents=True)
+    scenes = [{"scene_index": i + 1, "scene_id": sid, "frame_count": 500}
+              for i, sid in enumerate(scene_hashes)]
+    (d / "tape.json").write_text(json.dumps({"tape_id": tape_id, "scene_count": len(scenes), "scenes": scenes}))
+    for i, (sid, hashes) in enumerate(scene_hashes.items(), 1):
+        (d / f"{sid}.json").write_text(json.dumps({
+            "scene_index": i, "scene_id": sid, "tape_id": tape_id, "frame_count": 500,
+            "timecode": {"start": "00:05:00:00", "end": "00:05:20:00"},
+            "recording": {"datetime": None},
+            "capture": {"dropped_frames": 0, "source_discontinuities": [], "decode_errors": 0, "error_score": 0},
+            "fingerprint": {"datetime": None, "tc_start": None, "tc_end": None, "frame_count": 500,
+                            "frame_hashes": hashes}}))
+
+
+def test_duplicates_matches_near_identical_hashes_not_just_byte_exact(tmp_path):
+    """Two separate captures of the same footage never land on byte-identical DV
+    frames (decode rounding, a scene boundary off by a frame) -- an exact hash
+    match essentially never fires in practice. Two of three hash positions here
+    differ by 1 bit (tolerated); none are byte-identical, so this only groups
+    with the Hamming-distance matching, not the old exact-string check."""
+    cfg = _cfg(tmp_path)
+    s = JobStore(cfg.state / "jobs.db")
+    _tape_with_fingerprint(cfg, "A", {"0001_s": ["00000000000000ff", "1111111111111110", "aaaaaaaaaaaaaaaa"]})
+    _tape_with_fingerprint(cfg, "B", {"0001_s": ["00000000000000fe", "1111111111111111", "5555555555555555"]})
+    li.reindex(cfg, s, force=True)
+
+    dup = li.duplicates(cfg, s)
+    assert len(dup["groups"]) == 1
+    assert {m["tape_id"] for m in dup["groups"][0]["members"]} == {"A", "B"}
+
+
+def test_duplicates_finds_same_tape_pairs_too(tmp_path):
+    """A duplicated/over-recorded scene within a single tape's own capture must be
+    surfaced too, not just the same footage recaptured under a different tape_id."""
+    cfg = _cfg(tmp_path)
+    s = JobStore(cfg.state / "jobs.db")
+    hashes = ["00000000000000ff", "1111111111111110", "aaaaaaaaaaaaaaaa"]
+    _tape_with_fingerprint(cfg, "TAPE-X", {"0001_s": hashes, "0002_s": hashes})
+    li.reindex(cfg, s, force=True)
+
+    dup = li.duplicates(cfg, s)
+    assert len(dup["groups"]) == 1
+    members = dup["groups"][0]["members"]
+    assert {m["scene_id"] for m in members} == {"0001_s", "0002_s"}
+    assert all(m["tape_id"] == "TAPE-X" for m in members)
+
+
 def test_tape_recording_date_override_moves_all_scenes(tmp_path):
     cfg = _cfg(tmp_path)
     s = JobStore(cfg.state / "jobs.db")

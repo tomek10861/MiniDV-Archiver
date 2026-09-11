@@ -174,11 +174,22 @@ def timeline(config, store) -> dict:
     return {"years": out, "undated": undated}
 
 
+def _hamming_close(a: str, b: str, max_bits: int = 8) -> bool:
+    """frame_hashes are 64-bit average-hashes (see media.scene_probe_quality) — two
+    separate captures of the same footage never land on byte-identical DV frames
+    (different decode rounding, a scene boundary off by a frame or two), so an exact
+    hash never matched in practice. Tolerate up to max_bits differing bits instead."""
+    try:
+        return bin(int(a, 16) ^ int(b, 16)).count("1") <= max_bits
+    except ValueError:
+        return False
+
+
 def _hashes_match(a: dict, b: dict) -> bool:
     ah, bh = a.get("frame_hashes") or [], b.get("frame_hashes") or []
     if len(ah) < 2 or len(bh) < 2:
         return False
-    return sum(1 for x, y in zip(ah, bh) if x and x == y) >= 2
+    return sum(1 for x, y in zip(ah, bh) if x and y and _hamming_close(x, y)) >= 2
 
 
 def _same_recording(a: dict, b: dict) -> bool:
@@ -221,27 +232,24 @@ def duplicates(config, store) -> dict:
             i = parent[i]
         return i
 
-    buckets: dict[str, list[int]] = {}
-    for i, sc in enumerate(scenes):
-        fp = sc["fp"]
-        for k, h in enumerate(fp.get("frame_hashes") or []):
-            if h:
-                buckets.setdefault(f"h{k}:{h}", []).append(i)
-        dt = fp.get("datetime") or ""
-        if _SANE_DATE.match(dt[:10]) and fp.get("tc_start"):
-            buckets.setdefault(f"dt:{dt[:16]}|{fp['tc_start']}", []).append(i)
-    for members in buckets.values():
-        for x in range(len(members)):
-            for y in range(x + 1, len(members)):
-                if _same_recording(scenes[members[x]]["fp"], scenes[members[y]]["fp"]):
-                    parent[find(members[x])] = find(members[y])
+    # Full pairwise comparison, not just within exact-hash buckets: frame_hashes now
+    # match by Hamming distance (see _hamming_close), so two near-duplicate scenes
+    # essentially never share an exact bucket key to begin with. A few thousand
+    # scenes is cheap to compare O(n^2) (well under a second); this stops being
+    # true in the tens-of-thousands range, which a home MiniDV archive won't reach.
+    for i in range(len(scenes)):
+        for j in range(i + 1, len(scenes)):
+            if _same_recording(scenes[i]["fp"], scenes[j]["fp"]):
+                parent[find(i)] = find(j)
 
     grouped: dict[int, list[dict]] = {}
     for i in range(len(scenes)):
         grouped.setdefault(find(i), []).append(scenes[i])
     BIG, out = 10 ** 9, []
     for members in grouped.values():
-        if len(members) < 2 or len({m["tape_id"] for m in members}) < 2:
+        # Same-tape duplicates count too (an over-recorded/duplicated scene on one
+        # capture), not just the same footage recaptured under a different tape_id.
+        if len(members) < 2:
             continue
         members.sort(key=lambda m: (m["error_score"] if m["error_score"] is not None else BIG,
                                     m["tape_id"], m["scene_index"] or 0))

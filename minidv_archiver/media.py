@@ -73,6 +73,22 @@ def last_frame_timecode(path: Path, frame_size: int, temp_root: Path) -> str | N
 _DECODE_ERR = re.compile(rb"conceal|error while decoding|corrupt|Invalid data found|damaged", re.I)
 
 
+def _ahash16(gray256: bytes) -> str:
+    """64-bit average-hash from a 16x16 grayscale frame: downsample to an 8x8 grid
+    and threshold each block against the frame's overall mean. An exact hash of the
+    raw bytes (the previous approach) never matched two separate captures of the
+    same footage in practice — different decode rounding, or a scene boundary off
+    by a frame or two, changes bytes without changing what's actually on screen.
+    An average-hash is tolerant of that; compare with Hamming distance, not ==."""
+    blocks = [sum(gray256[(by * 2 + dy) * 16 + bx * 2 + dx] for dy in range(2) for dx in range(2)) / 4
+              for by in range(8) for bx in range(8)]
+    mean = sum(blocks) / len(blocks)
+    bits = 0
+    for v in blocks:
+        bits = (bits << 1) | (1 if v >= mean else 0)
+    return f"{bits:016x}"
+
+
 def scene_probe_quality(path: Path, frame_count: int) -> tuple[int, list[str]]:
     """One decode pass over a raw DV scene: count concealment / decode errors (tape /
     head damage — distinct from capture-transport dropped frames) and hash three
@@ -90,8 +106,7 @@ def scene_probe_quality(path: Path, frame_count: int) -> tuple[int, list[str]]:
         return 0, []
     errors = sum(1 for ln in (cp.stderr or b"").splitlines() if _DECODE_ERR.search(ln))
     data, size = cp.stdout or b"", 16 * 16
-    hashes = [hashlib.sha1(data[i * size:(i + 1) * size]).hexdigest()[:12]
-              for i in range(len(data) // size)]
+    hashes = [_ahash16(data[i * size:(i + 1) * size]) for i in range(len(data) // size)]
     return errors, hashes
 
 

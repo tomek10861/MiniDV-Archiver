@@ -1,6 +1,25 @@
 import pytest
 
-from minidv_archiver.media import _meta_args, probe_json, scene_metadata
+from minidv_archiver.media import _ahash16, _meta_args, probe_json, scene_metadata
+
+
+def test_ahash16_is_64bit_hex_tolerant_of_brightness_shift_sensitive_to_inversion():
+    base = bytes((x * 7) % 256 for x in range(256))
+    h1 = _ahash16(base)
+    assert len(h1) == 16
+    int(h1, 16)  # valid hex
+
+    # a uniform brightness shift (different capture gain) barely moves the hash --
+    # this is the whole point vs. the old exact-byte hash, which never matched two
+    # separate captures of the same footage in practice
+    shifted = bytes((b + 3) % 256 for b in base)
+    dist = bin(int(h1, 16) ^ int(_ahash16(shifted), 16)).count("1")
+    assert dist <= 8
+
+    # genuinely different content (inverted) should flip most of the 64 bits
+    inverted = bytes(255 - b for b in base)
+    dist2 = bin(int(h1, 16) ^ int(_ahash16(inverted), 16)).count("1")
+    assert dist2 >= 32
 
 
 def test_probe_json_parses_stdout_and_ignores_stderr_noise():
