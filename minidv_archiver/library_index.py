@@ -13,6 +13,11 @@ import re
 from pathlib import Path
 
 _SANE_DATE = re.compile(r"^(19[89]\d|20[0-2]\d)-\d\d-\d\d$")
+_SANE_TIME = re.compile(r"^\d\d-\d\d-\d\d$")
+
+# Bump when idx_scenes' fields change shape, to force every tape doc to be
+# rebuilt on the next periodic sweep even though its source files didn't change.
+_INDEX_SCHEMA = 2
 
 
 def _scene_date(tape: dict, scene: dict) -> str | None:
@@ -31,9 +36,24 @@ def _scene_date(tape: dict, scene: dict) -> str | None:
     return None
 
 
+def _scene_time(scene: dict) -> str | None:
+    """Effective HH:MM:SS a scene was recorded (camera's own clock, from VAUX) —
+    lets scenes from different tapes on the same day interleave in time order
+    instead of just grouping by tape. Same VAUX source as the scene_id stamp,
+    so the fallback below is not a weaker guess, just a differently-formatted read."""
+    rec = scene.get("recording") or {}
+    dt = rec.get("datetime") or ""
+    if rec.get("datetime_valid") and len(dt) >= 19:
+        return dt[11:19]
+    sid_time = (scene.get("scene_id") or "")[16:24]
+    if _SANE_TIME.match(sid_time):
+        return sid_time.replace("-", ":")
+    return None
+
+
 def source_sig(tape_dir: Path) -> str:
     """Cheap change token — name/mtime/size of tape.json and the scene jsons."""
-    parts = []
+    parts = [f"schema:{_INDEX_SCHEMA}"]
     for p in sorted([tape_dir / "tape.json", *tape_dir.glob("[0-9]*.json")]):
         try:
             st = p.stat()
@@ -64,7 +84,7 @@ def build_tape_doc(tape_dir: Path) -> dict:
         cap = s.get("capture") or {}
         idx_scenes.append({
             "scene_id": s.get("scene_id"), "scene_index": s.get("scene_index"),
-            "date": d, "tc": s.get("timecode") or {}, "frame_count": s.get("frame_count"),
+            "date": d, "time": _scene_time(s), "tc": s.get("timecode") or {}, "frame_count": s.get("frame_count"),
             "standard": (s.get("video") or {}).get("standard"),
             "dv": arch.get("size_compressed"),
             "dropped_frames": cap.get("dropped_frames") or 0,
@@ -242,7 +262,11 @@ def month_scenes(config, store, year: int, month: int) -> list[dict]:
             dt = s.get("date")
             if dt and int(dt[:4]) == year and int(dt[5:7]) == month:
                 res.append({"tape_id": tid, "label": label, "scene_id": s.get("scene_id"),
-                            "scene_index": s.get("scene_index"), "date": dt, "tc": s.get("tc") or {},
+                            "scene_index": s.get("scene_index"), "date": dt, "time": s.get("time"),
+                            "tc": s.get("tc") or {},
                             "frame_count": s.get("frame_count"), "standard": s.get("standard")})
-    res.sort(key=lambda x: (x["date"], x["tape_id"], x["scene_index"] or 0))
+    # Scenes with a known recording time (VAUX) interleave chronologically across
+    # tapes; scenes without one (no VAUX on that stretch of tape) sort after the
+    # timed ones for that day, grouped by tape/scene order same as before.
+    res.sort(key=lambda x: (x["date"], x["time"] or "99:99:99", x["tape_id"], x["scene_index"] or 0))
     return res

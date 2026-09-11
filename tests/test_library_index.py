@@ -93,6 +93,30 @@ def test_timeline_groups_by_year_and_month(tmp_path):
     assert july[0]["tc"]["end"] == "00:00:04:00"
 
 
+def test_scene_time_from_vaux_or_scene_id(tmp_path):
+    # valid VAUX -> its time-of-day
+    assert li._scene_time({"recording": {"datetime": "2004-01-02T10:11:12", "datetime_valid": True},
+                           "scene_id": "0001_2099-01-01_00-00-00"}) == "10:11:12"
+    # no VAUX -> fall back to the (same-source) scene_id stamp
+    assert li._scene_time({"recording": {}, "scene_id": "0014_2004-07-11_17-42-44"}) == "17:42:44"
+    # nothing usable
+    assert li._scene_time({"recording": {}, "scene_id": "0001_UNKNOWN-DATE"}) is None
+
+
+def test_month_scenes_interleave_by_time_across_tapes(tmp_path):
+    """The point: two different tapes recorded on the same day should not just be
+    grouped tape-by-tape — scenes should interleave in actual recording time order."""
+    cfg = _cfg(tmp_path)
+    s = JobStore(cfg.state / "jobs.db")
+    _tape(cfg, "TAPE-B", [("0001_2004-07-11_15-00-00", "2004-07-11T15:00:00", True)])
+    _tape(cfg, "TAPE-A", [("0001_2004-07-11_09-00-00", "2004-07-11T09:00:00", True),
+                          ("0002_2004-07-11_20-00-00", "2004-07-11T20:00:00", True)])
+    july = li.month_scenes(cfg, s, 2004, 7)
+    assert [(x["tape_id"], x["time"]) for x in july] == [
+        ("TAPE-A", "09:00:00"), ("TAPE-B", "15:00:00"), ("TAPE-A", "20:00:00"),
+    ]
+
+
 def test_tape_recording_date_override_moves_all_scenes(tmp_path):
     cfg = _cfg(tmp_path)
     s = JobStore(cfg.state / "jobs.db")

@@ -475,7 +475,7 @@ async function renderTimeline() {
         <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(s)}</div>
         <div class="mt-1.5 px-0.5">
           <div class="truncate text-theme-xs font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${s.label || s.tape_id}</div>
-          <div class="truncate text-[11px] text-gray-500 dark:text-gray-400">${s.date} · ${L('tl.scene', { n: s.scene_index })}</div>
+          <div class="truncate text-[11px] text-gray-500 dark:text-gray-400">${s.date}${s.time ? ' ' + s.time.slice(0, 5) : ''} · ${L('tl.scene', { n: s.scene_index })}</div>
           <div class="truncate font-mono text-[11px] text-gray-400">${tc.start || ''}${tc.end ? ' – ' + tc.end : ''}</div>
         </div>
       </button>`;
