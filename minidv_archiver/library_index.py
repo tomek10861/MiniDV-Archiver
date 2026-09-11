@@ -14,6 +14,7 @@ from pathlib import Path
 
 _SANE_DATE = re.compile(r"^(19[89]\d|20[0-2]\d)-\d\d-\d\d$")
 _SANE_TIME = re.compile(r"^\d\d-\d\d-\d\d$")
+_HASH16 = re.compile(r"^[0-9a-f]{16}$")
 
 # Bump when idx_scenes' fields change shape, to force every tape doc to be
 # rebuilt on the next periodic sweep even though its source files didn't change.
@@ -174,22 +175,30 @@ def timeline(config, store) -> dict:
     return {"years": out, "undated": undated}
 
 
-def _hamming_close(a: str, b: str, max_bits: int = 8) -> bool:
+def _hamming_close(a: str, b: str, max_bits: int = 5) -> bool:
     """frame_hashes are 64-bit average-hashes (see media.scene_probe_quality) — two
     separate captures of the same footage never land on byte-identical DV frames
     (different decode rounding, a scene boundary off by a frame or two), so an exact
     hash never matched in practice. Tolerate up to max_bits differing bits instead."""
-    try:
-        return bin(int(a, 16) ^ int(b, 16)).count("1") <= max_bits
-    except ValueError:
-        return False
+    return bin(int(a, 16) ^ int(b, 16)).count("1") <= max_bits
 
 
 def _hashes_match(a: dict, b: dict) -> bool:
-    ah, bh = a.get("frame_hashes") or [], b.get("frame_hashes") or []
-    if len(ah) < 2 or len(bh) < 2:
+    """True duplicate footage matches tightly at *every* sampled frame (start/mid/end),
+    not just some of them. Requiring only e.g. 2 of 3 to be "close" sounds reasonable
+    in isolation, but at a few thousand scenes the union-find grouping below turns any
+    nonzero per-pair false-positive rate into a giant transitively-chained cluster of
+    scenes that merely look vaguely similar (shared scenery, similar lighting) --
+    that happened here (a ~290-scene mega-cluster) before this tightened to "all".
+    Only well-formed 16-hex-char hashes count — a malformed one (or an old-format
+    12-char SHA1 hash, from before frame_hashes switched to an average-hash) is
+    excluded rather than treated as "doesn't match", so a stray bad value can't
+    poison an otherwise-agreeing comparison."""
+    pairs = [(x, y) for x, y in zip(a.get("frame_hashes") or [], b.get("frame_hashes") or [])
+             if x and y and _HASH16.match(x) and _HASH16.match(y)]
+    if len(pairs) < 2:
         return False
-    return sum(1 for x, y in zip(ah, bh) if x and y and _hamming_close(x, y)) >= 2
+    return all(_hamming_close(x, y) for x, y in pairs)
 
 
 def _same_recording(a: dict, b: dict) -> bool:

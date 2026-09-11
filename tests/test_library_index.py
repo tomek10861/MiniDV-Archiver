@@ -138,9 +138,27 @@ def _tape_with_fingerprint(cfg, tape_id, scene_hashes: dict[str, list[str]]):
 def test_duplicates_matches_near_identical_hashes_not_just_byte_exact(tmp_path):
     """Two separate captures of the same footage never land on byte-identical DV
     frames (decode rounding, a scene boundary off by a frame) -- an exact hash
-    match essentially never fires in practice. Two of three hash positions here
-    differ by 1 bit (tolerated); none are byte-identical, so this only groups
-    with the Hamming-distance matching, not the old exact-string check."""
+    match essentially never fires in practice. Both valid hash positions here
+    differ by 1 bit (tolerated, not byte-identical); the third position is a
+    filtered-out near-uniform frame ("") on both sides, so it's simply not
+    counted rather than blocking the match."""
+    cfg = _cfg(tmp_path)
+    s = JobStore(cfg.state / "jobs.db")
+    _tape_with_fingerprint(cfg, "A", {"0001_s": ["00000000000000ff", "1111111111111110", ""]})
+    _tape_with_fingerprint(cfg, "B", {"0001_s": ["00000000000000fe", "1111111111111111", ""]})
+    li.reindex(cfg, s, force=True)
+
+    dup = li.duplicates(cfg, s)
+    assert len(dup["groups"]) == 1
+    assert {m["tape_id"] for m in dup["groups"][0]["members"]} == {"A", "B"}
+
+
+def test_duplicates_requires_every_sampled_frame_to_match_not_just_some(tmp_path):
+    """Matching only e.g. 2 of 3 hash positions sounds reasonable per-pair, but at a
+    few thousand scenes the union-find grouping turns any nonzero per-pair
+    false-positive rate into a giant transitively-chained cluster of scenes that
+    merely look vaguely similar. Two close positions and one far one must NOT
+    match -- every sampled frame has to agree, since real duplicate footage does."""
     cfg = _cfg(tmp_path)
     s = JobStore(cfg.state / "jobs.db")
     _tape_with_fingerprint(cfg, "A", {"0001_s": ["00000000000000ff", "1111111111111110", "aaaaaaaaaaaaaaaa"]})
@@ -148,8 +166,7 @@ def test_duplicates_matches_near_identical_hashes_not_just_byte_exact(tmp_path):
     li.reindex(cfg, s, force=True)
 
     dup = li.duplicates(cfg, s)
-    assert len(dup["groups"]) == 1
-    assert {m["tape_id"] for m in dup["groups"][0]["members"]} == {"A", "B"}
+    assert dup["groups"] == []
 
 
 def test_duplicates_finds_same_tape_pairs_too(tmp_path):

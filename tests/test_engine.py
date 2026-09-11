@@ -307,8 +307,9 @@ def test_duplicates_groups_same_recording_across_tapes_best_first(tmp_path):
             "fingerprint": {"datetime": "2004-07-11T10:00:00", "tc_start": "00:05:00:00",
                             "tc_end": "00:05:20:00", "frame_count": 500, "frame_hashes": hashes}}))
 
-    tape("TAPE-0001", 5, ["aaa", "bbb", "ccc"])
-    tape("TAPE-0012", 0, ["aaa", "bbb", "zzz"])   # 2/3 hashes match -> same recording
+    hashes = ["1111111111111111", "2222222222222222", "3333333333333333"]
+    tape("TAPE-0001", 5, hashes)
+    tape("TAPE-0012", 0, hashes)   # every hash matches -> same recording
     li.reindex(eng.config, eng.store, force=True)
 
     dup = eng.duplicates()
