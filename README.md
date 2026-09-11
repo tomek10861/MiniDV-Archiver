@@ -192,7 +192,8 @@ JSON over HTTP (served by the `api` process; `nginx` proxies `/api` to it).
 `/api/tapes/{id}/files/{name}` (archive files; `Range` for MP4; `?dl=1` forces
 download) ·
 `/api/tapes/{id}/compressed/{token}.mp4` — serves an on-demand build; `token` is
-`TAPE`, `<scene_id>`, `<scene_id>-RES` (restore), or `SEL-<hash>[-FB|-RES]`.
+`TAPE`, `<scene_id>`, `<scene_id>-RES` (restore), or `SEL-<hash>[-FB|-RES]` ·
+`/api/playlist/build/{token}.mp4` — serves a cross-tape build (see below).
 
 **`POST`**
 `/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?}` ·
@@ -202,10 +203,16 @@ download) ·
 `/api/tapes/{id}/compress` `{scenes?, share?, restore?}` (no body = whole tape) ·
 `/api/tapes/{id}/rename` `{new_id}` ·
 `/api/tapes/{id}/meta` `{label?, recording_date?}` ·
-`/api/tapes/{id}/reprobe` `{force?}` (quality scan / fingerprint).
+`/api/tapes/{id}/reprobe` `{force?}` (quality scan / fingerprint) ·
+`/api/playlist/build` `{items: [{tape_id, scene_id}, ...], title?}` — join scenes
+from one or several tapes (in that order) into a single MP4, e.g. a multi-select
+from the timeline. Call it again with the same body to poll status
+(`QUEUED`/`RUNNING`/`READY`), same pattern as the other on-demand builds above.
 
 **`DELETE`**
-`/api/tapes/{id}` · `/api/tapes/{id}/scenes` `{scenes: [...]}`.
+`/api/tapes/{id}` · `/api/tapes/{id}/scenes` `{scenes: [...]}` ·
+`/api/jobs/{tape_id}` (clears a finished/errored job row; refuses a running or
+already-archived one).
 
 ## Camera compatibility & FireWire notes
 

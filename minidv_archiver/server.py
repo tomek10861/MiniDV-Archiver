@@ -98,6 +98,16 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json({"error": "not found"}, 404)
                 forced = urlparse(self.path).query == "dl=1" or "&dl=1" in self.path or "?dl=1" in self.path
                 return self.send_file(target, inline=target.suffix.lower() in INLINE_SUFFIXES and not forced)
+            if len(parts) == 4 and parts[:3] == ["api", "playlist", "build"]:
+                token = parts[3].removesuffix(".mp4")
+                job = ENGINE.playlist_status(token)
+                disk = CONFIG.storage / "tmp" / "share" / f"{ENGINE.PLAYLIST_BUCKET}_{token}.mp4"
+                if job.get("status") == "READY" and job.get("path") and Path(job["path"]).exists():
+                    return self.send_file(Path(job["path"]), inline=False)
+                if job.get("status") != "RUNNING" and job.get("status") != "QUEUED" and disk.exists():
+                    return self.send_file(disk, inline=False)
+                return self.json({"error": "nagranie jeszcze się przygotowuje "
+                                  "(albo wygasło — zbuduj ponownie)", "state": job.get("status")}, 409)
             if len(parts) >= 5 and parts[:2] == ["api", "tapes"] and parts[3] == "compressed":
                 token = parts[4].removesuffix(".mp4")
                 if token in ("TAPE", "tape"):
@@ -169,6 +179,12 @@ class Handler(BaseHTTPRequestHandler):
                                               data.get("manual_transport", False)), 202)
             if path == "/api/capture/stop":
                 return self.json(ENGINE.stop(self.body().get("tape_id")))
+            if path == "/api/playlist/build":
+                data = self.body()
+                items = data.get("items")
+                if not isinstance(items, list) or not items:
+                    return self.json({"error": "pusta lista scen"}, 400)
+                return self.json(ENGINE.start_playlist(items, data.get("title")), 202)
             cparts = path.strip("/").split("/")
             if len(cparts) >= 4 and cparts[:2] == ["api", "tapes"] and cparts[-1] == "compress":
                 data = self.body()

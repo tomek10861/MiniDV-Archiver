@@ -332,6 +332,42 @@ class Engine:
         mode = "restore" if restore else "share" if share else "concat"
         return self._enqueue_build(tape_id, token, srcs, mode, f"{tape_id} · {len(ids)} scen")
 
+    PLAYLIST_BUCKET = "_playlist"
+
+    def start_playlist(self, items: list[dict], title: str | None = None) -> dict:
+        """Join scenes picked from possibly *different* tapes (the timeline's
+        cross-tape multi-select) into one MP4 — same stream-copy concat as
+        start_selection, just not confined to one tape's directory. Unlike
+        start_selection this does NOT sort scenes by id: order is the caller's
+        (the timeline sends its already time-sorted scene order), since here
+        scene_index carries no cross-tape meaning to sort by."""
+        pairs, seen = [], set()
+        for it in items or []:
+            tid, sid = (it or {}).get("tape_id"), (it or {}).get("scene_id")
+            if not (isinstance(tid, str) and isinstance(sid, str)):
+                continue
+            if not (re.fullmatch(r"[0-9A-Za-z._-]{1,80}", tid) and re.fullmatch(r"[0-9A-Za-z._-]{1,80}", sid)):
+                continue
+            if (tid, sid) in seen:
+                continue
+            seen.add((tid, sid))
+            pairs.append((tid, sid))
+        if not pairs:
+            raise FileNotFoundError("pusta lista scen")
+        srcs = []
+        for tid, sid in pairs:
+            d = self._tape_dir(tid)
+            p = d / f"{sid}.mp4"
+            if not p.exists():
+                raise FileNotFoundError(f"nie ma pliku {tid}/{sid}.mp4")
+            srcs.append(p)
+        token = "PL-" + hashlib.sha1("\n".join(f"{t}/{s}" for t, s in pairs).encode()).hexdigest()[:12]
+        ttl = title or f"Wybrane sceny ({len(pairs)})"
+        return self._enqueue_build(self.PLAYLIST_BUCKET, token, srcs, "concat", ttl)
+
+    def playlist_status(self, token: str) -> dict:
+        return self.compress_status(self.PLAYLIST_BUCKET, token)
+
     def _compress_worker(self) -> None:
         poll = self.role != "all"
         while True:

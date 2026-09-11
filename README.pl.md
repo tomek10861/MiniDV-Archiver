@@ -196,7 +196,8 @@ JSON po HTTP (serwuje proces `api`; `nginx` proxuje do niego `/api`).
 `/api/tapes/{id}/files/{name}` (pliki archiwum; `Range` dla MP4; `?dl=1` wymusza
 pobranie) ·
 `/api/tapes/{id}/compressed/{token}.mp4` — serwuje build na żądanie; `token` to
-`TAPE`, `<scene_id>`, `<scene_id>-RES` (napraw), albo `SEL-<hash>[-FB|-RES]`.
+`TAPE`, `<scene_id>`, `<scene_id>-RES` (napraw), albo `SEL-<hash>[-FB|-RES]` ·
+`/api/playlist/build/{token}.mp4` — serwuje build złożony ze scen z kilku kaset (niżej).
 
 **`POST`**
 `/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?}` ·
@@ -206,10 +207,16 @@ pobranie) ·
 `/api/tapes/{id}/compress` `{scenes?, share?, restore?}` (brak body = cała taśma) ·
 `/api/tapes/{id}/rename` `{new_id}` ·
 `/api/tapes/{id}/meta` `{label?, recording_date?}` ·
-`/api/tapes/{id}/reprobe` `{force?}` (sonda jakości / odcisk).
+`/api/tapes/{id}/reprobe` `{force?}` (sonda jakości / odcisk) ·
+`/api/playlist/build` `{items: [{tape_id, scene_id}, ...], title?}` — złącza sceny
+z jednej lub kilku kaset (w podanej kolejności) w jedno MP4, np. z zaznaczenia na osi
+czasu. Wywołaj ponownie z tym samym body, żeby odpytać status
+(`QUEUED`/`RUNNING`/`READY`) — ten sam wzorzec co pozostałe buildy na żądanie.
 
 **`DELETE`**
-`/api/tapes/{id}` · `/api/tapes/{id}/scenes` `{scenes: [...]}`.
+`/api/tapes/{id}` · `/api/tapes/{id}/scenes` `{scenes: [...]}` ·
+`/api/jobs/{tape_id}` (kasuje wpis ukończonego/błędnego zadania; odmawia dla
+działającego albo już zarchiwizowanego).
 
 ## Zgodność kamer i uwagi o FireWire
 

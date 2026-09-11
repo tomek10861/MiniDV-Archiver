@@ -358,6 +358,47 @@ def test_start_selection_concatenates_chosen_scenes(tmp_path, monkeypatch):
         assert "brak scen" in str(exc)
 
 
+def test_start_playlist_concatenates_scenes_across_tapes(tmp_path, monkeypatch):
+    """The timeline's cross-tape build: scenes chosen from different tapes join
+    into one MP4, same mechanism as start_selection but not confined to one tape."""
+    import minidv_archiver.media as mm
+    monkeypatch.setattr(mm, "concat_mp4",
+                        lambda srcs, out, **k: pathlib.Path(out).write_bytes(b"joined:" + str(len(srcs)).encode()))
+    eng = _engine(tmp_path)
+    for tid, scenes in (("TAPE-A", ["0001_a"]), ("TAPE-B", ["0001_x", "0002_y"])):
+        td = eng.config.tapes / tid
+        td.mkdir(parents=True)
+        (td / "tape.json").write_text("{}")
+        for s in scenes:
+            (td / f"{s}.mp4").write_bytes(b"x")
+
+    items = [{"tape_id": "TAPE-B", "scene_id": "0001_x"}, {"tape_id": "TAPE-A", "scene_id": "0001_a"},
+             {"tape_id": "TAPE-B", "scene_id": "0002_y"}, {"tape_id": "TAPE-B", "scene_id": "0001_x"}]  # w/ a dupe
+    j = eng.start_playlist(items)
+    assert j["token"].startswith("PL-") and j["mode"] == "concat" and j["tape_id"] == "_playlist"
+    for _ in range(100):
+        if eng.playlist_status(j["token"])["status"] in ("READY", "ERROR"):
+            break
+        time.sleep(0.05)
+    done = eng.playlist_status(j["token"])
+    assert done["status"] == "READY"
+    assert pathlib.Path(done["path"]).read_bytes() == b"joined:3"    # deduped
+    assert eng.start_playlist(items)["token"] == j["token"]           # same order -> stable token (cache hit)
+    assert eng.start_playlist(list(reversed(items)))["token"] != j["token"]  # order matters for concat sequence
+    assert eng.start_playlist(items[:2])["token"] != j["token"]
+
+    try:
+        eng.start_playlist([{"tape_id": "TAPE-A", "scene_id": "nope"}])
+        assert False
+    except FileNotFoundError as exc:
+        assert "nie ma pliku" in str(exc)
+    try:
+        eng.start_playlist([])
+        assert False
+    except FileNotFoundError as exc:
+        assert "pusta lista scen" in str(exc)
+
+
 def _make_tape(eng, tape_id, scene_ids):
     d = eng.config.tapes / tape_id
     (d / "thumbnails").mkdir(parents=True)

@@ -420,6 +420,11 @@ const nScen = n => window.i18n.lang === 'pl'
   ? `${n} ${n === 1 ? 'scena' : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'sceny' : 'scen')}`
   : `${n} ${n === 1 ? 'scene' : 'scenes'}`;
 let tl = { level: 'years', year: null, month: null, data: null, loading: false };
+let tlScenes = [];                    // cached scene list for the currently shown month, time-sorted
+// "tapeId|sceneId" -> {tape_id, scene_id, date, time}; a Map (not just a Set of keys) so a build can span
+// several months' worth of picks without losing entries once the visited month's tlScenes gets replaced
+const tlSelected = new Map();
+const tlKey = (t, s) => t + '|' + s;
 
 async function loadTimeline(force) {
   if (tl.loading) return;
@@ -462,30 +467,89 @@ async function renderTimeline() {
     </button>`).join('') || `<p class="col-span-full text-theme-sm text-gray-400">${L('tl.noScenes')}</p>`;
     return;
   }
-  // scenes: each tile opens the tape at that exact scene (preview + downloads)
+  // scenes: quick inline preview + cross-tape multi-select right here, or jump to Kasety for full management
   view.className = 'p-5';
   view.innerHTML = `<p class="text-theme-sm text-gray-400">${L('loading')}</p>`;
-  let scenes;
-  try { scenes = await api(`/api/timeline/${tl.year}/${tl.month}`); }
+  try { tlScenes = await api(`/api/timeline/${tl.year}/${tl.month}`); }
   catch (e) { view.innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
-  view.innerHTML = `<div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">` +
-    scenes.map(s => {
-      const tc = s.tc || {};
-      return `<button data-open-tape="${encodeURIComponent(s.tape_id)}" data-open-scene="${encodeURIComponent(s.scene_id || '')}" class="${TLTILE}">
-        <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(s)}</div>
-        <div class="mt-1.5 px-0.5">
+  renderTlScenes();
+}
+
+function renderTlScenes() {
+  const view = $('#tlView');
+  view.className = 'p-5';
+  view.innerHTML = `
+    <div id="tlSelBar" class="mb-4 hidden flex-wrap items-center gap-3 rounded-xl border border-brand-500/40 bg-brand-50/60 p-3 dark:bg-brand-500/[0.08]">
+      <span class="text-sm">${L('sel.count')} <b id="tlSelCount">0</b></span>
+      <button id="tlBuild" class="${BTN_PRIMARY}">${L('tl.build')}</button>
+      <button id="tlSelClear" class="${BTN}">${L('sel.clear')}</button>
+      <span class="basis-full text-theme-xs text-gray-500 dark:text-gray-400 sm:basis-auto">${L('tl.buildHint')}</span>
+    </div>
+    <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">` +
+    tlScenes.map(s => {
+      const tc = s.tc || {}, key = tlKey(s.tape_id, s.scene_id), sel = tlSelected.has(key);
+      return `<div data-tl-key="${key}" class="${TLTILE} ${sel ? 'border-brand-500' : ''}">
+        <div class="relative block cursor-pointer tlpreview" data-tape="${encodeURIComponent(s.tape_id)}" data-scene="${encodeURIComponent(s.scene_id || '')}">
+          <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(s)}</div>
+          <input type="checkbox" class="tlsel absolute left-1.5 top-1.5 h-4 w-4 accent-brand-500" data-tape="${s.tape_id}" data-scene="${s.scene_id}" ${sel ? 'checked' : ''}>
+        </div>
+        <button data-open-tape="${encodeURIComponent(s.tape_id)}" data-open-scene="${encodeURIComponent(s.scene_id || '')}"
+          title="${L('tl.openInTapes')}" class="mt-1.5 block w-full px-0.5 text-left">
           <div class="truncate text-theme-xs font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${s.label || s.tape_id}</div>
           <div class="truncate text-[11px] text-gray-500 dark:text-gray-400">${s.date}${s.time ? ' ' + s.time.slice(0, 5) : ''} · ${L('tl.scene', { n: s.scene_index })}</div>
           <div class="truncate font-mono text-[11px] text-gray-400">${tc.start || ''}${tc.end ? ' – ' + tc.end : ''}</div>
-        </div>
-      </button>`;
+        </button>
+      </div>`;
     }).join('') + '</div>';
+  syncTlSelBar();
+}
+
+function syncTlSelBar() {
+  const bar = $('#tlSelBar'); if (!bar) return;
+  bar.classList.toggle('hidden', tlSelected.size === 0);
+  bar.classList.toggle('flex', tlSelected.size > 0);
+  const c = $('#tlSelCount'); if (c) c.textContent = tlSelected.size;
+}
+
+async function buildTlPlaylist(btn) {
+  if (tlSelected.size === 0) return;
+  // chronological order (date+time), not click order or which month was open when picked
+  const items = [...tlSelected.values()]
+    .sort((a, b) => (a.date + 'T' + (a.time || '99:99:99')).localeCompare(b.date + 'T' + (b.time || '99:99:99')))
+    .map(({ tape_id, scene_id }) => ({ tape_id, scene_id }));
+  const label = btn.textContent;
+  await pollBuild('/api/playlist/build', { items }, btn, label, j => `/api/playlist/build/${j.token}.mp4`);
 }
 
 $('#tlRefresh').onclick = () => loadTimeline(true);
 $('#tlView').addEventListener('click', e => {
   const nav = e.target.closest('[data-go]');
   if (nav) { go(nav.dataset.go); return; }
+  const cb = e.target.closest('.tlsel');
+  if (cb) {
+    const key = tlKey(cb.dataset.tape, cb.dataset.scene);
+    if (cb.checked) {
+      const s = tlScenes.find(x => x.tape_id === cb.dataset.tape && x.scene_id === cb.dataset.scene);
+      tlSelected.set(key, { tape_id: cb.dataset.tape, scene_id: cb.dataset.scene, date: s?.date || '', time: s?.time || '' });
+    } else {
+      tlSelected.delete(key);
+    }
+    cb.closest('[data-tl-key]')?.classList.toggle('border-brand-500', cb.checked);
+    syncTlSelBar();
+    return;
+  }
+  if (e.target.id === 'tlSelClear') { tlSelected.clear(); renderTlScenes(); return; }
+  if (e.target.id === 'tlBuild') { buildTlPlaylist(e.target); return; }
+  const pv = e.target.closest('.tlpreview');
+  if (pv) {
+    const tile = pv.closest('[data-tl-key]'); let v = tile.querySelector('video');
+    if (v) { v.remove(); return; }
+    v = document.createElement('video'); v.controls = true; v.preload = 'metadata';
+    v.className = 'mt-2 w-full rounded-lg bg-black';
+    v.src = `/api/tapes/${pv.dataset.tape}/files/${pv.dataset.scene}.mp4`;
+    pv.after(v); v.play().catch(() => {});
+    return;
+  }
   const ot = e.target.closest('[data-open-tape]');
   if (ot) {
     fromTimeline = { year: tl.year, month: tl.month, tape: decodeURIComponent(ot.dataset.openTape) };

@@ -123,6 +123,8 @@
     'tl.noScenes': 'No scenes in this year.',
     'tl.scene': 'scene {n}',
     'tl.undatedNote': '+ {n} without a recognised date (shown under “Tapes”).',
+    'tl.openInTapes': 'open in Tapes', 'tl.build': '🎬 Build one video from selected',
+    'tl.buildHint': 'Pick scenes from different tapes to join them into a single video, in this order.',
 
     // logs
     'logs.title': 'Logs', 'logs.follow': 'auto-scroll', 'logs.none': 'no tasks',
@@ -256,6 +258,8 @@
     'tl.noScenes': 'Brak scen w tym roku.',
     'tl.scene': 'scena {n}',
     'tl.undatedNote': '+ {n} bez rozpoznanej daty (widoczne w „Kasety”).',
+    'tl.openInTapes': 'otwórz w Kasetach', 'tl.build': '🎬 Zbuduj jedno nagranie z zaznaczonych',
+    'tl.buildHint': 'Zaznacz sceny z różnych kaset, żeby złączyć je w jedno nagranie, w tej kolejności.',
 
     'logs.title': 'Logi', 'logs.follow': 'auto-scroll', 'logs.none': 'brak zadań',
     'log.opt.capture': '▶ zgrywanie {tape}',
