@@ -515,6 +515,17 @@ def test_delete_scenes_updates_manifest_and_rebuilds_proxy(tmp_path, monkeypatch
     assert "0002_b" not in sha and "0001_a.mp4" in sha and sha.rstrip().endswith("  tape.json")
 
 
+def test_set_derives_scene_index_and_keeps_scene_total(tmp_path):
+    eng = _engine(tmp_path)
+    job = eng._new_job("TAPE-9", manual_transport=True)
+    eng.jobs["TAPE-9"] = job
+    eng._set(job, "COMPRESSING", "0001_x", total=300)
+    assert job["scene_index"] == 1 and job["scene_total"] == 300
+    eng._set(job, "VERIFYING_ARCHIVES", "0002_y")   # total omitted -> stays at 300
+    assert job["scene_index"] == 2 and job["scene_total"] == 300
+    assert eng.store.get_job("TAPE-9")["scene_total"] == 300
+
+
 def test_progress_updates_captured_bytes_without_history_entry(tmp_path):
     eng = _engine(tmp_path)
     job = eng._new_job("TAPE-9", manual_transport=True)

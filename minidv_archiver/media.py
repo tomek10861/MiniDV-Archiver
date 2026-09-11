@@ -273,9 +273,9 @@ def _process_capture(capture: Path, tape_id: str, storage: Path, zstd_level: int
         audios = [s for s in probe["streams"] if s.get("codec_type") == "audio"]
         interlaced, top_first = first_frame_interlaced(scene)
         source_hash = sha256(scene)
-        state("COMPRESSING", scene_id)
+        state("COMPRESSING", scene_id, total=len(scenes))
         run(["zstd", "-q", f"-{zstd_level}", "-T0", str(scene), "-o", str(archive)], log=log)
-        state("VERIFYING_ARCHIVES", scene_id)
+        state("VERIFYING_ARCHIVES", scene_id, total=len(scenes))
         run(["zstd", "-q", "-t", str(archive)], log=log)
         restored_hash = sha256_zstd_stream(archive)
         if source_hash != restored_hash:
@@ -284,15 +284,15 @@ def _process_capture(capture: Path, tape_id: str, storage: Path, zstd_level: int
         frame_count = scene.stat().st_size // frame_size
         timecode_start = probe.get("format", {}).get("tags", {}).get("timecode")
         timecode_end = last_frame_timecode(scene, frame_size, storage / "tmp")
-        state("ENCODING_MP4", scene_id)
+        state("ENCODING_MP4", scene_id, total=len(scenes))
         encode_mp4(scene, proxy, interlaced, log, mp4_preset,
                    scene_metadata(tape_id, index, dt, dt_source, timecode_start, timecode_end),
                    top_field_first=top_first)
-        state("VERIFYING_MP4", scene_id)
+        state("VERIFYING_MP4", scene_id, total=len(scenes))
         proxy_probe = ffprobe(proxy)
         if not proxy_probe.get("streams"):
             raise RuntimeError(f"invalid MP4: {proxy}")
-        state("PROBING_QUALITY", scene_id)
+        state("PROBING_QUALITY", scene_id, total=len(scenes))
         decode_errors, frame_hashes = scene_probe_quality(scene, frame_count)
         error_score = len(capture_drop_lines) + len(discontinuities) + decode_errors
         meta = {

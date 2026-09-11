@@ -116,7 +116,7 @@ class Engine:
             job["cancel"] = True
         self.store.put_job(job)
 
-    def _set(self, job: dict, status: str, scene_id=None, message=None) -> None:
+    def _set(self, job: dict, status: str, scene_id=None, message=None, total=None) -> None:
         with self.lock:
             # capture cancellation is handled by _acquire_dv's own stop check (so a
             # partial tape can still be archived); only abort the processing worker here.
@@ -126,6 +126,12 @@ class Engine:
             job["updated_at"] = now()
             if scene_id:
                 job["current_scene"] = scene_id
+                try:  # scene_id = "NNNN_..." -> 1-based index within this tape, for progress/ETA
+                    job["scene_index"] = int(scene_id.split("_", 1)[0])
+                except (ValueError, IndexError):
+                    pass
+            if total:
+                job["scene_total"] = total
             job["history"].append({"status": status, "at": now(), **({"message": message} if message else {})})
             self._write_job(job)
             self._persist()
@@ -806,13 +812,14 @@ class Engine:
         meta = job.get("capture_meta") or {"started_at": job["created_at"], "drops": 0, "drop_lines": [],
                                            "camera": self.camera.info()}
         job["stage"] = "process"
+        job["processing_started_at"] = now()
         try:
             if not capture.exists() or capture.stat().st_size == 0:
                 raise RuntimeError("raw DV missing for processing")
             self._set(job, "ANALYZING_DV")
             tape = process_capture(capture, tape_id, self.config.storage, self.config.zstd_level,
                                    lambda m: self._log(job, m),
-                                   lambda s, sid=None: self._set(job, s, sid),
+                                   lambda s, sid=None, total=None: self._set(job, s, sid, total=total),
                                    meta["drop_lines"], nice=self.config.nice_processing,
                                    mp4_preset=self.config.mp4_preset)
             tape_path = self.config.tapes / tape_id / "tape.json"
@@ -852,7 +859,8 @@ class Engine:
         job["status"] = "ANALYZING_DV"
         self.store.put_job(job)
         result = process_capture(capture, tape_id, self.config.storage, self.config.zstd_level,
-                                 lambda m: self._log(job, m), lambda s, sid=None: self._set(job, s, sid),
+                                 lambda m: self._log(job, m),
+                                 lambda s, sid=None, total=None: self._set(job, s, sid, total=total),
                                  nice=self.config.nice_processing, mp4_preset=self.config.mp4_preset)
         capture.unlink()
         shutil.rmtree(work, ignore_errors=True)

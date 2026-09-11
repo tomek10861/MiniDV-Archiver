@@ -9,6 +9,26 @@ const dvDuration = bytes => {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   return (h > 0 ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(sec).padStart(2, '0');
 };
+// coarse "1h 30m" / "8m 20s" duration, for processing ETAs (long, low-precision estimates)
+const fmtDuration = totalSec => {
+  const s = Math.max(0, Math.round(totalSec));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+};
+// per-scene progress + ETA for a processing job, "" if we don't have enough info yet
+function processingProgress(j) {
+  if (j.stage !== 'process' || !j.scene_total || !j.scene_index) return '';
+  const pct = Math.min(100, Math.round(100 * j.scene_index / j.scene_total));
+  let eta = '';
+  if (j.processing_started_at) {
+    const elapsed = (Date.now() - Date.parse(j.processing_started_at)) / 1000;
+    if (elapsed > 0) {
+      const remaining = (elapsed / j.scene_index) * (j.scene_total - j.scene_index);
+      if (remaining > 1) eta = ' · ' + L('job.eta', { t: fmtDuration(remaining) });
+    }
+  }
+  return ` · ${j.scene_index}/${j.scene_total} (${pct}%)${eta}`;
+}
 const TERMINAL = new Set(['COMPLETED', 'ERROR', 'CANCELLED']);
 const stPL = s => (s ? L('state.' + s) : '—');
 const durTxt = (frames, std) => {
@@ -571,17 +591,19 @@ function activeBuilds(builds) {
 let jobsSig = '';
 function renderJobs(list, queue, builds) {
   builds = activeBuilds(builds);
-  const sig = JSON.stringify([list.map(j => [j.tape_id, j.status, j.current_scene, j.captured_bytes]),
+  const sig = JSON.stringify([list.map(j => [j.tape_id, j.status, j.current_scene, j.captured_bytes, j.scene_index]),
     builds.map(b => [b.key, b.status])]);
   if (sig === jobsSig) return; jobsSig = sig;
   const jobRows = list.map(j => {
     const [txt, cls] = jobBadge(j, queue), run = !TERMINAL.has(j.status);
     const clearable = j.status === 'CANCELLED' || j.status === 'ERROR';
+    const progress = processingProgress(j);
+    const sceneInfo = progress || (j.current_scene ? ` · ${j.current_scene}` : '');
     return `<div class="rounded-xl border border-gray-200 p-3 dark:border-gray-800">
       <div class="flex flex-wrap items-center gap-2">
         <span class="${BADGE} ${cls}">${txt}</span>
         <strong class="text-gray-800 dark:text-white/90">${j.tape_id}</strong>
-        <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${stPL(j.status)}${j.current_scene ? ` · ${j.current_scene}` : ''}${j.captured_bytes ? ` · ${dvDuration(j.captured_bytes)} · ${mb(j.captured_bytes)}` : ''}${j.dropped_frames ? ' · ' + L('job.drop', { n: j.dropped_frames }) : ''}</span>
+        <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${stPL(j.status)}${sceneInfo}${j.captured_bytes ? ` · ${dvDuration(j.captured_bytes)} · ${mb(j.captured_bytes)}` : ''}${j.dropped_frames ? ' · ' + L('job.drop', { n: j.dropped_frames }) : ''}</span>
         <span class="ml-auto font-mono text-[11px] text-gray-400">${(j.updated_at || '').slice(11, 19)}</span>
         ${run ? `<button class="jstop ${BTN}" data-tape="${j.tape_id}">${L('job.stop')}</button>` : ''}
         ${clearable ? `<button class="jclear ${BTN_DANGER}" data-tape="${j.tape_id}" data-status="${j.status}">${L('job.clear')}</button>` : ''}
@@ -696,7 +718,7 @@ async function refresh() {
     const cap = s.capture;
     $('#capState').textContent = cap ? stPL(cap.status) : L('state.IDLE');
     $('#capLog').textContent = cap ? (cap.logs || '—')
-      : (s.processing ? L('capture.background', { tape: s.processing.tape_id, status: stPL(s.processing.status) }) : L('capture.idle'));
+      : (s.processing ? L('capture.background', { tape: s.processing.tape_id, status: stPL(s.processing.status) }) + processingProgress(s.processing) : L('capture.idle'));
     $('#start').disabled = !!cap;
 
     const capProgress = $('#capProgress'), hasProgress = !!(cap && cap.captured_bytes);

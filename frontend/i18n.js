@@ -44,6 +44,7 @@
     'job.confirmStop': 'Stop task {tape}?',
     'job.confirmClear': 'Remove the record of {tape} ({status})?\nIt captured no data — nothing archived is affected.',
     'job.drop': '⚠ {n} dropped',
+    'job.eta': 'ETA {t}',
 
     'build.mode.reprobe': 'QUALITY SCAN', 'build.mode.restore': 'RESTORE',
     'build.mode.share': 'SHARE', 'build.mode.concat': 'JOIN',
@@ -180,6 +181,7 @@
     'job.confirmStop': 'Przerwać zadanie {tape}?',
     'job.confirmClear': 'Usunąć wpis zadania {tape} ({status})?\nNie złapało żadnych danych — nic zarchiwizowanego to nie dotyczy.',
     'job.drop': '⚠ {n} zgub.',
+    'job.eta': 'zostało {t}',
 
     'build.mode.reprobe': 'SONDA JAKOŚCI', 'build.mode.restore': 'NAPRAWA',
     'build.mode.share': 'UDOSTĘPNIANIE', 'build.mode.concat': 'SKLEJANIE',
