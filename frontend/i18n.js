@@ -37,9 +37,11 @@
     'tasks.title': 'Background tasks',
     'jobs.empty': 'No tasks.',
     'job.stop': 'Stop',
+    'job.clear': '🗑 Clear',
     'job.badge.capture': 'CAPTURE', 'job.badge.queued': 'QUEUED', 'job.badge.done': 'DONE',
     'job.badge.error': 'ERROR', 'job.badge.cancelled': 'CANCELLED', 'job.badge.processing': 'PROCESSING',
     'job.confirmStop': 'Stop task {tape}?',
+    'job.confirmClear': 'Remove the record of {tape} ({status})?\nIt captured no data — nothing archived is affected.',
     'job.drop': '⚠ {n} dropped',
 
     'build.mode.reprobe': 'QUALITY SCAN', 'build.mode.restore': 'RESTORE',
@@ -170,9 +172,11 @@
     'tasks.title': 'Zadania w tle',
     'jobs.empty': 'Brak zadań.',
     'job.stop': 'Przerwij',
+    'job.clear': '🗑 Usuń wpis',
     'job.badge.capture': 'ZGRYWANIE', 'job.badge.queued': 'W KOLEJCE', 'job.badge.done': 'GOTOWE',
     'job.badge.error': 'BŁĄD', 'job.badge.cancelled': 'PRZERWANE', 'job.badge.processing': 'PRZETWARZANIE',
     'job.confirmStop': 'Przerwać zadanie {tape}?',
+    'job.confirmClear': 'Usunąć wpis zadania {tape} ({status})?\nNie złapało żadnych danych — nic zarchiwizowanego to nie dotyczy.',
     'job.drop': '⚠ {n} zgub.',
 
     'build.mode.reprobe': 'SONDA JAKOŚCI', 'build.mode.restore': 'NAPRAWA',

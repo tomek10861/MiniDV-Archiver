@@ -387,6 +387,50 @@ def test_delete_tape_removes_everything(tmp_path):
         pass
 
 
+def test_delete_job_clears_empty_cancelled_capture(tmp_path):
+    eng = _engine(tmp_path)
+    eng.store.put_job({"tape_id": "Chorwacja", "stage": "capture", "status": "CANCELLED",
+                       "history": [], "logs": "Error: no DV\n", "updated_at": "z"})
+    assert eng.delete_job("Chorwacja") == {"deleted": "Chorwacja"}
+    assert eng.store.get_job("Chorwacja") is None
+    try:
+        eng.delete_job("Chorwacja")
+        assert False
+    except FileNotFoundError:
+        pass
+
+
+def test_delete_job_refuses_running_and_completed(tmp_path):
+    eng = _engine(tmp_path)
+    eng.store.put_job({"tape_id": "TAPE-2", "stage": "capture", "status": "CAPTURING",
+                       "history": [], "logs": "", "updated_at": "z"})
+    try:
+        eng.delete_job("TAPE-2")
+        assert False
+    except RuntimeError as exc:
+        assert "przerwane" in str(exc)
+    _make_tape(eng, "TAPE-3", ["0001_a"])
+    eng.store.put_job({"tape_id": "TAPE-3", "stage": "process", "status": "COMPLETED",
+                       "history": [], "logs": "", "updated_at": "z"})
+    try:
+        eng.delete_job("TAPE-3")
+        assert False
+    except RuntimeError as exc:
+        assert "Usuń kasetę" in str(exc)
+    assert (eng.config.tapes / "TAPE-3").exists()   # untouched — archived data stays
+
+
+def test_delete_job_removes_orphaned_partial_dir_without_tape_json(tmp_path):
+    eng = _engine(tmp_path)
+    d = eng.config.tapes / "TAPE-4"
+    d.mkdir(parents=True)
+    (d / "0001_x.dv.zst").write_bytes(b"partial")   # processing died before tape.json was written
+    eng.store.put_job({"tape_id": "TAPE-4", "stage": "process", "status": "ERROR",
+                       "history": [], "logs": "", "updated_at": "z"})
+    eng.delete_job("TAPE-4")
+    assert not d.exists()
+
+
 def test_delete_tape_refuses_while_in_use(tmp_path):
     eng = _engine(tmp_path)
     _make_tape(eng, "TAPE-9", ["0001_a"])

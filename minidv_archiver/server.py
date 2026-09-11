@@ -197,6 +197,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parts[:2] == ["api", "tapes"] and len(parts) == 3:
                 return self.json(ENGINE.delete_tape(parts[2]))
+            if parts[:2] == ["api", "jobs"] and len(parts) == 3:
+                return self.json(ENGINE.delete_job(parts[2]))
             if parts[:2] == ["api", "tapes"] and len(parts) == 4 and parts[3] == "scenes":
                 scenes = self.body().get("scenes")
                 if not isinstance(scenes, list) or not scenes:

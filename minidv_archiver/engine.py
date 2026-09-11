@@ -366,6 +366,30 @@ class Engine:
             Path(build["path"]).unlink(missing_ok=True)
             self.store.delete_build(build["key"])
 
+    def delete_job(self, tape_id: str) -> dict:
+        """Clear a CANCELLED/ERROR job record that holds a tape_id but has no
+        archived data — e.g. a capture that never got a PLAY signal. Refuses if the
+        tape actually archived (use delete_tape for that) or is still in use."""
+        with self.lock:
+            job = self.store.get_job(tape_id)
+            if not job:
+                raise FileNotFoundError(f"brak zadania {tape_id}")
+            if job.get("status") not in TERMINAL or job.get("status") == "COMPLETED":
+                raise RuntimeError('można usunąć tylko przerwane/błędne zadania — '
+                                   'ukończoną kasetę usuń przez "Usuń kasetę"')
+            if self._busy(tape_id):
+                raise RuntimeError("zadanie jest w użyciu — poczekaj, aż się skończy")
+            d = self.config.tapes / tape_id
+            if d.is_dir():
+                if (d / "tape.json").exists():
+                    raise RuntimeError('kaseta ma zarchiwizowane dane — usuń ją przez "Usuń kasetę"')
+                shutil.rmtree(d, ignore_errors=True)   # partial/orphaned archive dir, no tape.json
+            shutil.rmtree(self.config.working / tape_id, ignore_errors=True)
+            self.store.delete_job(tape_id)
+            self._drop_share(tape_id)
+            self.store.delete_index(tape_id)
+        return {"deleted": tape_id}
+
     def delete_tape(self, tape_id: str) -> dict:
         with self.lock:
             if self._busy(tape_id):

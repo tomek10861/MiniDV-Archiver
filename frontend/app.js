@@ -570,6 +570,7 @@ function renderJobs(list, queue, builds) {
   if (sig === jobsSig) return; jobsSig = sig;
   const jobRows = list.map(j => {
     const [txt, cls] = jobBadge(j, queue), run = !TERMINAL.has(j.status);
+    const clearable = j.status === 'CANCELLED' || j.status === 'ERROR';
     return `<div class="rounded-xl border border-gray-200 p-3 dark:border-gray-800">
       <div class="flex flex-wrap items-center gap-2">
         <span class="${BADGE} ${cls}">${txt}</span>
@@ -577,6 +578,7 @@ function renderJobs(list, queue, builds) {
         <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${stPL(j.status)}${j.current_scene ? ` · ${j.current_scene}` : ''}${j.dropped_frames ? ' · ' + L('job.drop', { n: j.dropped_frames }) : ''}</span>
         <span class="ml-auto font-mono text-[11px] text-gray-400">${(j.updated_at || '').slice(11, 19)}</span>
         ${run ? `<button class="jstop ${BTN}" data-tape="${j.tape_id}">${L('job.stop')}</button>` : ''}
+        ${clearable ? `<button class="jclear ${BTN_DANGER}" data-tape="${j.tape_id}" data-status="${j.status}">${L('job.clear')}</button>` : ''}
       </div>
       ${j.error ? `<div class="mt-1.5 text-theme-xs text-error-500">${j.error}</div>` : ''}
     </div>`;
@@ -599,12 +601,23 @@ function renderJobs(list, queue, builds) {
   $('#jobs').innerHTML = (jobRows + buildRows) || `<p class="text-theme-sm text-gray-400">${L('jobs.empty')}</p>`;
 }
 $('#jobs').addEventListener('click', async e => {
-  const b = e.target.closest('.jstop'); if (!b) return;
-  if (!confirm(L('job.confirmStop', { tape: b.dataset.tape }))) return;
-  try {
-    await api('/api/capture/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tape_id: b.dataset.tape }) });
-    refresh();
-  } catch (err) { alert(err.message); }
+  const b = e.target.closest('.jstop');
+  if (b) {
+    if (!confirm(L('job.confirmStop', { tape: b.dataset.tape }))) return;
+    try {
+      await api('/api/capture/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tape_id: b.dataset.tape }) });
+      refresh();
+    } catch (err) { alert(err.message); }
+    return;
+  }
+  const c = e.target.closest('.jclear');
+  if (c) {
+    if (!confirm(L('job.confirmClear', { tape: c.dataset.tape, status: stPL(c.dataset.status) }))) return;
+    try {
+      await api(`/api/jobs/${encodeURIComponent(c.dataset.tape)}`, { method: 'DELETE' });
+      refresh();
+    } catch (err) { alert(err.message); }
+  }
 });
 
 // ============ logs ============
