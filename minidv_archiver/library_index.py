@@ -260,8 +260,10 @@ def duplicates(config, store) -> dict:
         # capture), not just the same footage recaptured under a different tape_id.
         if len(members) < 2:
             continue
+        # Best = fewest errors; tied on errors -> the longer recording (more of the
+        # moment actually captured); still tied -> doesn't matter, pick deterministically.
         members.sort(key=lambda m: (m["error_score"] if m["error_score"] is not None else BIG,
-                                    m["tape_id"], m["scene_index"] or 0))
+                                    -(m["frame_count"] or 0), m["tape_id"], m["scene_index"] or 0))
         for k, m in enumerate(members):
             m.pop("fp", None)
             m["best"] = k == 0

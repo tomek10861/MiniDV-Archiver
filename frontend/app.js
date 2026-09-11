@@ -695,6 +695,7 @@ function renderDuplicates() {
   const d = dupCache || { groups: [], unprobed: 0, scenes_indexed: 0 };
   const head = `<div class="mb-4 flex flex-wrap items-center gap-3 text-theme-xs text-gray-500 dark:text-gray-400">
     <span>${L('dup.summary', { g: d.groups.length, n: d.scenes_indexed, unp: d.unprobed ? L('dup.unprobed', { n: d.unprobed }) : '' })}</span>
+    ${d.groups.length ? `<button id="dupKeepBestAll" class="${BTN_PRIMARY}">${L('dup.keepBestAll')}</button>` : ''}
     <button id="dupReprobeAll" class="${BTN}">${L('dup.scanAll')}</button>
     <button id="dupRefresh" class="${BTN}">${L('dup.refresh')}</button></div>`;
   const groups = d.groups.map((g, gi) => `
@@ -718,11 +719,9 @@ function renderDuplicates() {
     </div>`).join('') || `<p class="text-theme-sm text-gray-400">${L('dup.none')}${d.unprobed ? L('dup.noneHint') : ''}</p>`;
   $('#dupView').innerHTML = head + groups;
 }
-async function resolveDuplicate(gi, keepIdx) {
-  const g = (dupCache.groups || [])[gi]; if (!g) return;
-  const keep = g.members[keepIdx], drop = g.members.filter((_, i) => i !== keepIdx);
-  if (!confirm(L('dup.confirmKeep', { keep: keep.tape_id, keepScore: keep.error_score ?? '?', n: drop.length,
-      list: drop.map(m => L('dup.confirmItem', { tape: m.tape_id, idx: m.scene_index, score: m.error_score ?? '?' })).join('\n') }))) return;
+async function deleteDuplicateMembers(drop, confirmMsg) {
+  if (!drop.length) return;
+  if (!confirm(confirmMsg)) return;
   if (!confirm(L('confirm.irreversible'))) return;
   const byTape = {};
   drop.forEach(m => (byTape[m.tape_id] = byTape[m.tape_id] || []).push(m.scene_id));
@@ -734,8 +733,26 @@ async function resolveDuplicate(gi, keepIdx) {
     await refresh(); await loadDuplicates(true);
   } catch (e) { alert(e.message); }
 }
+async function resolveDuplicate(gi, keepIdx) {
+  const g = (dupCache.groups || [])[gi]; if (!g) return;
+  const keep = g.members[keepIdx], drop = g.members.filter((_, i) => i !== keepIdx);
+  await deleteDuplicateMembers(drop, L('dup.confirmKeep', { keep: keep.tape_id, keepScore: keep.error_score ?? '?', n: drop.length,
+      list: drop.map(m => L('dup.confirmItem', { tape: m.tape_id, idx: m.scene_index, score: m.error_score ?? '?' })).join('\n') }));
+}
+async function resolveAllDuplicates() {
+  const groups = dupCache.groups || [];
+  const drop = [];
+  // server already picks "best" per group (fewest errors, then longer recording);
+  // if that's ever missing for some reason, fall back to keeping the first member
+  for (const g of groups) {
+    const keepIdx = g.members.findIndex(m => m.best);
+    g.members.forEach((m, i) => { if (i !== (keepIdx === -1 ? 0 : keepIdx)) drop.push(m); });
+  }
+  await deleteDuplicateMembers(drop, L('dup.confirmKeepAll', { g: groups.length, n: drop.length }));
+}
 $('#dupView').addEventListener('click', async e => {
   if (e.target.id === 'dupRefresh') { loadDuplicates(true); return; }
+  if (e.target.id === 'dupKeepBestAll') { resolveAllDuplicates(); return; }
   if (e.target.id === 'dupReprobeAll') {
     e.target.disabled = true; e.target.textContent = L('build.wait.queued');
     try {

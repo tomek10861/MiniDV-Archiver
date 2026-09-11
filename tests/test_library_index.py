@@ -185,6 +185,36 @@ def test_duplicates_finds_same_tape_pairs_too(tmp_path):
     assert all(m["tape_id"] == "TAPE-X" for m in members)
 
 
+def test_duplicates_best_prefers_longer_recording_on_tied_error_score(tmp_path):
+    """Same error_score -> the longer capture (more of the moment actually caught)
+    wins, not an arbitrary tape_id/scene_index ordering."""
+    cfg = _cfg(tmp_path)
+    s = JobStore(cfg.state / "jobs.db")
+    hashes = ["1111111111111111", "2222222222222222", "3333333333333333"]
+
+    def tape(tid, frame_count):
+        d = cfg.tapes / tid
+        (d / "thumbnails").mkdir(parents=True)
+        (d / "tape.json").write_text(json.dumps({"tape_id": tid, "scene_count": 1,
+            "scenes": [{"scene_index": 1, "scene_id": "0001_s", "frame_count": frame_count}]}))
+        (d / "0001_s.json").write_text(json.dumps({
+            "scene_index": 1, "scene_id": "0001_s", "tape_id": tid, "frame_count": frame_count,
+            "timecode": {"start": "00:05:00:00", "end": "00:05:20:00"},
+            "recording": {"datetime": None},
+            "capture": {"dropped_frames": 0, "source_discontinuities": [], "decode_errors": 0, "error_score": 0},
+            "fingerprint": {"datetime": None, "tc_start": None, "tc_end": None, "frame_count": frame_count,
+                            "frame_hashes": hashes}}))
+
+    tape("AAA", 400)   # alphabetically first, but shorter -- must NOT win on tape_id order
+    tape("ZZZ", 900)   # longer -- should be picked as best despite sorting last by tape_id
+    li.reindex(cfg, s, force=True)
+
+    dup = li.duplicates(cfg, s)
+    assert len(dup["groups"]) == 1
+    best = next(m for m in dup["groups"][0]["members"] if m["best"])
+    assert best["tape_id"] == "ZZZ" and best["frame_count"] == 900
+
+
 def test_tape_recording_date_override_moves_all_scenes(tmp_path):
     cfg = _cfg(tmp_path)
     s = JobStore(cfg.state / "jobs.db")
