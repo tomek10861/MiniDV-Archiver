@@ -147,6 +147,10 @@
                 <li data-i18n-html="capture.step2">Gdy status pokaże <b>CZEKAM NA PLAY</b>, naciśnij <b>PLAY</b> na kamerze.</li>
                 <li data-i18n-html="capture.step3">Po materiale naciśnij <b>STOP</b> na kamerze — zapis zamknie się sam.</li>
               </ol>
+              <div id="capProgress" class="mt-3 hidden flex-wrap items-center gap-4 rounded-lg bg-gray-50 px-3 py-2 text-theme-xs text-gray-600 dark:bg-black/40 dark:text-gray-300">
+                <span data-i18n="capture.elapsed">Elapsed</span>: <b id="capElapsed" class="font-mono">0:00</b>
+                <span data-i18n="capture.captured">Captured</span>: <b id="capBytes" class="font-mono">0 MB</b>
+              </div>
               <pre id="capLog" class="mt-3 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg bg-gray-50 p-3 text-[11px] text-gray-500 dark:bg-black/40 dark:text-gray-400" data-i18n="capture.idle">Brak aktywnego zgrywania.</pre>
             </div>
           </div>

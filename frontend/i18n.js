@@ -31,6 +31,7 @@
     'capture.step2': 'When the status shows <b>WAITING FOR PLAY</b>, press <b>PLAY</b> on the camera.',
     'capture.step3': 'When the footage ends press <b>STOP</b> on the camera — the capture closes itself.',
     'capture.idle': 'No capture running.',
+    'capture.elapsed': 'Elapsed', 'capture.captured': 'Captured',
     'capture.background': 'Background: processing {tape} ({status})',
 
     // tasks
@@ -167,6 +168,7 @@
     'capture.step2': 'Gdy status pokaże <b>CZEKAM NA PLAY</b>, naciśnij <b>PLAY</b> na kamerze.',
     'capture.step3': 'Po materiale naciśnij <b>STOP</b> na kamerze — zapis zamknie się sam.',
     'capture.idle': 'Brak aktywnego zgrywania.',
+    'capture.elapsed': 'Nagrane', 'capture.captured': 'Skopiowane',
     'capture.background': 'W tle: przetwarzanie {tape} ({status})',
 
     'tasks.title': 'Zadania w tle',

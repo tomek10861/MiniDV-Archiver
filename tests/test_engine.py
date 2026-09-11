@@ -515,6 +515,17 @@ def test_delete_scenes_updates_manifest_and_rebuilds_proxy(tmp_path, monkeypatch
     assert "0002_b" not in sha and "0001_a.mp4" in sha and sha.rstrip().endswith("  tape.json")
 
 
+def test_progress_updates_captured_bytes_without_history_entry(tmp_path):
+    eng = _engine(tmp_path)
+    job = eng._new_job("TAPE-9", manual_transport=True)
+    eng.jobs["TAPE-9"] = job
+    before = len(job["history"])
+    eng._progress(job, 12_345_678)
+    assert job["captured_bytes"] == 12_345_678
+    assert len(job["history"]) == before          # no history spam every progress tick
+    assert eng.store.get_job("TAPE-9")["captured_bytes"] == 12_345_678
+
+
 def test_missing_camera_fails_and_cleans_working_dir(tmp_path):
     eng = _engine(tmp_path)
     eng.camera = type("FakeCam", (), {"info": staticmethod(lambda: {"connected": False})})()

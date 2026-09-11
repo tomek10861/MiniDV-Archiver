@@ -137,6 +137,14 @@ class Engine:
             job["logs"] = (job["logs"] + message + "\n")[-20000:]
             self._write_job(job)
 
+    def _progress(self, job: dict, captured_bytes: int) -> None:
+        """Cheap periodic update (no history entry) so the UI can show how far into
+        the tape a capture is — elapsed time + bytes so far, from the growing seg*.dv."""
+        with self.lock:
+            job["captured_bytes"] = captured_bytes
+            job["updated_at"] = now()
+            self._write_job(job)
+
     def _new_job(self, tape_id: str, manual_transport: bool) -> dict:
         return {"id": uuid.uuid4().hex, "tape_id": tape_id, "stage": "capture", "status": "CREATED",
                 "created_at": now(), "updated_at": now(), "current_scene": None, "dropped_frames": 0,
@@ -595,6 +603,7 @@ class Engine:
         log_path = work / "capture.log"
         seg_index, started = 0, time.monotonic()
         last_total, last_growth, last_content, seen_data = 0, time.monotonic(), time.monotonic(), False
+        last_progress = 0.0
         this_year = datetime.now(timezone.utc).year
         tc_re = re.compile(r"timecode (\d\d):(\d\d):(\d\d)\.\d\d(?: date (\d{4}))?")
         total = lambda: sum(p.stat().st_size for p in work.glob("seg[0-9][0-9][0-9].dv"))
@@ -662,6 +671,9 @@ class Engine:
                         if tot > 0 and not seen_data:
                             seen_data = True
                             self._set(job, "CAPTURING")
+                    if tot > 0 and time.monotonic() - last_progress >= 3:
+                        self._progress(job, tot)
+                        last_progress = time.monotonic()
                     if stop_reason():
                         self.capture_proc.send_signal(signal.SIGINT)
                         break

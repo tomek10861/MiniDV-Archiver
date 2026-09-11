@@ -3,6 +3,12 @@ const $$ = s => [...document.querySelectorAll(s)];
 const scroller = document.querySelector('.overflow-y-auto');   // the scrolling content column
 const gib = n => `${(n / 1024 ** 3).toFixed(1)} GiB`;
 const mb = n => n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(2)} GB` : `${(n / 1024 ** 2).toFixed(0)} MB`;
+// PAL DV25 byte rate (144000 B/frame * 25 fps) -> how far into the tape a capture is
+const dvDuration = bytes => {
+  const s = Math.round((bytes || 0) / 3_600_000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return (h > 0 ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(sec).padStart(2, '0');
+};
 const TERMINAL = new Set(['COMPLETED', 'ERROR', 'CANCELLED']);
 const stPL = s => (s ? L('state.' + s) : '—');
 const durTxt = (frames, std) => {
@@ -565,7 +571,7 @@ function activeBuilds(builds) {
 let jobsSig = '';
 function renderJobs(list, queue, builds) {
   builds = activeBuilds(builds);
-  const sig = JSON.stringify([list.map(j => [j.tape_id, j.status, j.current_scene]),
+  const sig = JSON.stringify([list.map(j => [j.tape_id, j.status, j.current_scene, j.captured_bytes]),
     builds.map(b => [b.key, b.status])]);
   if (sig === jobsSig) return; jobsSig = sig;
   const jobRows = list.map(j => {
@@ -575,7 +581,7 @@ function renderJobs(list, queue, builds) {
       <div class="flex flex-wrap items-center gap-2">
         <span class="${BADGE} ${cls}">${txt}</span>
         <strong class="text-gray-800 dark:text-white/90">${j.tape_id}</strong>
-        <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${stPL(j.status)}${j.current_scene ? ` · ${j.current_scene}` : ''}${j.dropped_frames ? ' · ' + L('job.drop', { n: j.dropped_frames }) : ''}</span>
+        <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${stPL(j.status)}${j.current_scene ? ` · ${j.current_scene}` : ''}${j.captured_bytes ? ` · ${dvDuration(j.captured_bytes)} · ${mb(j.captured_bytes)}` : ''}${j.dropped_frames ? ' · ' + L('job.drop', { n: j.dropped_frames }) : ''}</span>
         <span class="ml-auto font-mono text-[11px] text-gray-400">${(j.updated_at || '').slice(11, 19)}</span>
         ${run ? `<button class="jstop ${BTN}" data-tape="${j.tape_id}">${L('job.stop')}</button>` : ''}
         ${clearable ? `<button class="jclear ${BTN_DANGER}" data-tape="${j.tape_id}" data-status="${j.status}">${L('job.clear')}</button>` : ''}
@@ -692,6 +698,14 @@ async function refresh() {
     $('#capLog').textContent = cap ? (cap.logs || '—')
       : (s.processing ? L('capture.background', { tape: s.processing.tape_id, status: stPL(s.processing.status) }) : L('capture.idle'));
     $('#start').disabled = !!cap;
+
+    const capProgress = $('#capProgress'), hasProgress = !!(cap && cap.captured_bytes);
+    capProgress.classList.toggle('hidden', !hasProgress);
+    capProgress.classList.toggle('flex', hasProgress);
+    if (hasProgress) {
+      $('#capElapsed').textContent = dvDuration(cap.captured_bytes);
+      $('#capBytes').textContent = mb(cap.captured_bytes);
+    }
 
     renderJobs(s.jobs || [], s.queue || [], s.compress || []);
     if (currentRoute().section === 'duplikaty' && dupCache) {
