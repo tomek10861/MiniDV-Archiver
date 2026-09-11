@@ -557,6 +557,35 @@ def test_delete_scenes_updates_manifest_and_rebuilds_proxy(tmp_path, monkeypatch
     assert "0002_b" not in sha and "0001_a.mp4" in sha and sha.rstrip().endswith("  tape.json")
 
 
+def test_start_delete_scenes_runs_in_background_without_self_deadlock(tmp_path, monkeypatch):
+    """Regression: delete_scenes() refuses to run on a busy tape (store.tape_busy),
+    but the background worker marks a build RUNNING *before* calling it -- without
+    ignore_builds, tape_busy() would see that very row and every background delete
+    would immediately fail with "tape in use", deleting nothing, ever."""
+    import minidv_archiver.media as mm
+    monkeypatch.setattr(mm, "concat_mp4", lambda srcs, out, **k: pathlib.Path(out).write_bytes(b"J" * len(srcs)))
+    eng = _engine(tmp_path)
+    d = _make_tape(eng, "TAPE-3", ["0001_a", "0002_b", "0003_c"])
+    j = eng.start_delete_scenes("TAPE-3", ["0002_b"])
+    assert j["mode"] == "delete" and j["token"].startswith("DEL-")
+    b = {}
+    for _ in range(100):
+        b = eng.compress_status("TAPE-3", j["token"])
+        if b["status"] in ("READY", "ERROR"):
+            break
+        time.sleep(0.05)
+    assert b["status"] == "READY", b.get("error")
+    tape = json.loads((d / "tape.json").read_text())
+    assert [s["scene_id"] for s in tape["scenes"]] == ["0001_a", "0003_c"]
+    assert not (d / "0002_b.dv.zst").exists()
+
+    try:
+        eng.start_delete_scenes("TAPE-3", [])
+        assert False
+    except FileNotFoundError as exc:
+        assert "pusta lista scen" in str(exc)
+
+
 def test_set_derives_scene_index_and_keeps_scene_total(tmp_path):
     eng = _engine(tmp_path)
     job = eng._new_job("TAPE-9", manual_transport=True)

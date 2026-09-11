@@ -392,6 +392,8 @@ class Engine:
                 srcs = [Path(s) for s in build["sources"]]
                 if build["mode"] == "reprobe":
                     self._reprobe_tape(build["sources"][0], force=build["token"].endswith("-F"))
+                elif build["mode"] == "delete":
+                    self.delete_scenes(build["tape_id"], build["sources"], _from_build=True)
                 elif build["mode"] == "concat":
                     concat_mp4(srcs, out, meta={"title": build["title"]}, log=lambda m: None)
                 elif build["mode"] == "restore":
@@ -402,7 +404,8 @@ class Engine:
                     compress_share(srcs if len(srcs) > 1 else srcs[0], out, max_mb=self.config.share_max_mb,
                                    crf=self.config.share_crf, preset=self.config.share_preset,
                                    meta={"title": build["title"]}, log=lambda m: None)
-                build.update(status="READY", size=None if build["mode"] == "reprobe" else out.stat().st_size)
+                build.update(status="READY",
+                             size=None if build["mode"] in ("reprobe", "delete") else out.stat().st_size)
                 self.store.put_build(build)
             except Exception as exc:
                 build.update(status="ERROR", error=str(exc))
@@ -413,8 +416,8 @@ class Engine:
         return dict(build) if build else {"status": "NONE"}
 
     # ---- deletion / rename / metadata (irreversible — the caller must have confirmed) ----
-    def _busy(self, tape_id: str) -> bool:
-        return self.store.tape_busy(tape_id) or tape_id in (self.capture_tape, self.processing_tape)
+    def _busy(self, tape_id: str, ignore_builds: bool = False) -> bool:
+        return self.store.tape_busy(tape_id, ignore_builds=ignore_builds) or tape_id in (self.capture_tape, self.processing_tape)
 
     def _drop_share(self, tape_id: str) -> None:
         for build in self.store.builds_for_tape(tape_id):
@@ -459,9 +462,22 @@ class Engine:
             self.store.delete_index(tape_id)
         return {"deleted": tape_id}
 
-    def delete_scenes(self, tape_id: str, scene_ids: list[str]) -> dict:
+    def start_delete_scenes(self, tape_id: str, scene_ids: list[str]) -> dict:
+        """Deleting scenes rebuilds the whole-tape proxy (re-concats every remaining
+        scene's MP4) — for a tape with hundreds of scenes that's slow enough to time
+        out the HTTP request, so this runs in the background like the other on-demand
+        builds, visible (and individually retryable) in Zadania instead of silently
+        stalling partway through a browser-side loop over many tapes."""
+        self._tape_dir(tape_id)
+        ids = sorted({s for s in scene_ids if re.fullmatch(r"[0-9A-Za-z._-]{1,80}", s or "")})
+        if not ids:
+            raise FileNotFoundError("pusta lista scen")
+        token = "DEL-" + hashlib.sha1("\n".join(ids).encode()).hexdigest()[:12]
+        return self._enqueue_build(tape_id, token, ids, "delete", f"{tape_id} · usuń {len(ids)} scen")
+
+    def delete_scenes(self, tape_id: str, scene_ids: list[str], _from_build: bool = False) -> dict:
         with self.lock:
-            if self._busy(tape_id):
+            if self._busy(tape_id, ignore_builds=_from_build):
                 raise RuntimeError("kaseta jest w użyciu — spróbuj później")
         d = self._tape_dir(tape_id)
         tape = json.loads((d / "tape.json").read_text())

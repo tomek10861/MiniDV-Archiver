@@ -47,7 +47,7 @@
     'job.eta': 'ETA {t}',
 
     'build.mode.reprobe': 'QUALITY SCAN', 'build.mode.restore': 'RESTORE',
-    'build.mode.share': 'SHARE', 'build.mode.concat': 'JOIN',
+    'build.mode.share': 'SHARE', 'build.mode.concat': 'JOIN', 'build.mode.delete': 'DELETE SCENES',
     'build.st.QUEUED': 'queued', 'build.st.RUNNING': 'processing…', 'build.st.READY': 'done', 'build.st.ERROR': 'error',
 
     // states
@@ -187,7 +187,7 @@
     'job.eta': 'zostało {t}',
 
     'build.mode.reprobe': 'SONDA JAKOŚCI', 'build.mode.restore': 'NAPRAWA',
-    'build.mode.share': 'UDOSTĘPNIANIE', 'build.mode.concat': 'SKLEJANIE',
+    'build.mode.share': 'UDOSTĘPNIANIE', 'build.mode.concat': 'SKLEJANIE', 'build.mode.delete': 'USUWANIE SCEN',
     'build.st.QUEUED': 'w kolejce', 'build.st.RUNNING': 'przetwarzanie…', 'build.st.READY': 'gotowe', 'build.st.ERROR': 'błąd',
 
     'state.IDLE': 'BEZCZYNNY', 'state.CREATED': 'UTWORZONE',

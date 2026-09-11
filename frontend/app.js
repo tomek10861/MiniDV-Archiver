@@ -459,17 +459,18 @@ async function editTapeMeta(id, field) {
     await reloadOpenTape();
   } catch (e) { alert(e.message); }
 }
-async function deleteSelectedScenes() {
+async function deleteSelectedScenes(btn) {
   if (!openTapeId || selected.size === 0) return;
   const n = selected.size;
   if (!confirm(L('confirm.deleteScenes', { n, tape: openTapeId }))) return;
   if (!confirm(L('confirm.irreversible'))) return;
-  try {
-    await api(`/api/tapes/${encodeURIComponent(openTapeId)}/scenes`,
-      { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenes: [...selected] }) });
-    selected.clear();
-    await reloadOpenTape();
-  } catch (e) { alert(e.message); }
+  // runs as a background build (Zadania) — deleting scenes rebuilds the whole-tape
+  // proxy, which for a long tape is too slow to do inline in the HTTP request
+  const label = btn.textContent;
+  await pollBuild(`/api/tapes/${encodeURIComponent(openTapeId)}/scenes/delete`,
+    { scenes: [...selected] }, btn, label, null);
+  selected.clear();
+  await reloadOpenTape();
 }
 
 $('#tapeGrid').addEventListener('click', e => {
@@ -492,7 +493,7 @@ $('#tapeDetail').addEventListener('click', e => {
   if (e.target.id === 'selDownload') { downloadSelection(e.target, {}); return; }
   if (e.target.id === 'selFb') { downloadSelection(e.target, { share: true }); return; }
   if (e.target.id === 'selRepair') { downloadSelection(e.target, { restore: true }); return; }
-  if (e.target.id === 'selDelete') { deleteSelectedScenes(); return; }
+  if (e.target.id === 'selDelete') { deleteSelectedScenes(e.target); return; }
   if (e.target.id === 'tapeDelete') { deleteWholeTape(openTapeId, (scenesCache[openTapeId] || []).length); return; }
   if (e.target.id === 'tapeRename') { renameTape(openTapeId); return; }
   if (e.target.id === 'tapeLabel') { editTapeMeta(openTapeId, 'label'); return; }
@@ -725,12 +726,18 @@ async function deleteDuplicateMembers(drop, confirmMsg) {
   if (!confirm(L('confirm.irreversible'))) return;
   const byTape = {};
   drop.forEach(m => (byTape[m.tape_id] = byTape[m.tape_id] || []).push(m.scene_id));
+  // Each tape's deletion runs as its own background build (Zadania) -- deleting
+  // scenes rebuilds the whole-tape proxy, which for a long tape (hundreds of
+  // scenes) is far too slow to do inline for every tape in one blocking loop, and
+  // used to silently stop partway through leaving some tapes untouched. Here we
+  // only enqueue (fast); the worker processes them one at a time in the background.
   try {
     for (const [tid, sids] of Object.entries(byTape)) {
-      await api(`/api/tapes/${encodeURIComponent(tid)}/scenes`,
-        { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenes: sids }) });
+      await api(`/api/tapes/${encodeURIComponent(tid)}/scenes/delete`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenes: sids }) });
     }
-    await refresh(); await loadDuplicates(true);
+    await refresh();
+    go('#zadania');
   } catch (e) { alert(e.message); }
 }
 async function resolveDuplicate(gi, keepIdx) {
@@ -783,7 +790,7 @@ const buildMode = m => L('build.mode.' + m) || m.toUpperCase();
 const buildSt = st => L('build.st.' + st) || st;
 const buildLabel = b => {
   const t = b.token || '';
-  if (t.startsWith('REPROBE') || t.startsWith('SEL-') || ['TAPE', 'tape'].includes(t)) return b.tape_id;
+  if (t.startsWith('REPROBE') || t.startsWith('SEL-') || t.startsWith('DEL-') || ['TAPE', 'tape'].includes(t)) return b.tape_id;
   return `${b.tape_id} · ${t.replace(/-RES$/, '')}`;
 };
 function activeBuilds(builds) {

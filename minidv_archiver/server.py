@@ -198,6 +198,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(ENGINE.start_compress(cparts[2], None, restore=restore), 202)
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "reprobe":
                 return self.json(ENGINE.start_reprobe(cparts[2], bool(self.body().get("force"))), 202)
+            if len(cparts) == 5 and cparts[:2] == ["api", "tapes"] and cparts[3:5] == ["scenes", "delete"]:
+                scenes = self.body().get("scenes")
+                if not isinstance(scenes, list) or not scenes:
+                    return self.json({"error": "brak listy scen"}, 400)
+                return self.json(ENGINE.start_delete_scenes(cparts[2], scenes), 202)
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "rename":
                 return self.json(ENGINE.rename_tape(cparts[2], self.body().get("new_id", "")))
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "meta":
@@ -215,11 +220,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(ENGINE.delete_tape(parts[2]))
             if parts[:2] == ["api", "jobs"] and len(parts) == 3:
                 return self.json(ENGINE.delete_job(parts[2]))
-            if parts[:2] == ["api", "tapes"] and len(parts) == 4 and parts[3] == "scenes":
-                scenes = self.body().get("scenes")
-                if not isinstance(scenes, list) or not scenes:
-                    return self.json({"error": "brak listy scen"}, 400)
-                return self.json(ENGINE.delete_scenes(parts[2], scenes))
             return self.json({"error": "not found"}, 404)
         except (ValueError, FileNotFoundError, RuntimeError) as exc:
             return self.json({"error": str(exc)}, 409)

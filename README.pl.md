@@ -211,10 +211,13 @@ pobranie) ·
 `/api/playlist/build` `{items: [{tape_id, scene_id}, ...], title?}` — złącza sceny
 z jednej lub kilku kaset (w podanej kolejności) w jedno MP4, np. z zaznaczenia na osi
 czasu. Wywołaj ponownie z tym samym body, żeby odpytać status
-(`QUEUED`/`RUNNING`/`READY`) — ten sam wzorzec co pozostałe buildy na żądanie.
+(`QUEUED`/`RUNNING`/`READY`) — ten sam wzorzec co pozostałe buildy na żądanie ·
+`/api/tapes/{id}/scenes/delete` `{scenes: [...]}` — usuwanie scen przebudowuje
+proxy całej taśmy, więc to też leci w tle jako build (odpytuj tak samo) zamiast
+blokować żądanie, co przy kasecie z setkami scen potrafiło wywalić timeout.
 
 **`DELETE`**
-`/api/tapes/{id}` · `/api/tapes/{id}/scenes` `{scenes: [...]}` ·
+`/api/tapes/{id}` ·
 `/api/jobs/{tape_id}` (kasuje wpis ukończonego/błędnego zadania; odmawia dla
 działającego albo już zarchiwizowanego).
 

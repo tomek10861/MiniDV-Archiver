@@ -221,14 +221,22 @@ class JobStore:
                 if status in TERMINAL:
                     self._conn.execute("DELETE FROM jobs WHERE tape_id=?", (tape_id,))
 
-    def tape_busy(self, tape_id: str) -> bool:
-        """True while a non-terminal job or a running build holds this tape."""
+    def tape_busy(self, tape_id: str, ignore_builds: bool = False) -> bool:
+        """True while a non-terminal job or a running build holds this tape.
+
+        ignore_builds skips the build check — for a build's own worker thread
+        checking busy-ness as it starts that very build: the build is itself
+        QUEUED/RUNNING at that point, so the plain check would always see itself
+        and refuse to proceed. A capture/processing job is still a real conflict
+        either way and always checked."""
         with self._lock:
             j = self._conn.execute(
                 "SELECT 1 FROM jobs WHERE tape_id=? AND status NOT IN (%s) LIMIT 1"
                 % ",".join("?" * len(TERMINAL)), (tape_id, *TERMINAL)).fetchone()
             if j:
                 return True
+            if ignore_builds:
+                return False
             b = self._conn.execute(
                 "SELECT 1 FROM builds WHERE tape_id=? AND status IN ('QUEUED','RUNNING') LIMIT 1",
                 (tape_id,)).fetchone()

@@ -207,10 +207,14 @@ download) ·
 `/api/playlist/build` `{items: [{tape_id, scene_id}, ...], title?}` — join scenes
 from one or several tapes (in that order) into a single MP4, e.g. a multi-select
 from the timeline. Call it again with the same body to poll status
-(`QUEUED`/`RUNNING`/`READY`), same pattern as the other on-demand builds above.
+(`QUEUED`/`RUNNING`/`READY`), same pattern as the other on-demand builds above ·
+`/api/tapes/{id}/scenes/delete` `{scenes: [...]}` — deleting scenes rebuilds the
+whole-tape proxy, so this runs as a background build too (poll the same way)
+instead of blocking the request, which used to time out on a tape with hundreds
+of scenes.
 
 **`DELETE`**
-`/api/tapes/{id}` · `/api/tapes/{id}/scenes` `{scenes: [...]}` ·
+`/api/tapes/{id}` ·
 `/api/jobs/{tape_id}` (clears a finished/errored job row; refuses a running or
 already-archived one).
 

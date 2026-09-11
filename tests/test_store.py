@@ -75,6 +75,11 @@ def test_tape_busy(tmp_path):
     assert not s.tape_busy("TAPE-9")
     s.put_build({"key": "TAPE-9/TAPE", "tape_id": "TAPE-9", "status": "RUNNING"})
     assert s.tape_busy("TAPE-9")
+    # ignore_builds: a build's own worker checking busy-ness as it starts that very
+    # build must not see itself and refuse to run -- but a real job is still a conflict
+    assert not s.tape_busy("TAPE-9", ignore_builds=True)
+    s.put_job({"tape_id": "TAPE-9", "stage": "process", "status": "COMPRESSING", "updated_at": "t"})
+    assert s.tape_busy("TAPE-9", ignore_builds=True)
 
 
 def test_builds_claim_and_drop(tmp_path):
