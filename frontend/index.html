@@ -239,6 +239,21 @@
   </div>
 </div>
 
+<!-- Scene viewer modal (grid view "tap a tile" — iPhone Photos style) -->
+<div id="scModal" class="fixed inset-0 z-[9999] hidden items-center justify-center bg-black/90 p-0 sm:p-4">
+  <button id="scModalClose" class="absolute right-3 top-3 z-10 rounded-full bg-black/50 p-2 text-white hover:bg-black/70" aria-label="Close">✕</button>
+  <button id="scModalPrev" class="absolute left-1 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white hover:bg-black/70 disabled:opacity-30 sm:left-3" aria-label="Previous">‹</button>
+  <button id="scModalNext" class="absolute right-1 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white hover:bg-black/70 disabled:opacity-30 sm:right-3" aria-label="Next">›</button>
+  <div id="scModalCount" class="absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-full bg-black/50 px-2.5 py-1 text-theme-xs text-white"></div>
+  <div class="flex max-h-full w-full max-w-4xl flex-col overflow-y-auto">
+    <video id="scModalVideo" controls playsinline preload="metadata" class="max-h-[75vh] w-full bg-black sm:rounded-t-lg"></video>
+    <div class="rounded-b-lg bg-white p-3 dark:bg-gray-900">
+      <div id="scModalTitle" class="text-sm font-semibold text-gray-800 dark:text-white/90"></div>
+      <div id="scModalActions" class="mt-2 flex flex-wrap items-center gap-2 text-theme-xs"></div>
+    </div>
+  </div>
+</div>
+
 <script defer src="/vendor/alpine.min.js"></script>
 <script src="/i18n.js"></script>
 <script src="/app.js"></script>

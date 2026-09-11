@@ -109,6 +109,89 @@ function renderTapeGrid(list) {
   }
 }
 
+// ===== list / grid toggle + "iPhone Photos" tap-to-view modal, shared by Kasety and Timeline =====
+let sceneView = localStorage.getItem('sceneView') === 'grid' ? 'grid' : 'list';
+function setSceneView(v) {
+  sceneView = v;
+  try { localStorage.setItem('sceneView', v); } catch (_) {}
+}
+function viewToggleHTML() {
+  const btn = (v, icon, label) => `<button data-view="${v}" title="${label}" class="viewToggle px-2.5 py-1 ${sceneView === v
+    ? 'bg-brand-500 text-white' : 'bg-white text-gray-600 hover:text-brand-500 dark:bg-white/[0.06] dark:text-gray-300'}">${icon}</button>`;
+  return `<div class="inline-flex overflow-hidden rounded-lg border border-gray-300 text-theme-xs dark:border-gray-600">
+    ${btn('list', '☰', L('view.list'))}${btn('grid', '▦', L('view.grid'))}
+  </div>`;
+}
+const GRIDTILE = 'group relative aspect-square overflow-hidden rounded-lg bg-black';
+function sceneGridHTML(items) {   // items: [{tapeId, s}]
+  if (!items.length) return `<p class="text-theme-sm text-gray-400">${L('scenes.empty')}</p>`;
+  return `<div class="grid grid-cols-3 gap-1.5 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">` +
+    items.map((it, i) => `<button data-mkey="${i}" class="${GRIDTILE}">
+      <img loading="lazy" src="/api/tapes/${encodeURIComponent(it.tapeId)}/files/thumbnails/${encodeURIComponent(it.s.scene_id)}.jpg" alt=""
+        class="h-full w-full object-cover transition group-hover:scale-105">
+    </button>`).join('') + '</div>';
+}
+let modalItems = [], modalIdx = -1;
+function openSceneModal(items, idx) {
+  modalItems = items; modalIdx = idx;
+  $('#scModal').classList.remove('hidden'); $('#scModal').classList.add('flex');
+  renderSceneModal();
+}
+function closeSceneModal() {
+  $('#scModal').classList.add('hidden'); $('#scModal').classList.remove('flex');
+  const v = $('#scModalVideo'); v.pause(); v.removeAttribute('src'); v.load();
+  modalItems = []; modalIdx = -1;
+}
+function renderSceneModal() {
+  if (modalIdx < 0 || modalIdx >= modalItems.length) return;
+  const { tapeId, s } = modalItems[modalIdx];
+  const enc = encodeURIComponent(tapeId), sid = s.scene_id, f = s.files || {}, tc = s.timecode || {},
+    rec = s.recording || {}, v = s.video || {}, arch = f.archive || {}, prox = f.proxy || {};
+  const file = n => `/api/tapes/${enc}/files/${encodeURIComponent(sid)}.${n}`;
+  const video = $('#scModalVideo');
+  video.pause(); video.src = file('mp4'); video.load(); video.play().catch(() => {});
+  $('#scModalTitle').innerHTML = `<div class="truncate">${tapeId} · ${L('scene.n', { n: s.scene_index })}</div>
+    <div class="mt-0.5 truncate font-mono text-theme-xs font-normal text-gray-500 dark:text-gray-400">
+      ${tc.start || '?'} – ${tc.end || '?'} · ${durTxt(s.frame_count, v.standard)} ·
+      ${L('scene.recorded', { dt: rec.datetime ? rec.datetime.replace('T', ' ') : '—' })}
+    </div>`;
+  $('#scModalActions').innerHTML = `
+    <button class="fb ${BTN_FB}" data-tape="${tapeId}" data-scene="${sid}">${L('scene.fb')}</button>
+    <button class="repair ${BTN}" data-tape="${tapeId}" data-scene="${sid}">${L('scene.repair')}</button>
+    <a class="${LINK}" href="${file('dv.zst')}?dl=1">${L('scene.dv')}${arch.size_compressed ? ` (${mb(arch.size_compressed)})` : ''}</a>
+    <a class="${LINK}" href="${file('mp4')}?dl=1">${L('scene.mp4')}${prox.size ? ` (${mb(prox.size)})` : ''}</a>
+    <a class="${LINK}" href="${file('json')}?dl=1">${L('scene.json')}</a>`;
+  $('#scModalPrev').disabled = modalIdx <= 0;
+  $('#scModalNext').disabled = modalIdx >= modalItems.length - 1;
+  $('#scModalCount').textContent = `${modalIdx + 1} / ${modalItems.length}`;
+}
+function scModalStep(delta) {
+  const n = modalIdx + delta;
+  if (n < 0 || n >= modalItems.length) return;
+  modalIdx = n; renderSceneModal();
+}
+$('#scModalClose').onclick = closeSceneModal;
+$('#scModalPrev').onclick = () => scModalStep(-1);
+$('#scModalNext').onclick = () => scModalStep(1);
+$('#scModal').addEventListener('click', e => {
+  if (e.target.id === 'scModal') { closeSceneModal(); return; }
+  const fb = e.target.closest('.fb'); if (fb) { fbCompress(fb); return; }
+  const rp = e.target.closest('.repair'); if (rp) { repairCompress(rp); return; }
+});
+document.addEventListener('keydown', e => {
+  if ($('#scModal').classList.contains('hidden')) return;
+  if (e.key === 'Escape') closeSceneModal();
+  else if (e.key === 'ArrowLeft') scModalStep(-1);
+  else if (e.key === 'ArrowRight') scModalStep(1);
+});
+let scTouchX = null;
+$('#scModal').addEventListener('touchstart', e => { scTouchX = e.touches[0].clientX; }, { passive: true });
+$('#scModal').addEventListener('touchend', e => {
+  if (scTouchX == null) return;
+  const dx = e.changedTouches[0].clientX - scTouchX; scTouchX = null;
+  if (Math.abs(dx) > 50) scModalStep(dx > 0 ? -1 : 1);
+});
+
 function sceneCard(id, s, hasFull, hideSelect) {
   const enc = encodeURIComponent(id), sid = s.scene_id, f = s.files || {}, tc = s.timecode || {},
     rec = s.recording || {}, v = s.video || {}, arch = f.archive || {}, prox = f.proxy || {};
@@ -145,6 +228,7 @@ function sceneCard(id, s, hasFull, hideSelect) {
     </div></div>`;
 }
 
+let kasetyGridItems = [];             // [{tapeId, s}] backing the open tape's grid view, for the modal's prev/next
 let fromTimeline = null;              // {year, month} when a tape was opened from the timeline
 async function openTape(id, sceneId) {
   const switching = openTapeId !== id;
@@ -227,6 +311,7 @@ function renderTapeDetail(t, force) {
       <h3 class="text-lg font-semibold text-brand-500">${id}</h3>
       ${t.label ? `<span class="rounded bg-gray-100 px-2 py-0.5 text-theme-xs text-gray-700 dark:bg-gray-800 dark:text-gray-200">🏷️ ${t.label}</span>` : ''}
       <span class="font-mono text-theme-xs text-gray-500 dark:text-gray-400">${nScen(t.scene_count ?? scenes.length)} · ${t.recording_date ? '📅 ' + t.recording_date : (t.capture_completed_at || '').slice(0, 19).replace('T', ' ')}</span>
+      <span class="ml-auto">${viewToggleHTML()}</span>
     </div>
     <div class="mt-2 flex flex-wrap items-center gap-2 text-theme-xs">
       <button id="tapeRename" class="${BTN}">${L('tape.rename')}</button>
@@ -253,7 +338,11 @@ function renderTapeDetail(t, force) {
       <button id="selAll" class="${BTN}">${L('sel.all')}</button>
       <button id="selClear" class="${BTN}">${L('sel.clear')}</button>
     </div>
-    <div id="detailScenes" class="playable mt-4 grid gap-3">${scenes.map(s => sceneCard(id, s, !!full)).join('') || `<p class="text-theme-sm text-gray-400">${L('scenes.empty')}</p>`}</div>`;
+    <div id="detailScenes" class="playable mt-4 ${sceneView === 'grid' ? '' : 'grid gap-3'}">${
+      sceneView === 'grid'
+        ? sceneGridHTML(kasetyGridItems = scenes.map(s => ({ tapeId: id, s })))
+        : (scenes.map(s => sceneCard(id, s, !!full)).join('') || `<p class="text-theme-sm text-gray-400">${L('scenes.empty')}</p>`)
+    }</div>`;
   restoreVideos(snap);
   syncSelBar();
 }
@@ -371,6 +460,10 @@ $('#tapeGrid').addEventListener('click', e => {
 });
 $('#tapeDetail').addEventListener('click', e => {
   if (e.target.id === 'backToTl' && fromTimeline) { go('#timeline/' + fromTimeline.year + '/' + fromTimeline.month); return; }
+  const vt = e.target.closest('.viewToggle');
+  if (vt) { setSceneView(vt.dataset.view); detailSig = ''; renderTapeDetail(currentTape(), true); return; }
+  const gt = e.target.closest('[data-mkey]');
+  if (gt) { openSceneModal(kasetyGridItems, +gt.dataset.mkey); return; }
   const cb = e.target.closest('.scenesel');
   if (cb) {
     cb.checked ? selected.add(cb.dataset.scene) : selected.delete(cb.dataset.scene);
@@ -480,31 +573,34 @@ async function renderTimeline() {
   renderTlScenes();
 }
 
+let tlGridItems = [];                 // [{tapeId, s}] backing the month's grid view, for the modal's prev/next
 function renderTlScenes() {
   const view = $('#tlView');
   view.className = 'p-5';
+  const withFull = tlScenes.map(s => ({ s, full: (scenesCache[s.tape_id] || []).find(x => x.scene_id === s.scene_id) }))
+    .filter(x => x.full);
   view.innerHTML = `
-    <div id="tlSelBar" class="mb-4 hidden flex-wrap items-center gap-3 rounded-xl border border-brand-500/40 bg-brand-50/60 p-3 dark:bg-brand-500/[0.08]">
-      <span class="text-sm">${L('sel.count')} <b id="tlSelCount">0</b></span>
-      <button id="tlBuild" class="${BTN_PRIMARY}">${L('tl.build')}</button>
-      <button id="tlSelClear" class="${BTN}">${L('sel.clear')}</button>
-      <span class="basis-full text-theme-xs text-gray-500 dark:text-gray-400 sm:basis-auto">${L('tl.buildHint')}</span>
-    </div>
-    <div id="tlSceneList" class="playable grid gap-3">` +
-    tlScenes.map(s => {
-      const full = (scenesCache[s.tape_id] || []).find(x => x.scene_id === s.scene_id);
-      if (!full) return '';
-      const key = tlKey(s.tape_id, s.scene_id), sel = tlSelected.has(key);
-      return `<div data-tl-key="${key}" class="rounded-xl ${sel ? 'ring-2 ring-brand-500' : ''}">
-        <div class="mb-1 flex items-center gap-2 text-theme-xs text-gray-400">
-          <input type="checkbox" class="tlsel h-3.5 w-3.5 accent-brand-500" data-tape="${s.tape_id}" data-scene="${s.scene_id}" ${sel ? 'checked' : ''}>
-          <span class="truncate">${s.tape_id}${s.label ? ' · ' + s.label : ''} · ${s.date}${s.time ? ' ' + s.time.slice(0, 5) : ''}</span>
-          <button data-open-tape="${encodeURIComponent(s.tape_id)}" data-open-scene="${encodeURIComponent(s.scene_id || '')}"
-            title="${L('tl.openInTapes')}" class="shrink-0 text-brand-500 hover:underline">${L('tl.openInTapes')}</button>
+    <div class="mb-3 flex items-center justify-end">${viewToggleHTML()}</div>` +
+    (sceneView === 'grid'
+      ? sceneGridHTML(tlGridItems = withFull.map(({ s, full }) => ({ tapeId: s.tape_id, s: full })))
+      : `<div id="tlSelBar" class="mb-4 hidden flex-wrap items-center gap-3 rounded-xl border border-brand-500/40 bg-brand-50/60 p-3 dark:bg-brand-500/[0.08]">
+          <span class="text-sm">${L('sel.count')} <b id="tlSelCount">0</b></span>
+          <button id="tlBuild" class="${BTN_PRIMARY}">${L('tl.build')}</button>
+          <button id="tlSelClear" class="${BTN}">${L('sel.clear')}</button>
+          <span class="basis-full text-theme-xs text-gray-500 dark:text-gray-400 sm:basis-auto">${L('tl.buildHint')}</span>
         </div>
-        ${sceneCard(s.tape_id, full, false, true)}
-      </div>`;
-    }).join('') + '</div>';
+        <div id="tlSceneList" class="playable grid gap-3">` + withFull.map(({ s, full }) => {
+          const key = tlKey(s.tape_id, s.scene_id), sel = tlSelected.has(key);
+          return `<div data-tl-key="${key}" class="rounded-xl ${sel ? 'ring-2 ring-brand-500' : ''}">
+            <div class="mb-1 flex items-center gap-2 text-theme-xs text-gray-400">
+              <input type="checkbox" class="tlsel h-3.5 w-3.5 accent-brand-500" data-tape="${s.tape_id}" data-scene="${s.scene_id}" ${sel ? 'checked' : ''}>
+              <span class="truncate">${s.tape_id}${s.label ? ' · ' + s.label : ''} · ${s.date}${s.time ? ' ' + s.time.slice(0, 5) : ''}</span>
+              <button data-open-tape="${encodeURIComponent(s.tape_id)}" data-open-scene="${encodeURIComponent(s.scene_id || '')}"
+                title="${L('tl.openInTapes')}" class="shrink-0 text-brand-500 hover:underline">${L('tl.openInTapes')}</button>
+            </div>
+            ${sceneCard(s.tape_id, full, false, true)}
+          </div>`;
+        }).join('') + '</div>');
   syncTlSelBar();
 }
 
@@ -529,6 +625,10 @@ $('#tlRefresh').onclick = () => loadTimeline(true);
 $('#tlView').addEventListener('click', e => {
   const nav = e.target.closest('[data-go]');
   if (nav) { go(nav.dataset.go); return; }
+  const vt = e.target.closest('.viewToggle');
+  if (vt) { setSceneView(vt.dataset.view); renderTlScenes(); return; }
+  const gt = e.target.closest('[data-mkey]');
+  if (gt) { openSceneModal(tlGridItems, +gt.dataset.mkey); return; }
   const cb = e.target.closest('.tlsel');
   if (cb) {
     const key = tlKey(cb.dataset.tape, cb.dataset.scene);
