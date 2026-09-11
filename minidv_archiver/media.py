@@ -79,9 +79,18 @@ def _ahash16(gray256: bytes) -> str:
     raw bytes (the previous approach) never matched two separate captures of the
     same footage in practice — different decode rounding, or a scene boundary off
     by a frame or two, changes bytes without changing what's actually on screen.
-    An average-hash is tolerant of that; compare with Hamming distance, not ==."""
+    An average-hash is tolerant of that; compare with Hamming distance, not ==.
+
+    A near-uniform frame (black / faded-to-white / a camera pointed at a blank
+    wall — common at a scene's very first or last frame) carries no real content
+    to fingerprint: its hash is noise-sensitive and near-identical to countless
+    unrelated frames, which — chained transitively across thousands of scenes —
+    turns into a giant false-positive duplicate cluster. Refuse to hash those;
+    "" is falsy and _hashes_match already skips falsy positions."""
     blocks = [sum(gray256[(by * 2 + dy) * 16 + bx * 2 + dx] for dy in range(2) for dx in range(2)) / 4
               for by in range(8) for bx in range(8)]
+    if max(blocks) - min(blocks) < 16:
+        return ""
     mean = sum(blocks) / len(blocks)
     bits = 0
     for v in blocks:

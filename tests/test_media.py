@@ -22,6 +22,17 @@ def test_ahash16_is_64bit_hex_tolerant_of_brightness_shift_sensitive_to_inversio
     assert dist2 >= 32
 
 
+def test_ahash16_refuses_near_uniform_frames():
+    # a near-black (or near-white, or blank-wall) frame carries no real content to
+    # fingerprint -- its hash would be noise-sensitive and coincidentally near-match
+    # countless unrelated frames, chaining into a false-positive duplicate cluster
+    assert _ahash16(bytes([10] * 256)) == ""
+    assert _ahash16(bytes([240] * 256)) == ""
+    # tiny sensor noise around a flat scene should still count as uniform
+    noisy_flat = bytes(10 + (i % 3) for i in range(256))
+    assert _ahash16(noisy_flat) == ""
+
+
 def test_probe_json_parses_stdout_and_ignores_stderr_noise():
     # ffprobe writes DV decoder warnings to stderr; they must not reach json.loads.
     out = probe_json(["sh", "-c", 'printf "[dvvideo] Concealing bitstream errors\\n" >&2; printf "{\\"ok\\":1}"'])
