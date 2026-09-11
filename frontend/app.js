@@ -109,7 +109,7 @@ function renderTapeGrid(list) {
   }
 }
 
-function sceneCard(id, s, hasFull) {
+function sceneCard(id, s, hasFull, hideSelect) {
   const enc = encodeURIComponent(id), sid = s.scene_id, f = s.files || {}, tc = s.timecode || {},
     rec = s.recording || {}, v = s.video || {}, arch = f.archive || {}, prox = f.proxy || {};
   const at = ((s.source || {}).start_frame || 0) / (v.standard === 'NTSC' ? 30000 / 1001 : 25);
@@ -117,12 +117,12 @@ function sceneCard(id, s, hasFull) {
   const flags = [drops && L('flag.dropped', { n: drops }), disc && L('flag.disc', { n: disc }),
     badYear(rec.datetime) && L('flag.badClock')].filter(Boolean);
   const file = n => `/api/tapes/${enc}/files/${encodeURIComponent(sid)}.${n}`;
-  const on = selected.has(sid);
+  const on = !hideSelect && selected.has(sid);
   return `<div data-scene-card="${sid}" class="flex gap-4 rounded-xl border ${on ? 'border-brand-500 bg-brand-50/60 dark:bg-brand-500/[0.08]' : 'border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-white/[0.02]'} p-3">
     <label class="relative shrink-0 cursor-pointer">
       <img loading="lazy" src="/api/tapes/${enc}/files/thumbnails/${encodeURIComponent(sid)}.jpg" alt=""
         class="h-24 w-32 rounded-lg bg-black object-cover ${hasFull ? 'group-[.playable]:cursor-pointer' : ''}">
-      <input type="checkbox" class="scenesel absolute left-1.5 top-1.5 h-4 w-4 accent-brand-500" data-scene="${sid}" ${on ? 'checked' : ''}>
+      ${hideSelect ? '' : `<input type="checkbox" class="scenesel absolute left-1.5 top-1.5 h-4 w-4 accent-brand-500" data-scene="${sid}" ${on ? 'checked' : ''}>`}
     </label>
     <div class="min-w-0 flex-1">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -467,11 +467,16 @@ async function renderTimeline() {
     </button>`).join('') || `<p class="col-span-full text-theme-sm text-gray-400">${L('tl.noScenes')}</p>`;
     return;
   }
-  // scenes: quick inline preview + cross-tape multi-select right here, or jump to Kasety for full management
+  // scenes: same scene-card list as a tape's detail view (Kasety), just spanning a month
+  // across tapes — reuses sceneCard() as-is for the thumbnail/preview/FB/repair/download row.
   view.className = 'p-5';
   view.innerHTML = `<p class="text-theme-sm text-gray-400">${L('loading')}</p>`;
   try { tlScenes = await api(`/api/timeline/${tl.year}/${tl.month}`); }
   catch (e) { view.innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
+  const tapeIds = [...new Set(tlScenes.map(s => s.tape_id))];
+  await Promise.all(tapeIds.filter(id => !scenesCache[id]).map(async id => {
+    try { scenesCache[id] = await api(`/api/tapes/${encodeURIComponent(id)}/scenes`); } catch (_) { scenesCache[id] = []; }
+  }));
   renderTlScenes();
 }
 
@@ -485,20 +490,19 @@ function renderTlScenes() {
       <button id="tlSelClear" class="${BTN}">${L('sel.clear')}</button>
       <span class="basis-full text-theme-xs text-gray-500 dark:text-gray-400 sm:basis-auto">${L('tl.buildHint')}</span>
     </div>
-    <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">` +
+    <div id="tlSceneList" class="playable grid gap-3">` +
     tlScenes.map(s => {
-      const tc = s.tc || {}, key = tlKey(s.tape_id, s.scene_id), sel = tlSelected.has(key);
-      return `<div data-tl-key="${key}" class="${TLTILE} ${sel ? 'border-brand-500' : ''}">
-        <div class="relative block cursor-pointer tlpreview" data-tape="${encodeURIComponent(s.tape_id)}" data-scene="${encodeURIComponent(s.scene_id || '')}">
-          <div class="aspect-square overflow-hidden rounded-xl bg-black">${tlThumb(s)}</div>
-          <input type="checkbox" class="tlsel absolute left-1.5 top-1.5 h-4 w-4 accent-brand-500" data-tape="${s.tape_id}" data-scene="${s.scene_id}" ${sel ? 'checked' : ''}>
+      const full = (scenesCache[s.tape_id] || []).find(x => x.scene_id === s.scene_id);
+      if (!full) return '';
+      const key = tlKey(s.tape_id, s.scene_id), sel = tlSelected.has(key);
+      return `<div data-tl-key="${key}" class="rounded-xl ${sel ? 'ring-2 ring-brand-500' : ''}">
+        <div class="mb-1 flex items-center gap-2 text-theme-xs text-gray-400">
+          <input type="checkbox" class="tlsel h-3.5 w-3.5 accent-brand-500" data-tape="${s.tape_id}" data-scene="${s.scene_id}" ${sel ? 'checked' : ''}>
+          <span class="truncate">${s.tape_id}${s.label ? ' · ' + s.label : ''} · ${s.date}${s.time ? ' ' + s.time.slice(0, 5) : ''}</span>
+          <button data-open-tape="${encodeURIComponent(s.tape_id)}" data-open-scene="${encodeURIComponent(s.scene_id || '')}"
+            title="${L('tl.openInTapes')}" class="shrink-0 text-brand-500 hover:underline">${L('tl.openInTapes')}</button>
         </div>
-        <button data-open-tape="${encodeURIComponent(s.tape_id)}" data-open-scene="${encodeURIComponent(s.scene_id || '')}"
-          title="${L('tl.openInTapes')}" class="mt-1.5 block w-full px-0.5 text-left">
-          <div class="truncate text-theme-xs font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${s.label || s.tape_id}</div>
-          <div class="truncate text-[11px] text-gray-500 dark:text-gray-400">${s.date}${s.time ? ' ' + s.time.slice(0, 5) : ''} · ${L('tl.scene', { n: s.scene_index })}</div>
-          <div class="truncate font-mono text-[11px] text-gray-400">${tc.start || ''}${tc.end ? ' – ' + tc.end : ''}</div>
-        </button>
+        ${sceneCard(s.tape_id, full, false, true)}
       </div>`;
     }).join('') + '</div>';
   syncTlSelBar();
@@ -534,20 +538,23 @@ $('#tlView').addEventListener('click', e => {
     } else {
       tlSelected.delete(key);
     }
-    cb.closest('[data-tl-key]')?.classList.toggle('border-brand-500', cb.checked);
+    cb.closest('[data-tl-key]')?.classList.toggle('ring-2', cb.checked);
+    cb.closest('[data-tl-key]')?.classList.toggle('ring-brand-500', cb.checked);
     syncTlSelBar();
     return;
   }
   if (e.target.id === 'tlSelClear') { tlSelected.clear(); renderTlScenes(); return; }
   if (e.target.id === 'tlBuild') { buildTlPlaylist(e.target); return; }
-  const pv = e.target.closest('.tlpreview');
-  if (pv) {
-    const tile = pv.closest('[data-tl-key]'); let v = tile.querySelector('video');
-    if (v) { v.remove(); return; }
+  // same interaction as a tape's own scene list (Kasety): inline preview toggle, FB, repair
+  const rp = e.target.closest('.repair'); if (rp) { repairCompress(rp); return; }
+  const fb = e.target.closest('.fb'); if (fb) { fbCompress(fb); return; }
+  const p = e.target.closest('.preview');
+  if (p) {
+    const card = p.closest('.flex'); let v = card.nextElementSibling;
+    if (v && v.tagName === 'VIDEO') { v.remove(); return; }
     v = document.createElement('video'); v.controls = true; v.preload = 'metadata';
-    v.className = 'mt-2 w-full rounded-lg bg-black';
-    v.src = `/api/tapes/${pv.dataset.tape}/files/${pv.dataset.scene}.mp4`;
-    pv.after(v); v.play().catch(() => {});
+    v.className = 'mt-2 w-full max-w-2xl rounded-lg bg-black'; v.src = p.dataset.src;
+    card.after(v); v.play().catch(() => {});
     return;
   }
   const ot = e.target.closest('[data-open-tape]');
