@@ -621,19 +621,16 @@ $('#dupView').addEventListener('click', async e => {
   if (e.target.id === 'dupRefresh') { loadDuplicates(true); return; }
   if (e.target.id === 'dupReprobeAll') {
     e.target.disabled = true; e.target.textContent = L('build.wait.queued');
-    let n = 0;
     try {
       for (const t of (window.__tapes || [])) {
         await api(`/api/tapes/${encodeURIComponent(t.tape_id)}/reprobe`,
           { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-        n++;
       }
     } catch (err) { alert(err.message); }
     finally { e.target.disabled = false; e.target.textContent = L('dup.scanAll'); }
     await refresh();
-    go('#zadania');            // show the queue that just started
-    alert(L('dup.reprobeDone', { n }));
-    return;
+    go('#zadania');            // show the queue that just started — no blocking alert() here:
+    return;                    // it freezes the 3s refresh loop, so "live progress" wouldn't be live
   }
   const k = e.target.closest('.dupkeep');
   if (k) resolveDuplicate(+k.dataset.g, +k.dataset.m);

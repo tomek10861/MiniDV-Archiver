@@ -110,7 +110,6 @@
     'dup.noneHint': ' You have scenes without a fingerprint — click “Scan all tapes”, then refresh.',
     'dup.confirmKeep': 'Keep the version from {keep} (errors: {keepScore}) and delete {n}?\n{list}',
     'dup.confirmItem': '• {tape} / scene {idx} — errors: {score}',
-    'dup.reprobeDone': 'Quality scan queued for {n} tapes — progress is in “Tasks”. Results appear here automatically when it finishes.',
     'dup.frames': '{n} fr.',
 
     // timeline
@@ -246,7 +245,6 @@
     'dup.noneHint': ' Masz sceny bez odcisku — kliknij „Sonduj wszystkie taśmy", potem odśwież.',
     'dup.confirmKeep': 'Zostawić wersję z {keep} (błędy: {keepScore}) i usunąć {n}?\n{list}',
     'dup.confirmItem': '• {tape} / scena {idx} — błędy: {score}',
-    'dup.reprobeDone': 'Zlecono sondę dla {n} taśm — postęp widać w „Zadania". Wyniki pojawią się tu automatycznie po zakończeniu.',
     'dup.frames': '{n} kl.',
 
     'timeline.title': 'Oś czasu',
