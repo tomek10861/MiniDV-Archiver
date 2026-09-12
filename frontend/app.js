@@ -938,6 +938,18 @@ async function refresh() {
       $('#capBytes').textContent = mb(cap.captured_bytes);
     }
 
+    // live preview: only (re)connect the MJPEG stream on CAPTURING onset/exit, not every 3s tick
+    const capPreview = $('#capPreview'), showPreview = !!(cap && cap.status === 'CAPTURING');
+    $('#capPreviewWrap').classList.toggle('hidden', !showPreview);
+    if (showPreview && !capPreview.dataset.live) {
+      capPreview.dataset.live = '1';
+      capPreview.onerror = () => { delete capPreview.dataset.live; };
+      capPreview.src = '/api/capture/preview.mjpg?t=' + Date.now();
+    } else if (!showPreview && capPreview.dataset.live) {
+      delete capPreview.dataset.live;
+      capPreview.removeAttribute('src');
+    }
+
     renderJobs(s.jobs || [], s.queue || [], s.compress || []);
     if (currentRoute().section === 'duplikaty' && dupCache) {
       const busy = (s.compress || []).some(b => b.mode === 'reprobe' && (b.status === 'QUEUED' || b.status === 'RUNNING'));

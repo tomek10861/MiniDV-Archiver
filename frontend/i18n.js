@@ -32,6 +32,7 @@
     'capture.step3': 'When the footage ends press <b>STOP</b> on the camera — the capture closes itself.',
     'capture.idle': 'No capture running.',
     'capture.elapsed': 'Elapsed', 'capture.captured': 'Captured',
+    'capture.preview': 'Live preview (muted)',
     'capture.background': 'Background: processing {tape} ({status})',
 
     // tasks
@@ -173,6 +174,7 @@
     'capture.step3': 'Po materiale naciśnij <b>STOP</b> na kamerze — zapis zamknie się sam.',
     'capture.idle': 'Brak aktywnego zgrywania.',
     'capture.elapsed': 'Nagrane', 'capture.captured': 'Skopiowane',
+    'capture.preview': 'Podgląd na żywo (bez dźwięku)',
     'capture.background': 'W tle: przetwarzanie {tape} ({status})',
 
     'tasks.title': 'Zadania w tle',

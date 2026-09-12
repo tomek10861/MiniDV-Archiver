@@ -654,6 +654,34 @@ class Engine:
                 self.store.mark_cancel(target)
             return dict(self.store.get_job(target) or job)
 
+    # ---- live preview (read-only tap on the growing raw DV, never touches FireWire) ----
+    @staticmethod
+    def _preview_source(work: Path) -> Path | None:
+        """Whichever seg*.dv dvgrab is currently writing (highest index), or the
+        merged capture001.dv once the capture has finished; None if neither exists yet."""
+        segs = sorted(work.glob("seg[0-9][0-9][0-9].dv"))
+        src = segs[-1] if segs else work / "capture001.dv"
+        return src if src.exists() else None
+
+    def preview_procs(self) -> tuple[subprocess.Popen, subprocess.Popen] | None:
+        """A ``tail -f`` piped into ffmpeg -> low-res/low-fps MJPEG. Read-only and
+        independent of the capture process — killing/losing this stream can never
+        affect an in-progress capture."""
+        job = self.store.capture_job()
+        if not job:
+            return None
+        src = self._preview_source(self.config.working / job["tape_id"])
+        if not src:
+            return None
+        tail = subprocess.Popen(["tail", "-c", "+0", "-f", str(src)], stdout=subprocess.PIPE)
+        ff = subprocess.Popen(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "dv", "-i", "pipe:0",
+             "-an", "-vf", "scale=480:-2,fps=8", "-q:v", "6",
+             "-f", "mpjpeg", "-boundary_tag", "frame", "pipe:1"],
+            stdin=tail.stdout, stdout=subprocess.PIPE)
+        tail.stdout.close()  # tail gets SIGPIPE (not a silent hang) once ffmpeg exits
+        return tail, ff
+
     def _acquire_dv(self, job: dict, work: Path, capture: Path, duration: int | None,
                     manual_transport: bool) -> None:
         """Run dvgrab into seg*.dv, relaunching if it quits early (blank tape makes dvgrab

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import select
+import socket
+import subprocess
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -71,6 +74,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = unquote(urlparse(self.path).path)
         try:
+            if path == "/api/capture/preview.mjpg":
+                return self.stream_preview()
             if path == "/api/status":
                 info = ENGINE.camera.info()  # sysfs only, never sends AV/C
                 camera = {**info, "transport": "CONNECTED" if info["connected"] else "NO_CAMERA", "timecode": None,
@@ -280,6 +285,52 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 remaining -= len(chunk)
+
+    def _client_gone(self) -> bool:
+        """Non-blocking check for a client that closed its end (tab closed / navigated
+        away). Needed because our read loop otherwise blocks on ffmpeg's stdout, which
+        can sit idle for a long time (capture stalled/ended) with no data to notice a
+        dead client by — that would leak the ffmpeg/tail pair until the capture ends."""
+        try:
+            r, _, _ = select.select([self.connection], [], [], 0)
+            return bool(r) and self.connection.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
+
+    def stream_preview(self):
+        """Live MJPEG preview of the capture in progress, if any (read-only tap on the
+        raw DV file — see Engine.preview_procs; never touches the FireWire capture)."""
+        procs = ENGINE.preview_procs()
+        if not procs:
+            return self.json({"error": "brak aktywnego zgrywania"}, 404)
+        tail, ff = procs
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "multipart/x-mixed-replace;boundary=frame")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            while True:
+                # capture ended -> ffmpeg/tail may now sit idle forever; stop rather than leak
+                if not ENGINE.store.capture_job() or self._client_gone():
+                    break
+                ready, _, _ = select.select([ff.stdout], [], [], 2.0)
+                if not ready:
+                    continue
+                chunk = ff.stdout.read(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            for p in (ff, tail):
+                if p.poll() is None:
+                    p.kill()
+            for p in (ff, tail):
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} {fmt % args}")

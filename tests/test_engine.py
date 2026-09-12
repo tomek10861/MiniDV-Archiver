@@ -608,6 +608,25 @@ def test_progress_updates_captured_bytes_without_history_entry(tmp_path):
     assert eng.store.get_job("TAPE-9")["captured_bytes"] == 12_345_678
 
 
+def test_preview_source_picks_highest_segment_over_merged_capture(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    assert Engine._preview_source(work) is None       # nothing written yet
+    (work / "seg001.dv").write_bytes(b"a")
+    (work / "capture001.dv").write_bytes(b"b")        # a stale merge from an earlier run
+    assert Engine._preview_source(work) == work / "seg001.dv"
+    (work / "seg002.dv").write_bytes(b"c")
+    assert Engine._preview_source(work) == work / "seg002.dv"
+    for p in work.glob("seg*.dv"):
+        p.unlink()
+    assert Engine._preview_source(work) == work / "capture001.dv"  # segments merged, capture done
+
+
+def test_preview_procs_none_without_active_capture(tmp_path):
+    eng = _engine(tmp_path)
+    assert eng.preview_procs() is None
+
+
 def test_missing_camera_fails_and_cleans_working_dir(tmp_path):
     eng = _engine(tmp_path)
     eng.camera = type("FakeCam", (), {"info": staticmethod(lambda: {"connected": False})})()
