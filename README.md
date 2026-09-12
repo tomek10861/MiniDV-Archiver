@@ -107,10 +107,12 @@ Four containers share `/srv/minidv` (and its `state/jobs.db`):
 | `ui` | `nginx`, publishes `:8088` | serves `frontend/`, proxies `/api` → `api:8080` |
 
 Restart any one without touching the others (`docker compose restart api`). Only
-`ui` publishes a port — there is **no authentication**, so firewall `:8088` to a
-trusted LAN. `grabber` is `privileged` because the camera's `/dev/fw*` node is
-hot-plugged; it and the api/converter also mount host `/sys` read-only so
-`camera.info()` can resolve the FireWire node.
+`ui` publishes a port — there is **no authentication by default**, so firewall
+`:8088` to a trusted LAN, or turn on HTTP basic auth for an internet-facing
+deployment (e.g. behind a Cloudflare Tunnel) — see [`docker/.htpasswd.example`](docker/.htpasswd.example);
+off by default, nothing to configure otherwise. `grabber` is `privileged` because
+the camera's `/dev/fw*` node is hot-plugged; it and the api/converter also mount
+host `/sys` read-only so `camera.info()` can resolve the FireWire node.
 
 ### Other ways to run
 

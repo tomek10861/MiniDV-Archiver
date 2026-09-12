@@ -11,6 +11,7 @@ venv/
 # Environment / local config (never commit secrets)
 .env
 .env.local
+docker/auth.d/
 
 # OS / editor
 .DS_Store

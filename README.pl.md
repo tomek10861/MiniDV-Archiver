@@ -111,10 +111,12 @@ Cztery kontenery współdzielą `/srv/minidv` (i jego `state/jobs.db`):
 | `ui` | `nginx`, publikuje `:8088` | serwuje `frontend/`, proxuje `/api` → `api:8080` |
 
 Dowolną z nich zrestartujesz bez ruszania reszty (`docker compose restart api`).
-Port publikuje tylko `ui` — **nie ma uwierzytelniania**, więc zablokuj `:8088`
-firewallem do zaufanej sieci. `grabber` jest `privileged`, bo węzeł `/dev/fw*`
-kamery jest hot-plugowany; on oraz api/converter montują host `/sys` tylko do
-odczytu, żeby `camera.info()` mogło rozwiązać węzeł FireWire.
+Port publikuje tylko `ui` — **domyślnie nie ma uwierzytelniania**, więc zablokuj
+`:8088` firewallem do zaufanej sieci, albo włącz HTTP basic auth przy wystawieniu
+do internetu (np. za Cloudflare Tunnel) — patrz [`docker/.htpasswd.example`](docker/.htpasswd.example);
+domyślnie wyłączone, nic do konfiguracji poza tym. `grabber` jest `privileged`,
+bo węzeł `/dev/fw*` kamery jest hot-plugowany; on oraz api/converter montują
+host `/sys` tylko do odczytu, żeby `camera.info()` mogło rozwiązać węzeł FireWire.
 
 ### Inne sposoby uruchomienia
 
