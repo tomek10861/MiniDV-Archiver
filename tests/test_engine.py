@@ -1,5 +1,6 @@
 import json
 import pathlib
+import re
 import time
 
 import minidv_archiver.engine as em
@@ -181,6 +182,29 @@ def test_cancel_with_captured_dv_is_archived_not_discarded(tmp_path, monkeypatch
     assert "TAPE-8" in eng.pending              # handed to processing
 
 
+def test_stop_cancel_does_not_poison_processing(tmp_path, monkeypatch):
+    """Regression: a mid-capture 'Przerwij' sets the *store's* cancel flag (what the
+    api's stop() actually does, via mark_cancel — not just the in-memory Event) so
+    _acquire_dv stops early. Once the partial tape is archived that flag must be
+    cleared, or the processing stage's very first status update reads the same
+    stale flag and aborts immediately: CAPTURED job goes straight to ERROR
+    "processing cancelled" while the raw DV sits right there on disk, unprocessed."""
+    monkeypatch.setattr(Engine, "_acquire_dv", _fake_acquire(4 * 3_600_000))
+    eng = _engine(tmp_path, keep_partial_min_seconds=2)
+    eng.camera = type("C", (), {"info": staticmethod(lambda: {"connected": True}),
+                                "command": staticmethod(lambda x: None)})()
+    job = eng._new_job("TAPE-9c", manual_transport=True)
+    eng.jobs["TAPE-9c"] = job
+    eng.capture_tape = "TAPE-9c"
+    eng.capture_cancel.set()
+    eng.store.mark_cancel("TAPE-9c")
+    eng._capture_job(job, rewind=False, duration=None, manual_transport=True)
+    assert job["status"] == "CAPTURED"
+    assert not eng.store.get_job("TAPE-9c")["cancel"]
+    eng._set(job, "ANALYZING_DV")            # what claim_next_process leads to
+    assert job["status"] == "ANALYZING_DV"   # must not raise "processing cancelled"
+
+
 def test_cancel_with_no_dv_is_cancelled(tmp_path, monkeypatch):
     monkeypatch.setattr(Engine, "_acquire_dv", _fake_acquire(0))
     eng = _engine(tmp_path)
@@ -289,6 +313,45 @@ def test_reprobe_tape_writes_fingerprint_and_error_score(tmp_path, monkeypatch):
     assert eng._reprobe_tape("TAPE-1", force=True)["updated"] == 1
 
 
+def test_backfill_metadata_tags_missing_creation_time_and_refreshes_checksums(tmp_path):
+    import shutil as _sh
+    import subprocess as _sp
+    from minidv_archiver.media import ffprobe, sha256 as file_sha256
+    if not _sh.which("ffmpeg"):
+        import pytest
+        pytest.skip("ffmpeg not installed")
+    eng = _engine(tmp_path)
+    d = eng.config.tapes / "TAPE-BF"
+    (d / "thumbnails").mkdir(parents=True)
+    scene_id = "0001_2004-07-11_17-29-09"
+    proxy = d / f"{scene_id}.mp4"
+    # -timecode reproduces the auto-added "tmcd" data stream real proxies carry (mov
+    # muxer synthesizes it from timecode side-data) — a plain video-only fixture
+    # missed the bug where remux_metadata's blanket "-map 0" choked on that stream.
+    _sp.run(["ffmpeg", "-y", "-v", "quiet", "-f", "lavfi", "-i", "color=c=black:s=32x32:d=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-timecode", "00:00:00:00", str(proxy)], check=True)
+    assert "creation_time" not in ffprobe(proxy).get("format", {}).get("tags", {})
+    (d / f"{scene_id}.json").write_text(json.dumps({
+        "scene_index": 1, "scene_id": scene_id, "tape_id": "TAPE-BF",
+        "recording": {"datetime": "2004-07-11T17:29:09", "datetime_source": "DV_VAUX"},
+        "timecode": {"start": "00:00:00:00", "end": "00:00:04:00"},
+        "files": {"proxy": {"filename": proxy.name, "sha256": "stale", "size": 1}}}))
+    (d / "tape.json").write_text(json.dumps({"tape_id": "TAPE-BF", "scene_count": 1,
+                                             "scenes": [{"scene_index": 1, "scene_id": scene_id, "frame_count": 100}]}))
+    (d / "tape.sha256").write_text(f"stale  {proxy.name}\nstale  {scene_id}.json\nstale  tape.json\n")
+
+    assert eng._backfill_metadata_tape("TAPE-BF")["updated"] == 1
+    assert ffprobe(proxy)["format"]["tags"]["creation_time"].startswith("2004-07-11")
+    m = json.loads((d / f"{scene_id}.json").read_text())
+    real_sha = file_sha256(proxy)
+    assert m["files"]["proxy"]["sha256"] == real_sha       # re-hashed, not left stale
+    assert m["files"]["proxy"]["size"] == proxy.stat().st_size
+    sha_lines = dict(ln.split("  ", 1)[::-1] for ln in (d / "tape.sha256").read_text().splitlines())
+    assert sha_lines[proxy.name] == real_sha                # tape.sha256 line refreshed too
+    assert sha_lines[f"{scene_id}.json"] == file_sha256(d / f"{scene_id}.json")
+    assert eng._backfill_metadata_tape("TAPE-BF")["updated"] == 0  # already tagged -> no-op
+
+
 def test_duplicates_groups_same_recording_across_tapes_best_first(tmp_path):
     from minidv_archiver import library_index as li
     eng = _engine(tmp_path)
@@ -318,6 +381,41 @@ def test_duplicates_groups_same_recording_across_tapes_best_first(tmp_path):
     assert [m["tape_id"] for m in members] == ["TAPE-0012", "TAPE-0001"]   # lower error_score first
     assert members[0]["best"] is True and members[1]["best"] is False
     assert members[0]["error_score"] == 0
+
+
+def test_dismiss_duplicate_group_removes_it_from_future_scans(tmp_path):
+    from minidv_archiver import library_index as li
+    eng = _engine(tmp_path)
+
+    def tape(tid, hashes):
+        d = eng.config.tapes / tid
+        (d / "thumbnails").mkdir(parents=True)
+        (d / "tape.json").write_text(json.dumps({"tape_id": tid, "scene_count": 1,
+            "scenes": [{"scene_index": 1, "scene_id": "0001_s", "frame_count": 500}]}))
+        (d / "0001_s.json").write_text(json.dumps({
+            "scene_index": 1, "scene_id": "0001_s", "tape_id": tid, "frame_count": 500,
+            "timecode": {"start": "00:05:00:00", "end": "00:05:20:00"},
+            "recording": {"datetime": "2004-07-11T10:00:00"},
+            "capture": {"dropped_frames": 0, "source_discontinuities": [], "decode_errors": 0, "error_score": 0},
+            "fingerprint": {"datetime": "2004-07-11T10:00:00", "tc_start": "00:05:00:00",
+                            "tc_end": "00:05:20:00", "frame_count": 500, "frame_hashes": hashes}}))
+
+    hashes = ["1111111111111111", "2222222222222222", "3333333333333333"]
+    tape("TAPE-A", hashes)
+    tape("TAPE-B", hashes)
+    li.reindex(eng.config, eng.store, force=True)
+    members = eng.duplicates()["groups"][0]["members"]
+
+    result = eng.dismiss_duplicate_group([{"tape_id": m["tape_id"], "scene_id": m["scene_id"]} for m in members])
+    assert result == {"dismissed_pairs": 1}
+    assert eng.duplicates()["groups"] == []
+
+
+def test_dismiss_duplicate_group_rejects_fewer_than_two_scenes(tmp_path):
+    import pytest
+    eng = _engine(tmp_path)
+    with pytest.raises(ValueError):
+        eng.dismiss_duplicate_group([{"tape_id": "A", "scene_id": "0001_s"}])
 
 
 def test_start_selection_concatenates_chosen_scenes(tmp_path, monkeypatch):
@@ -595,6 +693,20 @@ def test_set_derives_scene_index_and_keeps_scene_total(tmp_path):
     eng._set(job, "VERIFYING_ARCHIVES", "0002_y")   # total omitted -> stays at 300
     assert job["scene_index"] == 2 and job["scene_total"] == 300
     assert eng.store.get_job("TAPE-9")["scene_total"] == 300
+
+
+def test_log_prefixes_each_line_with_a_timestamp_and_drops_blanks(tmp_path):
+    """Without a per-line timestamp there's no way to tell whether a flood of e.g.
+    ffmpeg decode warnings is packed into 20 seconds or spread across an hour of
+    tape — see the sysload/dashboard conversation this was requested in."""
+    eng = _engine(tmp_path)
+    job = eng._new_job("TAPE-LOG", manual_transport=True)
+    eng.jobs["TAPE-LOG"] = job
+    eng._log(job, "first line\nsecond line\n\nthird line")
+    lines = job["logs"].splitlines()
+    assert len(lines) == 3                     # the blank line is dropped, not stamped
+    for line, text in zip(lines, ["first line", "second line", "third line"]):
+        assert re.match(rf"^\[\d\d:\d\d:\d\d\] {re.escape(text)}$", line)
 
 
 def test_progress_updates_captured_bytes_without_history_entry(tmp_path):

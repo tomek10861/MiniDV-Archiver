@@ -56,6 +56,12 @@ CREATE TABLE IF NOT EXISTS library (
     payload    TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS dup_dismissed (
+    scene_a      TEXT NOT NULL,
+    scene_b      TEXT NOT NULL,
+    dismissed_at TEXT,
+    PRIMARY KEY (scene_a, scene_b)
+);
 """
 
 
@@ -146,6 +152,21 @@ class JobStore:
             job["cancel"] = True
             job["updated_at"] = now()
             self._conn.execute("UPDATE jobs SET cancel=1, updated_at=?, payload=? WHERE tape_id=?",
+                               (job["updated_at"], json.dumps(job), tape_id))
+            return job
+
+    def clear_cancel(self, tape_id: str) -> dict | None:
+        """A capture-stage cancel that has been honored (partial tape archived, see
+        Engine._capture_job) must not carry over and poison the processing stage —
+        _set()'s cancel guard only ever applies there."""
+        with self._lock, self._immediate():
+            row = self._conn.execute("SELECT payload FROM jobs WHERE tape_id=?", (tape_id,)).fetchone()
+            if not row:
+                return None
+            job = json.loads(row[0])
+            job["cancel"] = False
+            job["updated_at"] = now()
+            self._conn.execute("UPDATE jobs SET cancel=0, updated_at=?, payload=? WHERE tape_id=?",
                                (job["updated_at"], json.dumps(job), tape_id))
             return job
 
@@ -323,6 +344,18 @@ class JobStore:
     def delete_index(self, tape_id: str) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM library WHERE tape_id=?", (tape_id,))
+
+    # ---- duplicate-detection false positives, dismissed per scene pair -----
+    def dismiss_duplicate_pair(self, scene_a: str, scene_b: str) -> None:
+        a, b = sorted((scene_a, scene_b))
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO dup_dismissed (scene_a, scene_b, dismissed_at) VALUES (?,?,?) "
+                "ON CONFLICT(scene_a, scene_b) DO NOTHING", (a, b, now()))
+
+    def dismissed_duplicate_pairs(self) -> set[tuple[str, str]]:
+        with self._lock:
+            return {(r[0], r[1]) for r in self._conn.execute("SELECT scene_a, scene_b FROM dup_dismissed")}
 
     # ---- camera transport requests (api -> grabber) --------------------
     def enqueue_cam_command(self, name: str) -> int:

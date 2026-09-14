@@ -181,3 +181,12 @@ def test_import_legacy_then_reconcile(tmp_path):
 
     s2 = JobStore(cfg.state / "jobs.db")                  # already imported -> no-op
     assert s2.import_legacy(cfg.state / "jobs.json") is False
+
+
+def test_dismiss_duplicate_pair_is_order_independent_and_idempotent(tmp_path):
+    s = _store(tmp_path)
+    assert s.dismissed_duplicate_pairs() == set()
+    s.dismiss_duplicate_pair("B/0001_s", "A/0001_s")       # reversed order on purpose
+    assert s.dismissed_duplicate_pairs() == {("A/0001_s", "B/0001_s")}
+    s.dismiss_duplicate_pair("A/0001_s", "B/0001_s")       # dismissing again is a no-op, not an error
+    assert s.dismissed_duplicate_pairs() == {("A/0001_s", "B/0001_s")}

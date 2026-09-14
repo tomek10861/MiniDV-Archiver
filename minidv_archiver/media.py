@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -14,14 +15,45 @@ NICE_PREFIX: list[str] = []  # set by process_capture(nice=True) to yield CPU/IO
 
 
 def run(cmd: list[str], log=None, timeout=None) -> subprocess.CompletedProcess:
+    """Streams stdout+stderr and hands `log` a batch every ~0.5s (or 50 lines), rather
+    than the whole output as one blob at the end — engine._log() timestamps each batch
+    as it arrives, so a flood of e.g. ffmpeg decode warnings can be read against
+    wall-clock time (errors packed into 20s vs. spread across an hour of tape) instead
+    of landing as one undated wall of text."""
     if NICE_PREFIX and cmd and cmd[0] in {"zstd", "ffmpeg", "dvgrab"}:
         cmd = NICE_PREFIX + cmd
-    cp = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
-    if log:
-        log(cp.stdout.rstrip())
-    if cp.returncode:
-        raise RuntimeError(f"command failed ({cp.returncode}): {' '.join(cmd)}\n{cp.stdout[-4000:]}")
-    return cp
+    proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+    lines: list[str] = []
+    pending: list[str] = []
+    started = last_flush = time.monotonic()
+
+    def flush():
+        nonlocal pending, last_flush
+        if log and pending:
+            log("\n".join(pending))
+        pending = []
+        last_flush = time.monotonic()
+
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            lines.append(line)
+            pending.append(line)
+            elapsed = time.monotonic()
+            if len(pending) >= 50 or elapsed - last_flush >= 0.5:
+                flush()
+            if timeout and elapsed - started > timeout:
+                proc.kill()
+                proc.wait()
+                raise subprocess.TimeoutExpired(cmd, timeout)
+    finally:
+        flush()
+    proc.wait()
+    output = "\n".join(lines)
+    if proc.returncode:
+        raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(cmd)}\n{output[-4000:]}")
+    return subprocess.CompletedProcess(cmd, proc.returncode, output, None)
 
 
 def sha256(path: Path) -> str:
@@ -171,6 +203,22 @@ def scene_metadata(tape_id: str, index: int, dt: str | None, dt_source: str,
     return {"title": f"{tape_id} · scena {index:02d}", "comment": comment,
             "creation_time": (valid + ".000000Z") if valid else None,
             "date": valid[:10] if valid else None}
+
+
+def remux_metadata(path: Path, meta: dict) -> None:
+    """Patch container metadata tags (creation_time/date/...) onto an existing MP4 in
+    place — stream copy, no re-encode, no quality loss. Used to backfill dates onto
+    proxies that never got scene_metadata()'s tags written at encode time."""
+    tmp = path.with_suffix(".metatmp.mp4")
+    try:
+        # explicit video/audio maps, not "-map 0": encode_mp4()'s output can carry an
+        # extra tmcd timecode data stream that ffmpeg refuses to stream-copy here
+        # ("codec not currently supported in container") if pulled in via a blanket map
+        run(["ffmpeg", "-y", "-v", "warning", "-i", str(path), "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
+             "-movflags", "+faststart"] + _meta_args(meta) + [str(tmp)])
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def encode_mp4(source: Path, target: Path, interlaced: bool, log, preset: str = "medium",
@@ -371,6 +419,7 @@ def _process_capture(capture: Path, tape_id: str, storage: Path, zstd_level: int
             run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy",
                  "-movflags", "+faststart"]
                 + _meta_args({"title": f"{tape_id} — cała taśma", "date": first_dt,
+                              "creation_time": f"{first_dt}T00:00:00.000000Z" if first_dt else None,
                               "comment": f"MiniDV {tape_id} · {len(results)} scen · sklejony podgląd"})
                 + [str(tape_dir / "tape.mp4")], log=log)
             tape["proxy_full"] = {"filename": "tape.mp4", "size": (tape_dir / "tape.mp4").stat().st_size}

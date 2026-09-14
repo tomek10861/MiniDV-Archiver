@@ -153,6 +153,20 @@ def test_duplicates_matches_near_identical_hashes_not_just_byte_exact(tmp_path):
     assert {m["tape_id"] for m in dup["groups"][0]["members"]} == {"A", "B"}
 
 
+def test_duplicates_excludes_a_dismissed_pair(tmp_path):
+    """Operator marked this specific pair "not a duplicate" (false positive) --
+    it must not reappear even though the fingerprints still match."""
+    cfg = _cfg(tmp_path)
+    s = JobStore(cfg.state / "jobs.db")
+    _tape_with_fingerprint(cfg, "A", {"0001_s": ["00000000000000ff", "1111111111111110", ""]})
+    _tape_with_fingerprint(cfg, "B", {"0001_s": ["00000000000000fe", "1111111111111111", ""]})
+    li.reindex(cfg, s, force=True)
+    assert len(li.duplicates(cfg, s)["groups"]) == 1
+
+    s.dismiss_duplicate_pair("A/0001_s", "B/0001_s")
+    assert li.duplicates(cfg, s)["groups"] == []
+
+
 def test_duplicates_requires_every_sampled_frame_to_match_not_just_some(tmp_path):
     """Matching only e.g. 2 of 3 hash positions sounds reasonable per-pair, but at a
     few thousand scenes the union-find grouping turns any nonzero per-pair

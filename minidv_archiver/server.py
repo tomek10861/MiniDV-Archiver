@@ -83,6 +83,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"camera": camera, "job": ENGINE.current_job(), **ENGINE.status()})
             if path == "/api/storage":
                 return self.json(ENGINE.storage())
+            if path == "/api/sysload":
+                from . import sysload
+                return self.json(sysload.status())
             if path == "/api/jobs":
                 return self.json(ENGINE.jobs_list())
             if path.startswith("/api/jobs/"):
@@ -190,6 +193,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(items, list) or not items:
                     return self.json({"error": "pusta lista scen"}, 400)
                 return self.json(ENGINE.start_playlist(items, data.get("title")), 202)
+            if path == "/api/duplicates/dismiss":
+                members = self.body().get("members")
+                if not isinstance(members, list) or len(members) < 2:
+                    return self.json({"error": "potrzeba co najmniej 2 scen"}, 400)
+                return self.json(ENGINE.dismiss_duplicate_group(members))
             cparts = path.strip("/").split("/")
             if len(cparts) >= 4 and cparts[:2] == ["api", "tapes"] and cparts[-1] == "compress":
                 data = self.body()
@@ -203,6 +211,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(ENGINE.start_compress(cparts[2], None, restore=restore), 202)
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "reprobe":
                 return self.json(ENGINE.start_reprobe(cparts[2], bool(self.body().get("force"))), 202)
+            if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "backfill-meta":
+                return self.json(ENGINE.start_metadata_backfill(cparts[2]), 202)
             if len(cparts) == 5 and cparts[:2] == ["api", "tapes"] and cparts[3:5] == ["scenes", "delete"]:
                 scenes = self.body().get("scenes")
                 if not isinstance(scenes, list) or not scenes:

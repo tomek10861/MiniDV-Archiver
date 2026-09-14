@@ -142,10 +142,18 @@ class Engine:
             self._persist()
 
     def _log(self, job: dict, message: str) -> None:
+        """Every line gets a wall-clock [HH:MM:SS] prefix (UTC, matching created_at/
+        updated_at elsewhere) — without it a flood of e.g. ffmpeg decode warnings
+        reads as one undated wall of text, and there's no way to tell whether it's
+        errors packed into 20 seconds or spread across an hour of tape."""
         if not message:
             return
         with self.lock:
-            job["logs"] = (job["logs"] + message + "\n")[-20000:]
+            ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            stamped = "\n".join(f"[{ts}] {line}" for line in message.splitlines() if line.strip())
+            if not stamped:
+                return
+            job["logs"] = (job["logs"] + stamped + "\n")[-20000:]
             self._write_job(job)
 
     def _progress(self, job: dict, captured_bytes: int) -> None:
@@ -210,6 +218,22 @@ class Engine:
     def duplicates(self) -> dict:
         return library_index.duplicates(self.config, self.store)
 
+    def dismiss_duplicate_group(self, members: list[dict]) -> dict:
+        """Operator says this group is a false positive — persist every pairwise
+        combination so future duplicate scans (new fingerprints included) don't
+        re-merge these specific scenes, without suppressing a genuinely new match
+        involving just one of them."""
+        keys = [f"{m['tape_id']}/{m['scene_id']}" for m in members
+               if isinstance(m, dict) and m.get("tape_id") and m.get("scene_id")]
+        if len(keys) < 2:
+            raise ValueError("potrzeba co najmniej 2 scen do odrzucenia grupy")
+        pairs = 0
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                self.store.dismiss_duplicate_pair(keys[i], keys[j])
+                pairs += 1
+        return {"dismissed_pairs": pairs}
+
     # ---- quality re-probe: decode-error count + content fingerprint per scene ----
     def start_reprobe(self, tape_id: str, force: bool = False) -> dict:
         self._tape_dir(tape_id)
@@ -258,6 +282,62 @@ class Engine:
             updated += 1
         if hashes:
             self._refresh_sha_lines(d, hashes)
+            self._reindex(tape_id)
+        return {"tape_id": tape_id, "updated": updated}
+
+    # ---- backfill creation_time/date onto MP4s that never got it ----------
+    def start_metadata_backfill(self, tape_id: str) -> dict:
+        self._tape_dir(tape_id)
+        return self._enqueue_build(tape_id, "METABACKFILL", [tape_id], "backfill_meta",
+                                   f"{tape_id} · uzupełnienie daty nagrania w MP4")
+
+    def _backfill_metadata_tape(self, tape_id: str) -> dict:
+        """Writes creation_time/date onto scene MP4s (and tape.mp4) that are missing
+        it — from the recording datetime already sitting in each scene's .json — via
+        a stream-copy remux (media.remux_metadata): no re-encode, master untouched.
+        Keeps tape.sha256 truthful by recomputing the checksum of anything it edits."""
+        from .media import ffprobe, remux_metadata, scene_metadata, sha256 as file_sha256
+        d = self.config.tapes / tape_id
+        if d.parent != self.config.tapes or not (d / "tape.json").exists():
+            return {"tape_id": tape_id, "updated": 0}
+        updated, first_dt, hashes = 0, None, {}
+        for sj in sorted(d.glob("[0-9]*.json")):
+            try:
+                meta = json.loads(sj.read_text())
+            except (OSError, ValueError):
+                continue
+            dt = (meta.get("recording") or {}).get("datetime")
+            valid = dt and dt[:4].isdigit() and 1990 <= int(dt[:4]) <= 2025
+            if valid and first_dt is None:
+                first_dt = dt
+            proxy_name = ((meta.get("files") or {}).get("proxy") or {}).get("filename") or f"{sj.stem}.mp4"
+            proxy = d / proxy_name
+            if not valid or not proxy.exists():
+                continue
+            if ffprobe(proxy).get("format", {}).get("tags", {}).get("creation_time"):
+                continue
+            tc = meta.get("timecode") or {}
+            tags = scene_metadata(tape_id, meta.get("scene_index", 1), dt,
+                                  (meta.get("recording") or {}).get("datetime_source", "DV_VAUX"),
+                                  tc.get("start"), tc.get("end"))
+            remux_metadata(proxy, tags)
+            meta.setdefault("files", {}).setdefault("proxy", {})["sha256"] = file_sha256(proxy)
+            meta["files"]["proxy"]["size"] = proxy.stat().st_size
+            sj.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
+            hashes[proxy_name] = meta["files"]["proxy"]["sha256"]
+            hashes[sj.name] = file_sha256(sj)
+            updated += 1
+        tape_mp4 = d / "tape.mp4"
+        if (tape_mp4.exists() and first_dt
+                and not ffprobe(tape_mp4).get("format", {}).get("tags", {}).get("creation_time")):
+            tape_meta = json.loads((d / "tape.json").read_text())
+            remux_metadata(tape_mp4, {"title": f"{tape_id} — cała taśma", "date": first_dt[:10],
+                                      "creation_time": first_dt + ".000000Z",
+                                      "comment": f"MiniDV {tape_id} · {tape_meta.get('scene_count', 0)} scen · sklejony podgląd"})
+            updated += 1
+        if hashes:
+            self._refresh_sha_lines(d, hashes)
+        if updated:
             self._reindex(tape_id)
         return {"tape_id": tape_id, "updated": updated}
 
@@ -392,6 +472,8 @@ class Engine:
                 srcs = [Path(s) for s in build["sources"]]
                 if build["mode"] == "reprobe":
                     self._reprobe_tape(build["sources"][0], force=build["token"].endswith("-F"))
+                elif build["mode"] == "backfill_meta":
+                    self._backfill_metadata_tape(build["sources"][0])
                 elif build["mode"] == "delete":
                     self.delete_scenes(build["tape_id"], build["sources"], _from_build=True)
                 elif build["mode"] == "concat":
@@ -405,7 +487,8 @@ class Engine:
                                    crf=self.config.share_crf, preset=self.config.share_preset,
                                    meta={"title": build["title"]}, log=lambda m: None)
                 build.update(status="READY",
-                             size=None if build["mode"] in ("reprobe", "delete") else out.stat().st_size)
+                             size=None if build["mode"] in ("reprobe", "backfill_meta", "delete")
+                             else out.stat().st_size)
                 self.store.put_build(build)
             except Exception as exc:
                 build.update(status="ERROR", error=str(exc))
@@ -828,6 +911,11 @@ class Engine:
                 raise RuntimeError("capture produced no DV data")
             if self.capture_cancel.is_set() or self._store_cancelled(job):
                 self._log(job, "Przerwano ręcznie — archiwizuję zebrany materiał")
+                # a capture-stage cancel has now been honored (partial tape archived);
+                # clear it before the processing stage, whose _set() guard would
+                # otherwise read this same stale flag and abort before doing anything
+                self.store.clear_cancel(tape_id)
+                job["cancel"] = False
             job["capture_meta"] = {"started_at": job["created_at"], "drops": len(drop_lines),
                                    "drop_lines": drop_lines, "camera": self.camera.info()}
             self._set(job, "CAPTURED")

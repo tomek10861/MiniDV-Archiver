@@ -9,6 +9,8 @@ const dvDuration = bytes => {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   return (h > 0 ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(sec).padStart(2, '0');
 };
+// "14.09 21:32" from an ISO datetime (UTC, matching every timestamp this app shows)
+const fmtDT = iso => iso && iso.length >= 16 ? `${iso.slice(8, 10)}.${iso.slice(5, 7)} ${iso.slice(11, 16)}` : '';
 // coarse "1h 30m" / "8m 20s" duration, for processing ETAs (long, low-precision estimates)
 const fmtDuration = totalSec => {
   const s = Math.max(0, Math.round(totalSec));
@@ -344,6 +346,7 @@ function renderTapeDetail(t, force) {
       ${full ? `<button class="fb ${BTN_FB}" data-tape="${id}">${L('tape.fbFull')}</button>` : ''}
       <button class="repair ${BTN}" data-tape="${id}">${L('tape.repairFull')}</button>
       <button class="reprobe ${BTN}" data-tape="${id}">${L('tape.reprobe')}</button>
+      <button class="backfillMeta ${BTN}" data-tape="${id}">${L('tape.backfillMeta')}</button>
       <button id="tapeDelete" class="${BTN_DANGER}">${L('tape.delete')}</button>
     </div>
     <div id="selBar" class="mt-3 hidden flex-wrap items-center gap-3 rounded-xl border border-brand-500/40 bg-brand-50/60 p-3 dark:bg-brand-500/[0.08]">
@@ -502,6 +505,11 @@ $('#tapeDetail').addEventListener('click', e => {
   const rpb = e.target.closest('.reprobe');
   if (rpb) {
     pollBuild(`/api/tapes/${encodeURIComponent(rpb.dataset.tape)}/reprobe`, {}, rpb, rpb.textContent, null);
+    return;
+  }
+  const bfm = e.target.closest('.backfillMeta');
+  if (bfm) {
+    pollBuild(`/api/tapes/${encodeURIComponent(bfm.dataset.tape)}/backfill-meta`, {}, bfm, bfm.textContent, null);
     return;
   }
   const fb = e.target.closest('.fb'); if (fb) { fbCompress(fb); return; }
@@ -701,7 +709,10 @@ function renderDuplicates() {
     <button id="dupRefresh" class="${BTN}">${L('dup.refresh')}</button></div>`;
   const groups = d.groups.map((g, gi) => `
     <div class="mb-4 rounded-xl border border-gray-200 p-3 dark:border-gray-800">
-      <div class="mb-2 text-theme-xs text-gray-500 dark:text-gray-400">${L('dup.groupCount', { n: g.count })}</div>
+      <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <span class="text-theme-xs text-gray-500 dark:text-gray-400">${L('dup.groupCount', { n: g.count })}</span>
+        <button class="dupDismiss ${BTN}" data-g="${gi}" title="${L('dup.notDuplicateHint')}">${L('dup.notDuplicate')}</button>
+      </div>
       <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       ${g.members.map((m, mi) => `
         <div class="rounded-lg border ${m.best ? 'border-success-500 bg-success-50/40 dark:bg-success-500/[0.08]' : 'border-gray-200 dark:border-gray-800'} p-2">
@@ -746,6 +757,16 @@ async function resolveDuplicate(gi, keepIdx) {
   await deleteDuplicateMembers(drop, L('dup.confirmKeep', { keep: keep.tape_id, keepScore: keep.error_score ?? '?', n: drop.length,
       list: drop.map(m => L('dup.confirmItem', { tape: m.tape_id, idx: m.scene_index, score: m.error_score ?? '?' })).join('\n') }));
 }
+async function dismissDuplicateGroup(gi, btn) {
+  const g = (dupCache.groups || [])[gi]; if (!g) return;
+  if (!confirm(L('dup.confirmDismiss', { n: g.count }))) return;
+  btn.disabled = true;
+  try {
+    await api('/api/duplicates/dismiss', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ members: g.members.map(m => ({ tape_id: m.tape_id, scene_id: m.scene_id })) }) });
+    await loadDuplicates(true);   // re-fetch: dismissal can change group indices, not just this one
+  } catch (e) { alert(e.message); btn.disabled = false; }
+}
 async function resolveAllDuplicates() {
   const groups = dupCache.groups || [];
   const drop = [];
@@ -775,6 +796,8 @@ $('#dupView').addEventListener('click', async e => {
   }
   const k = e.target.closest('.dupkeep');
   if (k) resolveDuplicate(+k.dataset.g, +k.dataset.m);
+  const dm = e.target.closest('.dupDismiss');
+  if (dm) dismissDuplicateGroup(+dm.dataset.g, dm);
 });
 
 // ============ jobs ============
@@ -790,7 +813,7 @@ const buildMode = m => L('build.mode.' + m) || m.toUpperCase();
 const buildSt = st => L('build.st.' + st) || st;
 const buildLabel = b => {
   const t = b.token || '';
-  if (t.startsWith('REPROBE') || t.startsWith('SEL-') || t.startsWith('DEL-') || ['TAPE', 'tape'].includes(t)) return b.tape_id;
+  if (t.startsWith('REPROBE') || t === 'METABACKFILL' || t.startsWith('SEL-') || t.startsWith('DEL-') || ['TAPE', 'tape'].includes(t)) return b.tape_id;
   return `${b.tape_id} · ${t.replace(/-RES$/, '')}`;
 };
 function activeBuilds(builds) {
@@ -808,12 +831,13 @@ function renderJobs(list, queue, builds) {
     const clearable = j.status === 'CANCELLED' || j.status === 'ERROR';
     const progress = processingProgress(j);
     const sceneInfo = progress || (j.current_scene ? ` · ${j.current_scene}` : '');
-    return `<div class="rounded-xl border border-gray-200 p-3 dark:border-gray-800">
+    return `<div class="jrow cursor-pointer rounded-xl border border-gray-200 p-3 hover:border-brand-500 dark:border-gray-800 dark:hover:border-brand-500" data-tape="${j.tape_id}" title="${L('job.viewLogs')}">
       <div class="flex flex-wrap items-center gap-2">
         <span class="${BADGE} ${cls}">${txt}</span>
         <strong class="text-gray-800 dark:text-white/90">${j.tape_id}</strong>
         <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${stPL(j.status)}${sceneInfo}${j.captured_bytes ? ` · ${dvDuration(j.captured_bytes)} · ${mb(j.captured_bytes)}` : ''}${j.dropped_frames ? ' · ' + L('job.drop', { n: j.dropped_frames }) : ''}</span>
-        <span class="ml-auto font-mono text-[11px] text-gray-400">${(j.updated_at || '').slice(11, 19)}</span>
+        <span class="ml-auto font-mono text-[11px] text-gray-400" title="${L('job.created')}">${fmtDT(j.created_at)}</span>
+        <span class="font-mono text-[11px] text-gray-400">${(j.updated_at || '').slice(11, 19)}</span>
         ${run ? `<button class="jstop ${BTN}" data-tape="${j.tape_id}">${L('job.stop')}</button>` : ''}
         ${clearable ? `<button class="jclear ${BTN_DANGER}" data-tape="${j.tape_id}" data-status="${j.status}">${L('job.clear')}</button>` : ''}
       </div>
@@ -854,6 +878,13 @@ $('#jobs').addEventListener('click', async e => {
       await api(`/api/jobs/${encodeURIComponent(c.dataset.tape)}`, { method: 'DELETE' });
       refresh();
     } catch (err) { alert(err.message); }
+    return;
+  }
+  const row = e.target.closest('.jrow');
+  if (row) {
+    go('#logi');
+    $('#logPick').value = row.dataset.tape;
+    refresh();
   }
 });
 
@@ -884,11 +915,48 @@ function renderLogs(s) {
 }
 $('#logPick').addEventListener('change', () => { logPickSig = ''; refresh(); });
 
+// ============ sysload footer widget ============
+function loadPill(value, cores) {
+  const ratio = value / cores;
+  return ratio < 0.7 ? ['bg-success-50 text-success-700 dark:bg-success-500/15 dark:text-success-400', L('sysload.ok')]
+    : ratio <= 1.0 ? ['bg-warning-50 text-warning-700 dark:bg-warning-500/15 dark:text-warning-400', L('sysload.busy')]
+    : ['bg-error-50 text-error-700 dark:bg-error-500/15 dark:text-error-400', L('sysload.high')];
+}
+function renderSysload(sys) {
+  if (!sys || !sys.load) return;
+  $('#sysCores').textContent = L('sysload.cores', { n: sys.cores });
+  [['1', sys.load['1m']], ['5', sys.load['5m']], ['15', sys.load['15m']]].forEach(([k, v]) => {
+    $(`#loadV${k}`).textContent = v.toFixed(2);
+    const [cls, label] = loadPill(v, sys.cores);
+    $(`#loadP${k}`).className = `rounded-full px-2 py-0.5 text-[11px] font-medium ${cls}`;
+    $(`#loadP${k}`).textContent = label;
+  });
+  const cpu = sys.cpu;
+  $('#cpuUser').style.width = cpu.user + '%';
+  $('#cpuSystem').style.width = cpu.system + '%';
+  $('#cpuIowait').style.width = cpu.iowait + '%';
+  $('#cpuUserPct').textContent = cpu.user.toFixed(1) + '%';
+  $('#cpuSystemPct').textContent = cpu.system.toFixed(1) + '%';
+  $('#cpuIowaitPct').textContent = cpu.iowait.toFixed(1) + '%';
+  $('#cpuIdlePct').textContent = cpu.idle.toFixed(1) + '%';
+  const m = sys.memory;
+  $('#memSummary').textContent = `${gib(m.used)} / ${gib(m.total)}`;
+  $('#memUsed').style.width = (m.total ? 100 * m.used / m.total : 0) + '%';
+  $('#memCache').style.width = (m.total ? 100 * m.buff_cache / m.total : 0) + '%';
+  $('#memUsedVal').textContent = gib(m.used);
+  $('#memCacheVal').textContent = gib(m.buff_cache);
+  $('#memFreeVal').textContent = gib(m.free);
+  const swapLine = $('#swapLine');
+  swapLine.classList.toggle('hidden', !m.swap_total);
+  if (m.swap_total) swapLine.textContent = L('sysload.swap', { used: gib(m.swap_used), total: gib(m.swap_total) });
+}
+
 // ============ main refresh loop ============
 async function refresh() {
   try {
     const [s, d, t] = await Promise.all([api('/api/status'), api('/api/storage'), api('/api/tapes')]);
     window.__tapes = t;
+    api('/api/sysload').then(renderSysload).catch(() => {});  // best-effort footer widget, never blocks the dashboard
     const c = s.camera, on = c.connected;
     $('#camPill').textContent = on ? L('cam.pill.online') : L('cam.pill.offline');
     $('#camPill').className = `inline-flex items-center rounded-full border px-3 py-1.5 text-theme-xs font-medium ${on ? 'border-success-500 text-success-600 dark:text-success-400' : 'border-error-500 text-error-600 dark:text-error-400'}`;

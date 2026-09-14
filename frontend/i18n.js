@@ -35,6 +35,14 @@
     'capture.preview': 'Live preview (muted)',
     'capture.background': 'Background: processing {tape} ({status})',
 
+    // sysload footer widget
+    'sysload.title': 'Server load', 'sysload.cores': '{n} cores',
+    'sysload.load1': '1 min average', 'sysload.load5': '5 min average', 'sysload.load15': '15 min average',
+    'sysload.cpu': 'CPU', 'sysload.user': 'User', 'sysload.system': 'System', 'sysload.iowait': 'I/O wait', 'sysload.idle': 'Idle',
+    'sysload.mem': 'Memory', 'sysload.used': 'Used', 'sysload.cache': 'Buffers/cache', 'sysload.free': 'Free',
+    'sysload.swap': 'Swap: {used} / {total}',
+    'sysload.ok': 'OK', 'sysload.busy': 'Busy', 'sysload.high': 'High',
+
     // tasks
     'tasks.title': 'Background tasks',
     'jobs.empty': 'No tasks.',
@@ -46,8 +54,10 @@
     'job.confirmClear': 'Remove the record of {tape} ({status})?\nIt captured no data — nothing archived is affected.',
     'job.drop': '⚠ {n} dropped',
     'job.eta': 'ETA {t}',
+    'job.created': 'Created', 'job.viewLogs': 'Click to view logs',
 
     'build.mode.reprobe': 'QUALITY SCAN', 'build.mode.restore': 'RESTORE',
+    'build.mode.backfill_meta': 'DATE FIX',
     'build.mode.share': 'SHARE', 'build.mode.concat': 'JOIN', 'build.mode.delete': 'DELETE SCENES',
     'build.st.QUEUED': 'queued', 'build.st.RUNNING': 'processing…', 'build.st.READY': 'done', 'build.st.ERROR': 'error',
 
@@ -71,7 +81,8 @@
     'loading': 'Loading…',
     'tape.rename': '✏️ Rename', 'tape.label': '🏷️ Label', 'tape.date': '📅 Recording date',
     'tape.playFull': '▶ Play whole tape', 'tape.fbFull': '⬇ FB whole tape',
-    'tape.repairFull': '🧹 Restore tape', 'tape.reprobe': '🔍 Scan quality', 'tape.delete': '🗑 Delete tape',
+    'tape.repairFull': '🧹 Restore tape', 'tape.reprobe': '🔍 Scan quality',
+    'tape.backfillMeta': '📅 Fix recording date', 'tape.delete': '🗑 Delete tape',
     'tape.fullSoon': 'The whole-tape preview is built on the next archival run.',
     'tape.crumbAll': '← All tapes', 'tape.crumbScene': '· scene',
     'sel.count': 'Selected', 'sel.download': '⬇ Download as one video',
@@ -114,6 +125,9 @@
     'dup.confirmKeep': 'Keep the version from {keep} (errors: {keepScore}) and delete {n}?\n{list}',
     'dup.confirmItem': '• {tape} / scene {idx} — errors: {score}',
     'dup.frames': '{n} fr.',
+    'dup.notDuplicate': '✕ Not a duplicate',
+    'dup.notDuplicateHint': 'Mark these scenes as different recordings — they won\'t be grouped as duplicates again',
+    'dup.confirmDismiss': 'Mark these {n} scenes as NOT the same recording?\nThey won\'t be suggested as duplicates of each other again — nothing is deleted.',
 
     // timeline
     'timeline.title': 'Timeline',
@@ -177,6 +191,13 @@
     'capture.preview': 'Podgląd na żywo (bez dźwięku)',
     'capture.background': 'W tle: przetwarzanie {tape} ({status})',
 
+    'sysload.title': 'Obciążenie serwera', 'sysload.cores': '{n} rdzeni',
+    'sysload.load1': 'Średnia 1 min', 'sysload.load5': 'Średnia 5 min', 'sysload.load15': 'Średnia 15 min',
+    'sysload.cpu': 'Procesor', 'sysload.user': 'Użytkownik', 'sysload.system': 'System', 'sysload.iowait': 'We/wy', 'sysload.idle': 'Bezczynny',
+    'sysload.mem': 'Pamięć', 'sysload.used': 'Zajęte', 'sysload.cache': 'Bufor/cache', 'sysload.free': 'Wolne',
+    'sysload.swap': 'Swap: {used} / {total}',
+    'sysload.ok': 'OK', 'sysload.busy': 'Zajęty', 'sysload.high': 'Wysokie',
+
     'tasks.title': 'Zadania w tle',
     'jobs.empty': 'Brak zadań.',
     'job.stop': 'Przerwij',
@@ -187,8 +208,10 @@
     'job.confirmClear': 'Usunąć wpis zadania {tape} ({status})?\nNie złapało żadnych danych — nic zarchiwizowanego to nie dotyczy.',
     'job.drop': '⚠ {n} zgub.',
     'job.eta': 'zostało {t}',
+    'job.created': 'Utworzono', 'job.viewLogs': 'Kliknij, aby zobaczyć logi',
 
     'build.mode.reprobe': 'SONDA JAKOŚCI', 'build.mode.restore': 'NAPRAWA',
+    'build.mode.backfill_meta': 'POPRAWKA DATY',
     'build.mode.share': 'UDOSTĘPNIANIE', 'build.mode.concat': 'SKLEJANIE', 'build.mode.delete': 'USUWANIE SCEN',
     'build.st.QUEUED': 'w kolejce', 'build.st.RUNNING': 'przetwarzanie…', 'build.st.READY': 'gotowe', 'build.st.ERROR': 'błąd',
 
@@ -210,7 +233,8 @@
     'loading': 'Wczytywanie…',
     'tape.rename': '✏️ Zmień nazwę', 'tape.label': '🏷️ Etykieta', 'tape.date': '📅 Data nagrania',
     'tape.playFull': '▶ Odtwórz całą taśmę', 'tape.fbFull': '⬇ FB cała taśma',
-    'tape.repairFull': '🧹 Napraw taśmę', 'tape.reprobe': '🔍 Sonduj jakość', 'tape.delete': '🗑 Usuń kasetę',
+    'tape.repairFull': '🧹 Napraw taśmę', 'tape.reprobe': '🔍 Sonduj jakość',
+    'tape.backfillMeta': '📅 Uzupełnij datę nagrania', 'tape.delete': '🗑 Usuń kasetę',
     'tape.fullSoon': 'Podgląd całej taśmy powstanie przy następnej archiwizacji.',
     'tape.crumbAll': '← Wszystkie kasety', 'tape.crumbScene': '· scena',
     'sel.count': 'Zaznaczono', 'sel.download': '⬇ Pobierz jako jeden film',
@@ -252,6 +276,9 @@
     'dup.confirmKeep': 'Zostawić wersję z {keep} (błędy: {keepScore}) i usunąć {n}?\n{list}',
     'dup.confirmItem': '• {tape} / scena {idx} — błędy: {score}',
     'dup.frames': '{n} kl.',
+    'dup.notDuplicate': '✕ To nie duplikat',
+    'dup.notDuplicateHint': 'Oznacz te sceny jako różne nagrania — nie będą już razem proponowane jako duplikaty',
+    'dup.confirmDismiss': 'Oznaczyć te {n} sceny jako NIE to samo nagranie?\nNie będą już sobie nawzajem sugerowane jako duplikaty — nic nie zostanie usunięte.',
 
     'timeline.title': 'Oś czasu',
     'timeline.scent': 'Przeglądaj po dacie nagrania — sceny z różnych taśm razem.',

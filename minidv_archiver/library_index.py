@@ -232,7 +232,7 @@ def duplicates(config, store) -> dict:
                            "date": s.get("date"), "frame_count": s.get("frame_count"),
                            "error_score": s.get("error_score"), "decode_errors": s.get("decode_errors"),
                            "dropped_frames": s.get("dropped_frames"), "discontinuities": s.get("discontinuities"),
-                           "fp": fp})
+                           "fp": fp, "key": f"{tid}/{s.get('scene_id')}"})
     parent = list(range(len(scenes)))
 
     def find(i):
@@ -246,8 +246,11 @@ def duplicates(config, store) -> dict:
     # essentially never share an exact bucket key to begin with. A few thousand
     # scenes is cheap to compare O(n^2) (well under a second); this stops being
     # true in the tens-of-thousands range, which a home MiniDV archive won't reach.
+    dismissed = store.dismissed_duplicate_pairs()
     for i in range(len(scenes)):
         for j in range(i + 1, len(scenes)):
+            if tuple(sorted((scenes[i]["key"], scenes[j]["key"]))) in dismissed:
+                continue  # operator marked this specific pair "not a duplicate"
             if _same_recording(scenes[i]["fp"], scenes[j]["fp"]):
                 parent[find(i)] = find(j)
 
@@ -266,6 +269,7 @@ def duplicates(config, store) -> dict:
                                     -(m["frame_count"] or 0), m["tape_id"], m["scene_index"] or 0))
         for k, m in enumerate(members):
             m.pop("fp", None)
+            m.pop("key", None)
             m["best"] = k == 0
         out.append({"count": len(members), "members": members})
     out.sort(key=lambda g: (-g["count"], g["members"][0]["tape_id"]))
