@@ -353,7 +353,8 @@ class Engine:
             except OSError:
                 pass
 
-    def _enqueue_build(self, tape_id: str, token: str, sources: list[Path], mode: str, title: str) -> dict:
+    def _enqueue_build(self, tape_id: str, token: str, sources: list[Path], mode: str, title: str,
+                       stabilize: bool = False, upscale: bool = False) -> dict:
         key = f"{tape_id}/{token}"
         with self.proc_cv:
             existing = self.store.get_build(key)
@@ -363,7 +364,7 @@ class Engine:
             out = self.config.storage / "tmp" / "share" / f"{tape_id}_{token}.mp4"
             build = {"key": key, "token": token, "tape_id": tape_id, "mode": mode, "title": title,
                      "sources": [str(p) for p in sources], "status": "QUEUED", "path": str(out),
-                     "size": None, "error": None}
+                     "size": None, "error": None, "stabilize": stabilize, "upscale": upscale}
             self.store.put_build(build)
             self.proc_cv.notify_all()
         return dict(self.store.get_build(key))
@@ -374,9 +375,19 @@ class Engine:
             raise FileNotFoundError(f"nie ma kasety {tape_id}")
         return d
 
-    def start_compress(self, tape_id: str, scene_id: str | None, restore: bool = False) -> dict:
+    @staticmethod
+    def _restore_tag(stabilize: bool, upscale: bool) -> str:
+        """Token/filename suffix for a restore build — distinct per option combo, so
+        toggling stabilize/upscale never serves a stale cached build made without
+        them (see _enqueue_build's READY-reuse check) and each combo downloads as
+        its own file."""
+        return "-RES" + ("-STAB" if stabilize else "") + ("-UP" if upscale else "")
+
+    def start_compress(self, tape_id: str, scene_id: str | None, restore: bool = False,
+                       stabilize: bool = False, upscale: bool = False) -> dict:
         """FB-size re-encode of one scene / the whole tape (scene_id=None), or —
-        with restore=True — a denoise/repair MP4 built from the DV master(s)."""
+        with restore=True — a denoise/repair MP4 built from the DV master(s).
+        stabilize/upscale only apply together with restore=True."""
         d = self._tape_dir(tape_id)
         label = (f" · scena {scene_id}" if scene_id else " — cała taśma")
         if restore:
@@ -389,15 +400,16 @@ class Engine:
                 if not src.exists():
                     raise FileNotFoundError(f"nie ma pliku {src.name}")
                 srcs = [src]
-            return self._enqueue_build(tape_id, (scene_id or "TAPE") + "-RES", srcs, "restore",
-                                       f"{tape_id}{label} · naprawiony")
+            return self._enqueue_build(tape_id, (scene_id or "TAPE") + self._restore_tag(stabilize, upscale),
+                                       srcs, "restore", f"{tape_id}{label} · naprawiony",
+                                       stabilize=stabilize, upscale=upscale)
         src = d / ("tape.mp4" if scene_id is None else f"{scene_id}.mp4")
         if not src.exists():
             raise FileNotFoundError(f"nie ma pliku {src.name}")
         return self._enqueue_build(tape_id, scene_id or "TAPE", [src], "share", f"{tape_id}{label}")
 
     def start_selection(self, tape_id: str, scene_ids: list[str], share: bool = False,
-                        restore: bool = False) -> dict:
+                        restore: bool = False, stabilize: bool = False, upscale: bool = False) -> dict:
         """Join several scenes into one MP4 — stream copy, ~FB-size re-encode, or a
         repair pass from those scenes' DV masters (restore=True)."""
         d = self._tape_dir(tape_id)
@@ -407,10 +419,11 @@ class Engine:
         missing = [p.name for p in srcs if not p.exists()]
         if not srcs or missing:
             raise FileNotFoundError("brak scen: " + ", ".join(missing) if missing else "pusta lista scen")
-        tag = "-RES" if restore else "-FB" if share else ""
+        tag = self._restore_tag(stabilize, upscale) if restore else "-FB" if share else ""
         token = "SEL-" + hashlib.sha1("\n".join(ids).encode()).hexdigest()[:12] + tag
         mode = "restore" if restore else "share" if share else "concat"
-        return self._enqueue_build(tape_id, token, srcs, mode, f"{tape_id} · {len(ids)} scen")
+        return self._enqueue_build(tape_id, token, srcs, mode, f"{tape_id} · {len(ids)} scen",
+                                   stabilize=stabilize if restore else False, upscale=upscale if restore else False)
 
     PLAYLIST_BUCKET = "_playlist"
 
@@ -481,6 +494,12 @@ class Engine:
                 elif build["mode"] == "restore":
                     restore_mp4(srcs, out, vf=self.config.restore_filters, crf=self.config.restore_crf,
                                 preset=self.config.restore_preset, decimate=self.config.restore_decimate,
+                                stabilize=bool(build.get("stabilize")),
+                                stabilize_shakiness=self.config.restore_stabilize_shakiness,
+                                stabilize_smoothing=self.config.restore_stabilize_smoothing,
+                                upscale=bool(build.get("upscale")),
+                                upscale_factor=self.config.restore_upscale_factor,
+                                upscale_scaler=self.config.restore_upscale_scaler,
                                 meta={"title": build["title"]}, log=lambda m: None)
                 else:
                     compress_share(srcs if len(srcs) > 1 else srcs[0], out, max_mb=self.config.share_max_mb,

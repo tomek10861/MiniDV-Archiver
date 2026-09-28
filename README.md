@@ -67,7 +67,12 @@ whole-tape review file, thumbnails, JSON metadata) is a derivative you can regen
 - **Restore variant**: an optional "🧹 Restore" button builds a denoise/repair MP4
   **decoded from the DV master** (not the proxy) — `bwdif` deinterlace with the
   probed field parity, then `atadenoise` + `deblock` (whole chain configurable via
-  `MINIDV_RESTORE_FILTERS`). Master and normal proxy are never touched.
+  `MINIDV_RESTORE_FILTERS`). Master and normal proxy are never touched. Two
+  optional checkboxes widen it further, both off by default and pure tail
+  additions to that chain: 2-pass stabilization (`libvidstab`, already in
+  the image) and a sharper GPU upscale (ffmpeg's `libplacebo` filter over Vulkan —
+  not a neural model, but a noticeably better kernel than plain lanczos; needs
+  `/dev/dri` passed into the converter container, see `compose.override.yaml.example`).
 
 Never sends a `RECORD` opcode. The tape is treated as read-only.
 
@@ -144,6 +149,10 @@ With Docker, put them in `.env` (compose reads it). With systemd they go in
 | `MINIDV_MP4_PRESET` | `medium` | x264 preset for proxies (`veryfast` is ~4–6× quicker, larger files) |
 | `MINIDV_SHARE_MAX_MB` | `90` | target size for the "share" re-encode |
 | `MINIDV_RESTORE_FILTERS` | `bwdif…,atadenoise,deblock…` | ffmpeg `-vf` chain for the "restore" variant |
+| `MINIDV_STABILIZE_SHAKINESS` | `8` | 1–10, how hard pass 1 looks for shake (vidstab default `5`) |
+| `MINIDV_STABILIZE_SMOOTHING` | `20` | how strongly pass 2 flattens the camera path (vidstab default `15`) |
+| `MINIDV_UPSCALE_FACTOR` | `2` | linear scale factor for the "Higher resolution" checkbox |
+| `MINIDV_UPSCALE_SCALER` | `ewa_lanczos4sharpest` | libplacebo upscale kernel (its sharpest built-in) |
 | `MINIDV_INDEX_INTERVAL` | `300` | seconds between background refreshes of the tape/scene index |
 | `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | api HTTP listener (inside its container) |
 
@@ -194,15 +203,17 @@ JSON over HTTP (served by the `api` process; `nginx` proxies `/api` to it).
 `/api/tapes/{id}/files/{name}` (archive files; `Range` for MP4; `?dl=1` forces
 download) ·
 `/api/tapes/{id}/compressed/{token}.mp4` — serves an on-demand build; `token` is
-`TAPE`, `<scene_id>`, `<scene_id>-RES` (restore), or `SEL-<hash>[-FB|-RES]` ·
+`TAPE`, `<scene_id>`, `<scene_id>-RES[-STAB][-UP]` (restore, +stabilize, +upscale),
+or `SEL-<hash>[-FB|-RES[-STAB][-UP]]` ·
 `/api/playlist/build/{token}.mp4` — serves a cross-tape build (see below).
 
 **`POST`**
 `/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?}` ·
 `/api/capture/stop` `{tape_id?}` ·
 `/api/tape/{play,stop,rewind}` (409 unless `MINIDV_ALLOW_FCP=1`) ·
-`/api/tapes/{id}/scenes/{scene}/compress` `{restore?}` ·
-`/api/tapes/{id}/compress` `{scenes?, share?, restore?}` (no body = whole tape) ·
+`/api/tapes/{id}/scenes/{scene}/compress` `{restore?, stabilize?, upscale?}` ·
+`/api/tapes/{id}/compress` `{scenes?, share?, restore?, stabilize?, upscale?}`
+(no body = whole tape; stabilize/upscale only apply with `restore: true`) ·
 `/api/tapes/{id}/rename` `{new_id}` ·
 `/api/tapes/{id}/meta` `{label?, recording_date?}` ·
 `/api/tapes/{id}/reprobe` `{force?}` (quality scan / fingerprint) ·

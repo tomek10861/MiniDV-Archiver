@@ -234,19 +234,56 @@ def encode_mp4(source: Path, target: Path, interlaced: bool, log, preset: str = 
     run(cmd, log=log)
 
 
+_STABILIZE_DETECT_VF = "bwdif=mode=send_field:deint=all,vidstabdetect=shakiness={shakiness}:accuracy=15:result={trf}"
+
+
+def _restore_filter_chain(vf: str, *, decimate: bool = False, stabilize: bool = False,
+                          stabilize_smoothing: int = 20, stabilize_trf: str | Path = "",
+                          upscale: bool = False, upscale_factor: int = 2,
+                          upscale_scaler: str = "ewa_lanczos4sharpest") -> str:
+    """Builds the -vf chain for restore_mp4: the configured base chain (`vf`, e.g.
+    deinterlace+denoise+deblock) with stabilize/upscale as pure tail additions —
+    both off changes nothing, so an operator's MINIDV_RESTORE_FILTERS override (or
+    the existing plain "Napraw") is unaffected."""
+    chain = f"mpdecimate,{vf}" if decimate else vf
+    if stabilize:
+        chain += (f",vidstabtransform=input={stabilize_trf}:smoothing={stabilize_smoothing}"
+                  ":optzoom=1:interpol=bilinear")
+    if upscale:
+        chain += f",libplacebo=w=iw*{upscale_factor}:h=ih*{upscale_factor}:upscaler={upscale_scaler}"
+    return chain
+
+
 def restore_mp4(sources: list[Path], target: Path, *, vf: str, crf: int, preset: str,
-                decimate: bool = False, meta: dict | None = None, log=None) -> None:
+                decimate: bool = False, stabilize: bool = False, stabilize_shakiness: int = 8,
+                stabilize_smoothing: int = 20, upscale: bool = False, upscale_factor: int = 2,
+                upscale_scaler: str = "ewa_lanczos4sharpest",
+                meta: dict | None = None, log=None) -> None:
     """Denoise / repair variant — decoded from the DV master(s), filtered, re-encoded.
-    `sources` are .dv.zst archive paths (raw DV concatenates, so several = one pass)."""
+    `sources` are .dv.zst archive paths (raw DV concatenates, so several = one pass).
+    Only ever *reads* the master; every intermediate (.src.dv, .trf) is a throwaway
+    temp file removed in `finally` regardless of outcome — the archive is never
+    written to. stabilize/upscale are optional, off by default (see
+    _restore_filter_chain); upscale needs a working GPU (libplacebo/Vulkan) in
+    the container, stabilize needs a first analysis pass (vidstabdetect) over the
+    same source before the main encode."""
     global NICE_PREFIX
     NICE_PREFIX = ["nice", "-n", "10"] if shutil.which("nice") else []
     raw = target.with_suffix(".src.dv")
+    trf = target.with_suffix(".trf")
     try:
         with raw.open("wb") as out:
             for z in sources:
                 if subprocess.run(["zstd", "-q", "-dc", str(z)], stdout=out).returncode:
                     raise RuntimeError(f"zstd decompression failed: {z}")
-        chain = f"mpdecimate,{vf}" if decimate else vf
+        if stabilize:
+            run(["ffmpeg", "-y", "-v", "warning", "-f", "dv", "-i", str(raw),
+                 "-vf", _STABILIZE_DETECT_VF.format(shakiness=stabilize_shakiness, trf=trf),
+                 "-f", "null", "-"], log=log)
+        chain = _restore_filter_chain(vf, decimate=decimate, stabilize=stabilize,
+                                      stabilize_smoothing=stabilize_smoothing, stabilize_trf=trf,
+                                      upscale=upscale, upscale_factor=upscale_factor,
+                                      upscale_scaler=upscale_scaler)
         cmd = ["ffmpeg", "-y", "-v", "warning", "-f", "dv", "-i", str(raw), "-map", "0:v:0", "-map", "0:a?",
                "-vf", chain]
         if decimate:
@@ -256,6 +293,7 @@ def restore_mp4(sources: list[Path], target: Path, *, vf: str, crf: int, preset:
         run(cmd, log=log)
     finally:
         raw.unlink(missing_ok=True)
+        trf.unlink(missing_ok=True)
         NICE_PREFIX = []
 
 

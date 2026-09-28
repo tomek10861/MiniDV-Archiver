@@ -1,0 +1,16 @@
+# Optional: GPU passthrough for the "Napraw" -> upscale option (ffmpeg's libplacebo
+# filter, GPU-accelerated over Vulkan — not a neural model, but a noticeably sharper
+# kernel than plain bicubic/lanczos, and fast even on a modest iGPU). Without this,
+# the checkbox still exists in the UI, but every such build just errors (libplacebo
+# fails to find a Vulkan device) — the plain restore, and everything else in the
+# app, is unaffected either way.
+#
+# Copy this file to compose.override.yaml (git-ignored, like .env — Compose loads
+# it automatically alongside compose.yaml) and adjust the device path if your GPU
+# isn't at /dev/dri (check: ls /dev/dri). Needs mesa-vulkan-drivers in the image
+# (already in the Dockerfile) — no extra permission setup, these containers run
+# as root already.
+services:
+  converter:
+    devices:
+      - /dev/dri:/dev/dri

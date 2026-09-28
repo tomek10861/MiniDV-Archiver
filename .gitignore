@@ -12,6 +12,7 @@ venv/
 .env
 .env.local
 docker/auth.d/
+compose.override.yaml
 
 # OS / editor
 .DS_Store

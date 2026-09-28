@@ -202,13 +202,18 @@ class Handler(BaseHTTPRequestHandler):
             if len(cparts) >= 4 and cparts[:2] == ["api", "tapes"] and cparts[-1] == "compress":
                 data = self.body()
                 restore = bool(data.get("restore"))
+                # only meaningful together with restore=True (repair from the DV master);
+                # start_compress/start_selection ignore them otherwise
+                stabilize, upscale = bool(data.get("stabilize")), bool(data.get("upscale"))
                 if len(cparts) == 6 and cparts[3] == "scenes":
-                    return self.json(ENGINE.start_compress(cparts[2], cparts[4], restore=restore), 202)
+                    return self.json(ENGINE.start_compress(cparts[2], cparts[4], restore=restore,
+                                                            stabilize=stabilize, upscale=upscale), 202)
                 scenes = data.get("scenes")
                 if isinstance(scenes, list) and scenes:
                     return self.json(ENGINE.start_selection(cparts[2], scenes, bool(data.get("share")),
-                                                            restore=restore), 202)
-                return self.json(ENGINE.start_compress(cparts[2], None, restore=restore), 202)
+                                                            restore=restore, stabilize=stabilize, upscale=upscale), 202)
+                return self.json(ENGINE.start_compress(cparts[2], None, restore=restore,
+                                                        stabilize=stabilize, upscale=upscale), 202)
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "reprobe":
                 return self.json(ENGINE.start_reprobe(cparts[2], bool(self.body().get("force"))), 202)
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "backfill-meta":

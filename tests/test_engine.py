@@ -280,6 +280,44 @@ def test_start_compress_restore_builds_from_the_dv_masters(tmp_path, monkeypatch
     assert seen["sources"] == ["0001_a.dv.zst", "0002_b.dv.zst"]
 
 
+def test_start_compress_restore_stabilize_upscale_get_distinct_tokens_and_reach_restore_mp4(tmp_path, monkeypatch):
+    """Regression for the "Napraw" widening: toggling stabilize/upscale must not
+    reuse a cached plain-restore build (distinct token per combo), and the flags
+    must actually reach restore_mp4 — not just get stored and forgotten."""
+    import minidv_archiver.media as mm
+    seen = {}
+
+    def fake_restore(sources, out, **k):
+        seen.setdefault("calls", []).append({"stabilize": k.get("stabilize"), "upscale": k.get("upscale")})
+        pathlib.Path(out).write_bytes(b"restored")
+
+    monkeypatch.setattr(mm, "restore_mp4", fake_restore)
+    eng = _engine(tmp_path)
+    td = eng.config.tapes / "TAPE-3"
+    td.mkdir(parents=True)
+    (td / "tape.json").write_text("{}")
+    (td / "0001_a.dv.zst").write_bytes(b"m1")
+
+    plain = eng.start_compress("TAPE-3", "0001_a", restore=True)
+    both = eng.start_compress("TAPE-3", "0001_a", restore=True, stabilize=True, upscale=True)
+    stab_only = eng.start_compress("TAPE-3", "0001_a", restore=True, stabilize=True)
+    assert plain["token"] == "0001_a-RES"
+    assert both["token"] == "0001_a-RES-STAB-UP"
+    assert stab_only["token"] == "0001_a-RES-STAB"
+    assert len({plain["token"], both["token"], stab_only["token"]}) == 3   # no collisions
+
+    for tok in (plain["token"], both["token"], stab_only["token"]):
+        for _ in range(100):
+            if eng.compress_status("TAPE-3", tok)["status"] in ("READY", "ERROR"):
+                break
+            time.sleep(0.05)
+        assert eng.compress_status("TAPE-3", tok)["status"] == "READY"
+
+    assert {"stabilize": False, "upscale": False} in seen["calls"]
+    assert {"stabilize": True, "upscale": True} in seen["calls"]
+    assert {"stabilize": True, "upscale": False} in seen["calls"]
+
+
 def test_reprobe_tape_writes_fingerprint_and_error_score(tmp_path, monkeypatch):
     import shutil as _sh
     import subprocess as _sp

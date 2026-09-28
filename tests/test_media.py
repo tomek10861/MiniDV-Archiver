@@ -3,7 +3,7 @@ import sys
 import pytest
 
 import minidv_archiver.media as media
-from minidv_archiver.media import _ahash16, _meta_args, probe_json, scene_metadata
+from minidv_archiver.media import _ahash16, _meta_args, _restore_filter_chain, probe_json, scene_metadata
 
 
 def test_ahash16_is_64bit_hex_tolerant_of_brightness_shift_sensitive_to_inversion():
@@ -65,6 +65,33 @@ def test_scene_metadata_skips_bogus_clock():
 def test_meta_args_drops_empty_values():
     assert _meta_args({"title": "x", "date": None, "comment": ""}) == ["-metadata", "title=x"]
     assert _meta_args(None) == []
+
+
+def test_restore_filter_chain_unchanged_when_stabilize_and_upscale_off():
+    """The whole point: an operator's existing MINIDV_RESTORE_FILTERS override (or
+    the plain "Napraw" button) must produce byte-identical -vf output whether or
+    not this feature exists, as long as neither new box is checked."""
+    base = "bwdif=mode=send_field:parity=bff:deint=all,atadenoise,deblock=filter=strong:block=8"
+    assert _restore_filter_chain(base) == base
+    assert _restore_filter_chain(base, decimate=True) == f"mpdecimate,{base}"
+
+
+def test_restore_filter_chain_appends_stabilize_and_upscale_in_order():
+    base = "bwdif=...,atadenoise,deblock=..."
+    chain = _restore_filter_chain(base, stabilize=True, stabilize_smoothing=8, stabilize_trf="/tmp/x.trf",
+                                  upscale=True, upscale_factor=2, upscale_scaler="ewa_lanczossharp")
+    assert chain == (
+        "bwdif=...,atadenoise,deblock=...,"
+        "vidstabtransform=input=/tmp/x.trf:smoothing=8:optzoom=1:interpol=bilinear,"
+        "libplacebo=w=iw*2:h=ih*2:upscaler=ewa_lanczossharp")
+
+
+def test_restore_filter_chain_stabilize_only_and_upscale_only():
+    base = "base"
+    assert _restore_filter_chain(base, stabilize=True, stabilize_trf="t.trf") == (
+        "base,vidstabtransform=input=t.trf:smoothing=20:optzoom=1:interpol=bilinear")
+    assert _restore_filter_chain(base, upscale=True, upscale_factor=3, upscale_scaler="spline36") == (
+        "base,libplacebo=w=iw*3:h=ih*3:upscaler=spline36")
 
 
 def test_run_streams_output_in_line_count_batches(monkeypatch):

@@ -337,6 +337,7 @@ function renderTapeDetail(t, force) {
       <button id="tapeLabel" class="${BTN}">${L('tape.label')}</button>
       <button id="tapeDate" class="${BTN}">${L('tape.date')}</button>
     </div>
+    ${repairOptsHTML()}
     <div class="tape-tools mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-theme-xs">
       ${full ? `<button class="fulltape ${BTN_PRIMARY}">${L('tape.playFull')}${full.size ? ` (${mb(full.size)})` : ''}</button>` : `<span class="text-gray-400">${L('tape.fullSoon')}</span>`}
       <a class="${LINK}" href="/api/tapes/${e}/files/tape.json?dl=1">tape.json</a>
@@ -411,20 +412,42 @@ async function pollBuild(url, body, btn, label, downloadUrl) {
   } catch (e) { alert(e.message); btn.textContent = label; }
   finally { btn.disabled = false; }
 }
+// "Napraw" options: a shared module-level state, not read off one fixed DOM id —
+// the checkboxes render on more than one page (tape detail, timeline), and a
+// setting made on either has to be honored everywhere a repair gets triggered,
+// including views that never render the checkboxes at all (the scene modal).
+// (Regression: an id-based read silently fell back to "off" outside tape detail —
+// the timeline's own "Napraw" always ran plain, with no indication why.)
+let repairOpts = { stabilize: false, upscale: false };
+function repairOpt() { return { ...repairOpts }; }
+function repairOptsHTML() {
+  return `<div class="repair-opts mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-theme-xs text-gray-500 dark:text-gray-400">
+    <span>${L('repair.optsLabel')}</span>
+    <label class="inline-flex items-center gap-1.5"><input type="checkbox" class="repairStabilizeBox h-3.5 w-3.5 accent-brand-500" ${repairOpts.stabilize ? 'checked' : ''}>${L('repair.stabilize')}</label>
+    <label class="inline-flex items-center gap-1.5"><input type="checkbox" class="repairUpscaleBox h-3.5 w-3.5 accent-brand-500" ${repairOpts.upscale ? 'checked' : ''}>${L('repair.upscale')}</label>
+  </div>`;
+}
+document.addEventListener('change', e => {
+  if (e.target.matches('.repairStabilizeBox')) repairOpts.stabilize = e.target.checked;
+  else if (e.target.matches('.repairUpscaleBox')) repairOpts.upscale = e.target.checked;
+});
+const restoreSuffix = (stabilize, upscale) => '-RES' + (stabilize ? '-STAB' : '') + (upscale ? '-UP' : '');
 function fbCompress(btn) { variantCompress(btn, { share: true }); }
-function repairCompress(btn) { variantCompress(btn, { restore: true }); }
+function repairCompress(btn) { variantCompress(btn, { restore: true, ...repairOpt() }); }
 function variantCompress(btn, opt) {
   const tape = btn.dataset.tape, scene = btn.dataset.scene || null, label = btn.textContent;
   const base = scene ? `/api/tapes/${encodeURIComponent(tape)}/scenes/${encodeURIComponent(scene)}` : `/api/tapes/${encodeURIComponent(tape)}`;
-  const tok = (scene ? encodeURIComponent(scene) : 'TAPE') + (opt.restore ? '-RES' : '');
-  pollBuild(base + '/compress', opt.restore ? { restore: true } : null, btn, label,
+  const tok = (scene ? encodeURIComponent(scene) : 'TAPE') + (opt.restore ? restoreSuffix(opt.stabilize, opt.upscale) : '');
+  const body = opt.restore ? { restore: true, stabilize: !!opt.stabilize, upscale: !!opt.upscale } : null;
+  pollBuild(base + '/compress', body, btn, label,
     () => `/api/tapes/${encodeURIComponent(tape)}/compressed/${tok}.mp4`);
 }
 function downloadSelection(btn, opt) {
   if (!openTapeId || selected.size === 0) return;
   const tape = openTapeId, scenes = [...selected], label = btn.textContent;
+  const ro = opt && opt.restore ? repairOpt() : {};
   pollBuild(`/api/tapes/${encodeURIComponent(tape)}/compress`,
-    { scenes, share: !!(opt && opt.share), restore: !!(opt && opt.restore) }, btn, label,
+    { scenes, share: !!(opt && opt.share), restore: !!(opt && opt.restore), ...ro }, btn, label,
     j => `/api/tapes/${encodeURIComponent(tape)}/compressed/${j.token}.mp4`);
 }
 
@@ -606,7 +629,8 @@ function renderTlScenes() {
   const withFull = tlScenes.map(s => ({ s, full: (scenesCache[s.tape_id] || []).find(x => x.scene_id === s.scene_id) }))
     .filter(x => x.full);
   view.innerHTML = `
-    <div class="mb-3 flex items-center justify-end">${viewToggleHTML()}</div>` +
+    ${repairOptsHTML()}
+    <div class="mt-3 flex items-center justify-end">${viewToggleHTML()}</div>` +
     (sceneView === 'grid'
       ? sceneGridHTML(tlGridItems = withFull.map(({ s, full }) => ({ tapeId: s.tape_id, s: full })))
       : `<div id="tlSelBar" class="mb-4 hidden flex-wrap items-center gap-3 rounded-xl border border-brand-500/40 bg-brand-50/60 p-3 dark:bg-brand-500/[0.08]">

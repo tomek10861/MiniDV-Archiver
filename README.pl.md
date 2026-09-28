@@ -71,7 +71,12 @@ które można odtworzyć.
   odszumianiem/naprawą **dekodowany z mastera DV** (nie z proxy) — deinterlacing
   `bwdif` z wykrytą parzystością pól, potem `atadenoise` + `deblock` (cały łańcuch
   konfigurowalny przez `MINIDV_RESTORE_FILTERS`). Master i zwykłe proxy pozostają
-  nietknięte.
+  nietknięte. Dwa opcjonalne checkboxy rozszerzają to dalej, oba domyślnie
+  wyłączone i doklejane na końcu tego łańcucha: dwuprzebiegowa
+  stabilizacja (`libvidstab`, już w obrazie) i ostrzejszy upscale przez GPU
+  (filtr `libplacebo` ffmpeg przez Vulkan — to nie jest model AI, ale wyraźnie
+  lepszy kernel niż zwykły lanczos; wymaga przepuszczenia `/dev/dri` do
+  kontenera converter, patrz `compose.override.yaml.example`).
 
 Nigdy nie wysyła opcode'u `RECORD`. Taśma traktowana wyłącznie do odczytu.
 
@@ -148,6 +153,10 @@ Przy Dockerze wpisz je do `.env` (compose je czyta). Przy systemd idą do
 | `MINIDV_MP4_PRESET` | `medium` | preset x264 dla proxy (`veryfast` ~4–6× szybszy, większe pliki) |
 | `MINIDV_SHARE_MAX_MB` | `90` | docelowy rozmiar re-enkodu „udostępnij" |
 | `MINIDV_RESTORE_FILTERS` | `bwdif…,atadenoise,deblock…` | łańcuch `-vf` ffmpeg dla wariantu „napraw" |
+| `MINIDV_STABILIZE_SHAKINESS` | `8` | 1–10, jak mocno przebieg 1 szuka trzęsienia (domyślnie vidstab ma `5`) |
+| `MINIDV_STABILIZE_SMOOTHING` | `20` | jak mocno przebieg 2 wygładza ścieżkę kamery (domyślnie vidstab ma `15`) |
+| `MINIDV_UPSCALE_FACTOR` | `2` | mnożnik skali dla checkboxa „Wyższa rozdzielczość" |
+| `MINIDV_UPSCALE_SCALER` | `ewa_lanczos4sharpest` | kernel skalowania libplacebo (jego najostrzejszy wbudowany) |
 | `MINIDV_INDEX_INTERVAL` | `300` | sekundy między odświeżeniami indeksu taśm/scen w tle |
 | `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | nasłuch HTTP api (wewnątrz kontenera) |
 
@@ -198,15 +207,17 @@ JSON po HTTP (serwuje proces `api`; `nginx` proxuje do niego `/api`).
 `/api/tapes/{id}/files/{name}` (pliki archiwum; `Range` dla MP4; `?dl=1` wymusza
 pobranie) ·
 `/api/tapes/{id}/compressed/{token}.mp4` — serwuje build na żądanie; `token` to
-`TAPE`, `<scene_id>`, `<scene_id>-RES` (napraw), albo `SEL-<hash>[-FB|-RES]` ·
+`TAPE`, `<scene_id>`, `<scene_id>-RES[-STAB][-UP]` (napraw, +stabilizacja,
++upscale), albo `SEL-<hash>[-FB|-RES[-STAB][-UP]]` ·
 `/api/playlist/build/{token}.mp4` — serwuje build złożony ze scen z kilku kaset (niżej).
 
 **`POST`**
 `/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?}` ·
 `/api/capture/stop` `{tape_id?}` ·
 `/api/tape/{play,stop,rewind}` (409, jeśli `MINIDV_ALLOW_FCP` != 1) ·
-`/api/tapes/{id}/scenes/{scene}/compress` `{restore?}` ·
-`/api/tapes/{id}/compress` `{scenes?, share?, restore?}` (brak body = cała taśma) ·
+`/api/tapes/{id}/scenes/{scene}/compress` `{restore?, stabilize?, upscale?}` ·
+`/api/tapes/{id}/compress` `{scenes?, share?, restore?, stabilize?, upscale?}`
+(brak body = cała taśma; stabilize/upscale działają tylko z `restore: true`) ·
 `/api/tapes/{id}/rename` `{new_id}` ·
 `/api/tapes/{id}/meta` `{label?, recording_date?}` ·
 `/api/tapes/{id}/reprobe` `{force?}` (sonda jakości / odcisk) ·

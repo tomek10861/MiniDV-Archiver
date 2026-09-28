@@ -51,6 +51,22 @@ class Config:
     # mpdecimate: drop duplicated frames (dvgrab fills capture drops with repeats) —
     # off by default because it makes the stream VFR.
     restore_decimate: bool = os.getenv("MINIDV_RESTORE_DECIMATE", "0") == "1"
+    # Optional per-job additions to a restore build (both off unless the operator
+    # checks a box): 2-pass libvidstab stabilization and a sharper GPU
+    # (libplacebo/Vulkan) upscale — not a neural model, but a noticeably better
+    # kernel than plain bicubic/lanczos, and fast on modest hardware. Needs
+    # /dev/dri passed into the converter container.
+    # shakiness: how hard pass 1 looks for shake (1-10, vidstab default 5).
+    # smoothing: how strongly pass 2 flattens the camera path (vidstab default 15;
+    # higher = steadier but crops in more / can warp on deliberate pans).
+    restore_stabilize_shakiness: int = int(os.getenv("MINIDV_STABILIZE_SHAKINESS", "8"))
+    restore_stabilize_smoothing: int = int(os.getenv("MINIDV_STABILIZE_SMOOTHING", "20"))
+    restore_upscale_factor: int = int(os.getenv("MINIDV_UPSCALE_FACTOR", "2"))
+    # ewa_lanczos4sharpest: libplacebo's sharpest built-in kernel (sharper than the
+    # ewa_lanczossharp this defaulted to before) — more prone to ringing/haloing on
+    # very noisy source than a softer kernel, but MiniDV footage is soft to begin
+    # with and reads better sharpened.
+    restore_upscale_scaler: str = os.getenv("MINIDV_UPSCALE_SCALER", "ewa_lanczos4sharpest")
     bind: str = os.getenv("MINIDV_BIND", "0.0.0.0")
     port: int = int(os.getenv("MINIDV_PORT", "8080"))
     # How often the background pass refreshes the tape/scene index (state/jobs.db);
