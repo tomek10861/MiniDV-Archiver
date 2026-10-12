@@ -11,7 +11,7 @@ def _cfg(tmp_path):
     return c
 
 
-def _tape(cfg, tape_id, scenes, *, label=None, recording_date=None):
+def _tape(cfg, tape_id, scenes, *, label=None, recording_date=None, workspace=None):
     """scenes: list of (scene_id, vaux_datetime_or_None, valid_bool)"""
     d = cfg.tapes / tape_id
     (d / "thumbnails").mkdir(parents=True)
@@ -22,6 +22,8 @@ def _tape(cfg, tape_id, scenes, *, label=None, recording_date=None):
         tape["label"] = label
     if recording_date:
         tape["recording_date"] = recording_date
+    if workspace:
+        tape["workspace"] = workspace
     (d / "tape.json").write_text(json.dumps(tape))
     for i, (sid, dt, valid) in enumerate(scenes, 1):
         (d / f"{sid}.json").write_text(json.dumps({
@@ -151,6 +153,73 @@ def test_duplicates_matches_near_identical_hashes_not_just_byte_exact(tmp_path):
     dup = li.duplicates(cfg, s)
     assert len(dup["groups"]) == 1
     assert {m["tape_id"] for m in dup["groups"][0]["members"]} == {"A", "B"}
+
+
+def test_tapes_list_filters_by_workspace(tmp_path):
+    cfg = _cfg(tmp_path)
+    s = JobStore(cfg.state / "jobs.db")
+    _tape(cfg, "TAPE-A", [("0001_2004-07-11_10-00-00", "2004-07-11T10:00:00", True)])              # no field -> default
+    _tape(cfg, "TAPE-B", [("0001_2005-01-02_09-00-00", "2005-01-02T09:00:00", True)], workspace="default")
+    _tape(cfg, "TAPE-C", [("0001_2006-03-04_08-00-00", "2006-03-04T08:00:00", True)], workspace="Kasia")
+    li.reindex(cfg, s, force=True)
+
+    assert {t["tape_id"] for t in li.tapes_list(cfg, s)} == {"TAPE-A", "TAPE-B", "TAPE-C"}  # no filter -> everyone
+    assert {t["tape_id"] for t in li.tapes_list(cfg, s, "default")} == {"TAPE-A", "TAPE-B"}
+    assert {t["tape_id"] for t in li.tapes_list(cfg, s, "Kasia")} == {"TAPE-C"}
+    assert li.tapes_list(cfg, s, "NobodyHere") == []
+
+
+def test_timeline_and_month_scenes_filter_by_workspace(tmp_path):
+    cfg = _cfg(tmp_path)
+    s = JobStore(cfg.state / "jobs.db")
+    _tape(cfg, "TAPE-A", [("0001_2004-07-11_10-00-00", "2004-07-11T10:00:00", True)])
+    _tape(cfg, "TAPE-C", [("0001_2004-07-11_08-00-00", "2004-07-11T08:00:00", True)], workspace="Kasia")
+    li.reindex(cfg, s, force=True)
+
+    tl = li.timeline(cfg, s, "Kasia")
+    assert tl["years"] == [{"year": 2004, "count": 1, "months": [{"month": 7, "count": 1,
+                           "thumb": {"tape_id": "TAPE-C", "scene_id": "0001_2004-07-11_08-00-00"}}],
+                           "thumb": {"tape_id": "TAPE-C", "scene_id": "0001_2004-07-11_08-00-00"}}]
+    assert [x["tape_id"] for x in li.month_scenes(cfg, s, 2004, 7, "Kasia")] == ["TAPE-C"]
+    assert [x["tape_id"] for x in li.month_scenes(cfg, s, 2004, 7, "default")] == ["TAPE-A"]
+    assert {x["tape_id"] for x in li.month_scenes(cfg, s, 2004, 7)} == {"TAPE-A", "TAPE-C"}
+
+
+def test_duplicates_never_match_across_workspaces(tmp_path):
+    """The isolation point, not just cosmetic: two people's unrelated footage must
+    never be compared against each other, even if their fingerprints coincide."""
+    cfg = _cfg(tmp_path)
+    s = JobStore(cfg.state / "jobs.db")
+    d = cfg.tapes / "TAPE-MINE"
+    (d / "thumbnails").mkdir(parents=True)
+    (d / "tape.json").write_text(json.dumps({"tape_id": "TAPE-MINE", "scene_count": 1,
+        "scenes": [{"scene_index": 1, "scene_id": "0001_s", "frame_count": 500}]}))
+    (d / "0001_s.json").write_text(json.dumps({
+        "scene_index": 1, "scene_id": "0001_s", "tape_id": "TAPE-MINE", "frame_count": 500,
+        "timecode": {"start": "00:05:00:00", "end": "00:05:20:00"}, "recording": {"datetime": None},
+        "capture": {"dropped_frames": 0, "source_discontinuities": [], "decode_errors": 0, "error_score": 0},
+        "fingerprint": {"datetime": None, "tc_start": None, "tc_end": None, "frame_count": 500,
+                        "frame_hashes": ["00000000000000ff", "1111111111111110", ""]}}))
+    d2 = cfg.tapes / "TAPE-KASIA"
+    (d2 / "thumbnails").mkdir(parents=True)
+    (d2 / "tape.json").write_text(json.dumps({"tape_id": "TAPE-KASIA", "scene_count": 1,
+        "scenes": [{"scene_index": 1, "scene_id": "0001_s", "frame_count": 500}], "workspace": "Kasia"}))
+    (d2 / "0001_s.json").write_text(json.dumps({
+        "scene_index": 1, "scene_id": "0001_s", "tape_id": "TAPE-KASIA", "frame_count": 500,
+        "timecode": {"start": "00:05:00:00", "end": "00:05:20:00"}, "recording": {"datetime": None},
+        "capture": {"dropped_frames": 0, "source_discontinuities": [], "decode_errors": 0, "error_score": 0},
+        "fingerprint": {"datetime": None, "tc_start": None, "tc_end": None, "frame_count": 500,
+                        "frame_hashes": ["00000000000000fe", "1111111111111111", ""]}}))
+    li.reindex(cfg, s, force=True)
+
+    # unfiltered: the near-identical hashes genuinely would match as one group —
+    # establishes that the *filter*, not a fingerprint mismatch, is what separates them
+    unfiltered = li.duplicates(cfg, s)
+    assert len(unfiltered["groups"]) == 1
+    assert {m["tape_id"] for m in unfiltered["groups"][0]["members"]} == {"TAPE-MINE", "TAPE-KASIA"}
+    # filtered to either workspace: only one of the two scenes is in it -> nothing to group
+    assert li.duplicates(cfg, s, "default")["groups"] == []
+    assert li.duplicates(cfg, s, "Kasia")["groups"] == []
 
 
 def test_duplicates_excludes_a_dismissed_pair(tmp_path):

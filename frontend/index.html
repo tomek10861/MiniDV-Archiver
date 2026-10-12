@@ -76,6 +76,10 @@
       </button>
       <h1 id="hdrLoc" class="truncate font-semibold text-gray-800 dark:text-white/90">MiniDV Archiver</h1>
       <div class="ml-auto flex items-center gap-2.5">
+        <select id="workspacePick" data-i18n-title="workspace.label" title="Workspace"
+          class="h-9 max-w-[9rem] rounded-lg border border-gray-200 bg-white px-2 text-theme-xs font-medium text-gray-600 dark:border-gray-800 dark:bg-white/[0.06] dark:text-gray-300"></select>
+        <button id="workspaceAdd" data-i18n-title="workspace.addTitle" title="Nowy workspace"
+          class="rounded-lg border border-gray-200 px-2 py-1.5 text-theme-xs font-medium text-gray-600 hover:border-brand-500 hover:text-brand-500 dark:border-gray-800 dark:text-gray-300">+</button>
         <span id="camPill" class="inline-flex items-center rounded-full border border-gray-200 px-3 py-1.5 text-theme-xs font-medium text-gray-500 dark:border-gray-800 dark:text-gray-400" data-i18n="cam.pill.connecting">ŁĄCZENIE…</span>
         <span id="diskPill" class="hidden sm:inline-flex items-center rounded-full border border-gray-200 px-3 py-1.5 text-theme-xs font-mono text-gray-500 dark:border-gray-800 dark:text-gray-400">—</span>
         <select id="langPick" data-i18n-title="lang.label" title="Język"
@@ -147,6 +151,19 @@
               <label class="mt-3 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
                 <input id="manual" type="checkbox" class="h-4 w-4 accent-brand-500"> <span data-i18n="capture.manual">Tryb ręczny — po starcie naciśnij PLAY na kamerze</span>
               </label>
+              <label class="mt-3 flex flex-wrap items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+                <span data-i18n="capture.tzLabel">Strefa czasowa zegara kamery:</span>
+                <select id="captureTz" class="h-9 rounded-lg border border-gray-200 bg-transparent px-2 text-theme-sm text-gray-800 outline-none focus:border-brand-500 dark:border-gray-800 dark:text-white/90">
+                  <option id="captureTzDefault" value=""></option>
+                  <option value="Europe/Warsaw">Europa/Warszawa</option>
+                  <option value="UTC">UTC</option>
+                  <option value="Europe/London">Europa/Londyn</option>
+                  <option value="America/New_York">Ameryka/Nowy Jork</option>
+                  <option value="America/Los_Angeles">Ameryka/Los Angeles</option>
+                  <option value="Asia/Tokyo">Azja/Tokio</option>
+                </select>
+              </label>
+              <p id="captureWsNote" class="mt-2 text-theme-xs text-gray-400"></p>
               <p id="manualHint" class="mt-2 text-theme-xs text-gray-400" hidden data-i18n="capture.manualHint">Sterowanie AV/C wyłączone — transport obsługujesz przyciskami na kamerze.</p>
               <div id="avc" class="mt-3 flex gap-2" hidden>
                 <button data-action="rewind" class="rounded-lg border border-gray-200 px-3 py-1.5 text-theme-xs text-gray-600 hover:border-brand-500 dark:border-gray-800 dark:text-gray-300" data-i18n="avc.rewind">⏮ Przewiń</button>

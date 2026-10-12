@@ -43,6 +43,52 @@ def test_start_forces_manual_and_spawns_capture(tmp_path, monkeypatch):
     assert eng.capture_tape == "TAPE-9001"
 
 
+def test_start_stores_a_valid_timezone_and_rejects_a_bad_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(Engine, "_capture_job", lambda *a, **k: None)
+    eng = _engine(tmp_path, allow_fcp=False)
+    job = eng.start(tape_id="TAPE-TZ", manual_transport=True, timezone="America/New_York")
+    assert job["timezone"] == "America/New_York"
+
+    eng2 = _engine(tmp_path, allow_fcp=False)
+    import pytest
+    with pytest.raises(ValueError, match="strefa"):
+        eng2.start(tape_id="TAPE-TZ-BAD", manual_transport=True, timezone="Not/AZone")
+
+
+def test_start_defaults_to_the_default_workspace_and_registers_a_new_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(Engine, "_capture_job", lambda *a, **k: None)
+    eng = _engine(tmp_path, allow_fcp=False)
+    job = eng.start(tape_id="TAPE-WS1", manual_transport=True)
+    assert job["workspace"] == "default"
+    assert eng.list_workspaces() == ["default"]     # never explicitly created -> not in the store, still listed
+
+    eng2 = _engine(tmp_path, allow_fcp=False)
+    job2 = eng2.start(tape_id="TAPE-WS2", manual_transport=True, workspace="Kasia")
+    assert job2["workspace"] == "Kasia"
+    assert eng2.list_workspaces() == ["default", "Kasia"]   # auto-registered on first use
+
+
+def test_start_rejects_an_invalid_workspace_name(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.setattr(Engine, "_capture_job", lambda *a, **k: None)
+    eng = _engine(tmp_path, allow_fcp=False)
+    with pytest.raises(ValueError, match="workspace"):
+        eng.start(tape_id="TAPE-WS3", manual_transport=True, workspace="../etc")
+
+
+def test_create_workspace_validates_and_is_idempotent(tmp_path):
+    import pytest
+    eng = _engine(tmp_path)
+    assert eng.create_workspace("Piotr") == {"name": "Piotr"}
+    assert eng.list_workspaces() == ["default", "Piotr"]
+    eng.create_workspace("Piotr")  # already exists -> no error, no duplicate
+    assert eng.list_workspaces() == ["default", "Piotr"]
+    with pytest.raises(ValueError):
+        eng.create_workspace("")
+    with pytest.raises(ValueError):
+        eng.create_workspace("../nope")
+
+
 def test_second_capture_blocked_only_while_a_capture_holds_the_slot(tmp_path, monkeypatch):
     monkeypatch.setattr(Engine, "_capture_job", lambda *a, **k: None)
     eng = _engine(tmp_path, allow_fcp=True)
@@ -390,6 +436,40 @@ def test_backfill_metadata_tags_missing_creation_time_and_refreshes_checksums(tm
     assert eng._backfill_metadata_tape("TAPE-BF")["updated"] == 0  # already tagged -> no-op
 
 
+def test_backfill_metadata_force_corrects_a_wrongly_tagged_scene(tmp_path):
+    """Regression: tapes processed before local_to_utc_iso existed got a
+    creation_time with the camera's *local* clock wrongly relabeled "Z" (as if it
+    were already UTC). force=True must recompute those too, not just fill gaps."""
+    import shutil as _sh
+    import subprocess as _sp
+    from minidv_archiver.media import ffprobe
+    if not _sh.which("ffmpeg"):
+        import pytest
+        pytest.skip("ffmpeg not installed")
+    eng = _engine(tmp_path)
+    d = eng.config.tapes / "TAPE-BF2"
+    (d / "thumbnails").mkdir(parents=True)
+    scene_id = "0001_2004-07-11_17-29-09"
+    proxy = d / f"{scene_id}.mp4"
+    # pre-tag it with the old, wrong value: naive local time directly relabeled "Z"
+    _sp.run(["ffmpeg", "-y", "-v", "quiet", "-f", "lavfi", "-i", "color=c=black:s=32x32:d=1",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-metadata", "creation_time=2004-07-11T17:29:09.000000Z",
+            str(proxy)], check=True)
+    assert ffprobe(proxy)["format"]["tags"]["creation_time"] == "2004-07-11T17:29:09.000000Z"
+    (d / f"{scene_id}.json").write_text(json.dumps({
+        "scene_index": 1, "scene_id": scene_id, "tape_id": "TAPE-BF2",
+        "recording": {"datetime": "2004-07-11T17:29:09", "datetime_source": "DV_VAUX"},
+        "timecode": {"start": "00:00:00:00", "end": "00:00:04:00"},
+        "files": {"proxy": {"filename": proxy.name, "sha256": "stale", "size": 1}}}))
+    (d / "tape.json").write_text(json.dumps({"tape_id": "TAPE-BF2", "scene_count": 1,
+                                             "scenes": [{"scene_index": 1, "scene_id": scene_id, "frame_count": 100}]}))
+    (d / "tape.sha256").write_text(f"stale  {proxy.name}\nstale  {scene_id}.json\nstale  tape.json\n")
+
+    assert eng._backfill_metadata_tape("TAPE-BF2")["updated"] == 0        # already tagged, force=False -> no-op
+    assert eng._backfill_metadata_tape("TAPE-BF2", force=True)["updated"] == 1
+    assert ffprobe(proxy)["format"]["tags"]["creation_time"] == "2004-07-11T15:29:09.000000Z"  # CEST -> UTC
+
+
 def test_duplicates_groups_same_recording_across_tapes_best_first(tmp_path):
     from minidv_archiver import library_index as li
     eng = _engine(tmp_path)
@@ -495,6 +575,67 @@ def test_start_selection_concatenates_chosen_scenes(tmp_path, monkeypatch):
         assert "brak scen" in str(exc)
 
 
+def test_compress_worker_persists_build_progress(tmp_path, monkeypatch):
+    """Zadania should show a live percentage for a slow build (restore/concat/FB),
+    not just QUEUED/RUNNING -- the build record's "progress" field is written as
+    media.*'s progress callback fires, and must be readable mid-build, not only
+    after it finishes."""
+    import minidv_archiver.media as mm
+    seen_progress = []
+
+    def fake_concat(srcs, out, progress=None, **k):
+        for frac in (0.3, 0.7, 1.0):
+            progress(frac)
+            seen_progress.append(frac)
+        pathlib.Path(out).write_bytes(b"joined")
+
+    monkeypatch.setattr(mm, "concat_mp4", fake_concat)
+    eng = _engine(tmp_path)
+    td = eng.config.tapes / "TAPE-2"
+    td.mkdir(parents=True)
+    (td / "tape.json").write_text("{}")
+    for s in ("0001_a", "0002_b"):
+        (td / f"{s}.mp4").write_bytes(b"x")
+    j = eng.start_selection("TAPE-2", ["0001_a", "0002_b"])
+    for _ in range(100):
+        if eng.compress_status("TAPE-2", j["token"])["status"] in ("READY", "ERROR"):
+            break
+        time.sleep(0.05)
+    done = eng.compress_status("TAPE-2", j["token"])
+    assert done["status"] == "READY"
+    assert done["progress"] == 1.0
+    assert seen_progress == [0.3, 0.7, 1.0]  # the callback really ran mid-build, not just at the end
+
+
+def test_start_selection_archive_zips_scenes_separately(tmp_path, monkeypatch):
+    """archive=True must not merge scenes into one video -- it zips each scene's
+    proxy as its own file (ignoring restore/share, which don't apply to a zip)."""
+    import minidv_archiver.media as mm
+    zipped = []
+    monkeypatch.setattr(mm, "build_archive", lambda srcs, out: (zipped.append(len(srcs)), pathlib.Path(out).write_bytes(b"zip")))
+    eng = _engine(tmp_path)
+    td = eng.config.tapes / "TAPE-2"
+    td.mkdir(parents=True)
+    (td / "tape.json").write_text("{}")
+    for s in ("0001_a", "0002_b", "0003_c"):
+        (td / f"{s}.mp4").write_bytes(b"x")
+    j = eng.start_selection("TAPE-2", ["0003_c", "0001_a", "0002_b"], archive=True)
+    assert j["token"].startswith("SEL-") and j["token"].endswith("-ZIP") and j["mode"] == "archive"
+    for _ in range(100):
+        if eng.compress_status("TAPE-2", j["token"])["status"] in ("READY", "ERROR"):
+            break
+        time.sleep(0.05)
+    done = eng.compress_status("TAPE-2", j["token"])
+    assert done["status"] == "READY" and pathlib.Path(done["path"]).suffix == ".zip"
+    assert zipped == [3]
+
+    try:
+        eng.start_selection("TAPE-2", ["nope_x"], archive=True)
+        assert False
+    except FileNotFoundError as exc:
+        assert "brak scen" in str(exc)
+
+
 def test_start_playlist_concatenates_scenes_across_tapes(tmp_path, monkeypatch):
     """The timeline's cross-tape build: scenes chosen from different tapes join
     into one MP4, same mechanism as start_selection but not confined to one tape."""
@@ -534,6 +675,47 @@ def test_start_playlist_concatenates_scenes_across_tapes(tmp_path, monkeypatch):
         assert False
     except FileNotFoundError as exc:
         assert "pusta lista scen" in str(exc)
+
+
+def test_start_playlist_restore_and_archive_variants(tmp_path, monkeypatch):
+    """Cross-tape playlist also supports restore=True (repair from DV masters,
+    sources become .dv.zst) and archive=True (zip each scene separately,
+    sources stay .mp4 -- restore/stabilize/upscale are meaningless for a zip)."""
+    import minidv_archiver.media as mm
+    monkeypatch.setattr(mm, "restore_mp4",
+                        lambda srcs, out, **k: pathlib.Path(out).write_bytes(b"restored:" + str(len(srcs)).encode()))
+    zipped = []
+    monkeypatch.setattr(mm, "build_archive", lambda srcs, out: (zipped.append(len(srcs)), pathlib.Path(out).write_bytes(b"zip")))
+    eng = _engine(tmp_path)
+    for tid, scenes in (("TAPE-A", ["0001_a"]), ("TAPE-B", ["0001_x", "0002_y"])):
+        td = eng.config.tapes / tid
+        td.mkdir(parents=True)
+        (td / "tape.json").write_text("{}")
+        for s in scenes:
+            (td / f"{s}.mp4").write_bytes(b"x")
+            (td / f"{s}.dv.zst").write_bytes(b"master")
+
+    items = [{"tape_id": "TAPE-A", "scene_id": "0001_a"}, {"tape_id": "TAPE-B", "scene_id": "0001_x"}]
+
+    jr = eng.start_playlist(items, restore=True, stabilize=True)
+    assert jr["mode"] == "restore" and jr["token"].endswith("-RES-STAB")
+    for _ in range(100):
+        if eng.playlist_status(jr["token"])["status"] in ("READY", "ERROR"):
+            break
+        time.sleep(0.05)
+    done = eng.playlist_status(jr["token"])
+    assert done["status"] == "READY"
+    assert pathlib.Path(done["path"]).read_bytes() == b"restored:2"
+
+    ja = eng.start_playlist(items, archive=True)
+    assert ja["mode"] == "archive" and ja["token"].endswith("-ZIP") and ja["token"] != jr["token"]
+    for _ in range(100):
+        if eng.playlist_status(ja["token"])["status"] in ("READY", "ERROR"):
+            break
+        time.sleep(0.05)
+    done_a = eng.playlist_status(ja["token"])
+    assert done_a["status"] == "READY" and pathlib.Path(done_a["path"]).suffix == ".zip"
+    assert zipped == [2]
 
 
 def _make_tape(eng, tape_id, scene_ids):

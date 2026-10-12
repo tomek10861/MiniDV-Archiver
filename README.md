@@ -147,6 +147,7 @@ With Docker, put them in `.env` (compose reads it). With systemd they go in
 | `MINIDV_CAMERA_GUID` | *(auto)* | empty = first AV/C tape device on the bus; set a GUID if several are connected |
 | `MINIDV_ALLOW_FCP` | `1` | `1` = drive transport over AV/C; `0` = manual PLAY/STOP on the camera |
 | `MINIDV_MP4_PRESET` | `medium` | x264 preset for proxies (`veryfast` is ~4–6× quicker, larger files) |
+| `MINIDV_DEFAULT_RECORDING_TZ` | `Europe/Warsaw` | zone the camera's clock was set to, for converting the DV VAUX date to a real UTC `creation_time`; overridable per capture |
 | `MINIDV_SHARE_MAX_MB` | `90` | target size for the "share" re-encode |
 | `MINIDV_RESTORE_FILTERS` | `bwdif…,atadenoise,deblock…` | ffmpeg `-vf` chain for the "restore" variant |
 | `MINIDV_STABILIZE_SHAKINESS` | `8` | 1–10, how hard pass 1 looks for shake (vidstab default `5`) |
@@ -200,6 +201,7 @@ JSON over HTTP (served by the `api` process; `nginx` proxies `/api` to it).
 `/api/tapes` (from the index) · `/api/tapes/{id}` · `/api/tapes/{id}/scenes` ·
 `/api/tapes/{id}/scenes/{scene_id}` ·
 `/api/timeline` · `/api/timeline/{year}/{month}` · `/api/duplicates` ·
+`/api/workspaces` — lists workspace names, `"default"` always first ·
 `/api/tapes/{id}/files/{name}` (archive files; `Range` for MP4; `?dl=1` forces
 download) ·
 `/api/tapes/{id}/compressed/{token}.mp4` — serves an on-demand build; `token` is
@@ -207,20 +209,42 @@ download) ·
 or `SEL-<hash>[-FB|-RES[-STAB][-UP]]` ·
 `/api/playlist/build/{token}.mp4` — serves a cross-tape build (see below).
 
+`/api/tapes`, `/api/timeline`, `/api/timeline/{year}/{month}` and `/api/duplicates`
+all accept `?workspace=<name>`, scoping the result to tapes captured into that
+workspace (so one person's material is never listed, timelined, or matched for
+duplicates against another's); omit it for `"default"`.
+
 **`POST`**
-`/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?}` ·
+`/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?, timezone?, workspace?}` —
+`timezone` is an IANA zone (e.g. `Europe/London`) for a tape you know was filmed
+in a different zone than `MINIDV_DEFAULT_RECORDING_TZ`; omit to use that default ·
+`workspace` tags the captured tape so it's only ever listed/timelined/matched
+alongside others in the same workspace; omit for `"default"` ·
+`/api/workspaces` `{name}` — creates a new (empty, until you capture into it)
+workspace ·
 `/api/capture/stop` `{tape_id?}` ·
 `/api/tape/{play,stop,rewind}` (409 unless `MINIDV_ALLOW_FCP=1`) ·
 `/api/tapes/{id}/scenes/{scene}/compress` `{restore?, stabilize?, upscale?}` ·
-`/api/tapes/{id}/compress` `{scenes?, share?, restore?, stabilize?, upscale?}`
-(no body = whole tape; stabilize/upscale only apply with `restore: true`) ·
+`/api/tapes/{id}/compress` `{scenes?, share?, restore?, stabilize?, upscale?, archive?}`
+(no body = whole tape; stabilize/upscale only apply with `restore: true`;
+`archive: true` skips merging and instead zips each selected scene's proxy as
+its own file — `scenes` required, `share`/`restore`/`stabilize`/`upscale` are
+ignored — download at `/compressed/{token}.zip` instead of `.mp4`) ·
 `/api/tapes/{id}/rename` `{new_id}` ·
 `/api/tapes/{id}/meta` `{label?, recording_date?}` ·
 `/api/tapes/{id}/reprobe` `{force?}` (quality scan / fingerprint) ·
-`/api/playlist/build` `{items: [{tape_id, scene_id}, ...], title?}` — join scenes
-from one or several tapes (in that order) into a single MP4, e.g. a multi-select
-from the timeline. Call it again with the same body to poll status
-(`QUEUED`/`RUNNING`/`READY`), same pattern as the other on-demand builds above ·
+`/api/tapes/{id}/backfill-meta` `{force?}` — writes `creation_time`/`date` onto
+scene MP4s (and `tape.mp4`) that are missing it, from the recording datetime
+already in each scene's `.json`; `force: true` also recomputes scenes that
+already have the tag (e.g. to fix one processed before a timezone correction) ·
+`/api/playlist/build` `{items: [{tape_id, scene_id}, ...], title?, restore?,
+stabilize?, upscale?, archive?}` — join scenes from one or several tapes (in
+that order) into a single MP4, e.g. a multi-select from the timeline;
+`restore`/`stabilize`/`upscale` repair it from the DV masters instead of a
+plain stream-copy join; `archive: true` instead zips each scene's proxy
+separately (download at `/build/{token}.zip`). Call it again with the same
+body to poll status (`QUEUED`/`RUNNING`/`READY`), same pattern as the other
+on-demand builds above ·
 `/api/tapes/{id}/scenes/delete` `{scenes: [...]}` — deleting scenes rebuilds the
 whole-tape proxy, so this runs as a background build too (poll the same way)
 instead of blocking the request, which used to time out on a tape with hundreds

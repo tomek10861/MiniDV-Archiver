@@ -58,6 +58,22 @@ async function api(path, opt) {
   const r = await fetch(path, opt); const j = await r.json();
   if (!r.ok) throw Error(j.error || r.statusText); return j;
 }
+// ============ workspace: keeps unrelated people's footage from mixing ============
+let currentWorkspace = (() => { try { return localStorage.getItem('workspace') || 'default'; } catch (_) { return 'default'; } })();
+const wsQS = () => currentWorkspace === 'default' ? '' : `?workspace=${encodeURIComponent(currentWorkspace)}`;
+function setWorkspace(name) {
+  currentWorkspace = name || 'default';
+  try { localStorage.setItem('workspace', currentWorkspace); } catch (_) {}
+  tl.data = null; tl.year = null; tl.month = null; dupCache = null; tapesSig = null;
+  refresh();
+}
+async function loadWorkspaces() {
+  let names;
+  try { names = await api('/api/workspaces'); } catch (_) { names = ['default']; }
+  if (!names.includes(currentWorkspace)) currentWorkspace = 'default';
+  const sel = $('#workspacePick');
+  sel.innerHTML = names.map(n => `<option value="${n}"${n === currentWorkspace ? ' selected' : ''}>${n === 'default' ? L('workspace.default') : n}</option>`).join('');
+}
 // readable button / link styles (light + dark)
 const BTN = 'rounded-lg border border-gray-300 bg-white px-2.5 py-1 text-theme-xs font-medium text-gray-700 hover:border-brand-500 hover:text-brand-500 dark:border-gray-600 dark:bg-white/[0.06] dark:text-gray-200 dark:hover:bg-white/[0.12]';
 const BTN_FB = 'rounded-lg border border-blue-light-500 bg-blue-light-500/10 px-2.5 py-1 text-theme-xs font-medium text-blue-light-600 hover:bg-blue-light-500/20 dark:text-blue-light-400';
@@ -355,6 +371,7 @@ function renderTapeDetail(t, force) {
       <button id="selDownload" class="${BTN_PRIMARY}">${L('sel.download')}</button>
       <button id="selFb" class="${BTN_FB}">${L('sel.fb')}</button>
       <button id="selRepair" class="${BTN}">${L('sel.repair')}</button>
+      <button id="selArchive" class="${BTN}">${L('sel.archive')}</button>
       <button id="selDelete" class="${BTN_DANGER}">${L('sel.delete')}</button>
       <button id="selAll" class="${BTN}">${L('sel.all')}</button>
       <button id="selClear" class="${BTN}">${L('sel.clear')}</button>
@@ -446,9 +463,10 @@ function downloadSelection(btn, opt) {
   if (!openTapeId || selected.size === 0) return;
   const tape = openTapeId, scenes = [...selected], label = btn.textContent;
   const ro = opt && opt.restore ? repairOpt() : {};
+  const ext = opt && opt.archive ? 'zip' : 'mp4';
   pollBuild(`/api/tapes/${encodeURIComponent(tape)}/compress`,
-    { scenes, share: !!(opt && opt.share), restore: !!(opt && opt.restore), ...ro }, btn, label,
-    j => `/api/tapes/${encodeURIComponent(tape)}/compressed/${j.token}.mp4`);
+    { scenes, share: !!(opt && opt.share), restore: !!(opt && opt.restore), archive: !!(opt && opt.archive), ...ro }, btn, label,
+    j => `/api/tapes/${encodeURIComponent(tape)}/compressed/${j.token}.${ext}`);
 }
 
 async function reloadOpenTape() {
@@ -519,6 +537,7 @@ $('#tapeDetail').addEventListener('click', e => {
   if (e.target.id === 'selDownload') { downloadSelection(e.target, {}); return; }
   if (e.target.id === 'selFb') { downloadSelection(e.target, { share: true }); return; }
   if (e.target.id === 'selRepair') { downloadSelection(e.target, { restore: true }); return; }
+  if (e.target.id === 'selArchive') { downloadSelection(e.target, { archive: true }); return; }
   if (e.target.id === 'selDelete') { deleteSelectedScenes(e.target); return; }
   if (e.target.id === 'tapeDelete') { deleteWholeTape(openTapeId, (scenesCache[openTapeId] || []).length); return; }
   if (e.target.id === 'tapeRename') { renameTape(openTapeId); return; }
@@ -532,7 +551,10 @@ $('#tapeDetail').addEventListener('click', e => {
   }
   const bfm = e.target.closest('.backfillMeta');
   if (bfm) {
-    pollBuild(`/api/tapes/${encodeURIComponent(bfm.dataset.tape)}/backfill-meta`, {}, bfm, bfm.textContent, null);
+    // OK = also recompute scenes that already have a date tag (fixes the old
+    // timezone bug on tapes processed before it existed); Cancel = just fill gaps
+    const force = confirm(L('tape.backfillForceConfirm'));
+    pollBuild(`/api/tapes/${encodeURIComponent(bfm.dataset.tape)}/backfill-meta`, { force }, bfm, bfm.textContent, null);
     return;
   }
   const fb = e.target.closest('.fb'); if (fb) { fbCompress(fb); return; }
@@ -572,7 +594,7 @@ async function loadTimeline(force) {
   if (tl.loading) return;
   tl.loading = true;
   if (force || !tl.data) {
-    try { tl.data = await api('/api/timeline'); }
+    try { tl.data = await api(`/api/timeline${wsQS()}`); }
     catch (e) { $('#tlView').innerHTML = `<p class="text-error-500">${e.message}</p>`; tl.loading = false; return; }
   }
   tl.loading = false;
@@ -613,7 +635,7 @@ async function renderTimeline() {
   // across tapes — reuses sceneCard() as-is for the thumbnail/preview/FB/repair/download row.
   view.className = 'p-5';
   view.innerHTML = `<p class="text-theme-sm text-gray-400">${L('loading')}</p>`;
-  try { tlScenes = await api(`/api/timeline/${tl.year}/${tl.month}`); }
+  try { tlScenes = await api(`/api/timeline/${tl.year}/${tl.month}${wsQS()}`); }
   catch (e) { view.innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
   const tapeIds = [...new Set(tlScenes.map(s => s.tape_id))];
   await Promise.all(tapeIds.filter(id => !scenesCache[id]).map(async id => {
@@ -636,6 +658,8 @@ function renderTlScenes() {
       : `<div id="tlSelBar" class="mb-4 hidden flex-wrap items-center gap-3 rounded-xl border border-brand-500/40 bg-brand-50/60 p-3 dark:bg-brand-500/[0.08]">
           <span class="text-sm">${L('sel.count')} <b id="tlSelCount">0</b></span>
           <button id="tlBuild" class="${BTN_PRIMARY}">${L('tl.build')}</button>
+          <button id="tlBuildRepair" class="${BTN}">${L('tl.buildRepair')}</button>
+          <button id="tlArchive" class="${BTN}">${L('sel.archive')}</button>
           <button id="tlSelClear" class="${BTN}">${L('sel.clear')}</button>
           <span class="basis-full text-theme-xs text-gray-500 dark:text-gray-400 sm:basis-auto">${L('tl.buildHint')}</span>
         </div>
@@ -661,14 +685,18 @@ function syncTlSelBar() {
   const c = $('#tlSelCount'); if (c) c.textContent = tlSelected.size;
 }
 
-async function buildTlPlaylist(btn) {
+async function buildTlPlaylist(btn, opt) {
   if (tlSelected.size === 0) return;
   // chronological order (date+time), not click order or which month was open when picked
   const items = [...tlSelected.values()]
     .sort((a, b) => (a.date + 'T' + (a.time || '99:99:99')).localeCompare(b.date + 'T' + (b.time || '99:99:99')))
     .map(({ tape_id, scene_id }) => ({ tape_id, scene_id }));
   const label = btn.textContent;
-  await pollBuild('/api/playlist/build', { items }, btn, label, j => `/api/playlist/build/${j.token}.mp4`);
+  const ro = opt && opt.restore ? repairOpt() : {};
+  const ext = opt && opt.archive ? 'zip' : 'mp4';
+  await pollBuild('/api/playlist/build',
+    { items, restore: !!(opt && opt.restore), archive: !!(opt && opt.archive), ...ro }, btn, label,
+    j => `/api/playlist/build/${j.token}.${ext}`);
 }
 
 $('#tlRefresh').onclick = () => loadTimeline(true);
@@ -695,6 +723,8 @@ $('#tlView').addEventListener('click', e => {
   }
   if (e.target.id === 'tlSelClear') { tlSelected.clear(); renderTlScenes(); return; }
   if (e.target.id === 'tlBuild') { buildTlPlaylist(e.target); return; }
+  if (e.target.id === 'tlBuildRepair') { buildTlPlaylist(e.target, { restore: true }); return; }
+  if (e.target.id === 'tlArchive') { buildTlPlaylist(e.target, { archive: true }); return; }
   // same interaction as a tape's own scene list (Kasety): inline preview toggle, FB, repair
   const rp = e.target.closest('.repair'); if (rp) { repairCompress(rp); return; }
   const fb = e.target.closest('.fb'); if (fb) { fbCompress(fb); return; }
@@ -719,7 +749,7 @@ $('#tlView').addEventListener('click', e => {
 let dupCache = null;
 async function loadDuplicates(force) {
   if (force || !dupCache) {
-    try { dupCache = await api('/api/duplicates'); }
+    try { dupCache = await api(`/api/duplicates${wsQS()}`); }
     catch (e) { $('#dupView').innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
   }
   renderDuplicates();
@@ -840,6 +870,14 @@ const buildLabel = b => {
   if (t.startsWith('REPROBE') || t === 'METABACKFILL' || t.startsWith('SEL-') || t.startsWith('DEL-') || ['TAPE', 'tape'].includes(t)) return b.tape_id;
   return `${b.tape_id} · ${t.replace(/-RES$/, '')}`;
 };
+const BUILD_DOWNLOADABLE = new Set(['concat', 'restore', 'share', 'archive']);
+function buildDownloadUrl(b) {
+  if (!BUILD_DOWNLOADABLE.has(b.mode)) return null;    // reprobe/backfill_meta/delete produce no file
+  const ext = b.mode === 'archive' ? 'zip' : 'mp4';
+  const base = b.tape_id === '_playlist' ? '/api/playlist/build'
+    : `/api/tapes/${encodeURIComponent(b.tape_id)}/compressed`;
+  return `${base}/${encodeURIComponent(b.token)}.${ext}`;
+}
 function activeBuilds(builds) {
   return (builds || []).filter(b => b.status === 'QUEUED' || b.status === 'RUNNING'
     || (b.updated_at && Date.now() - Date.parse(b.updated_at) < 5 * 60 * 1000));
@@ -848,7 +886,7 @@ let jobsSig = '';
 function renderJobs(list, queue, builds) {
   builds = activeBuilds(builds);
   const sig = JSON.stringify([list.map(j => [j.tape_id, j.status, j.current_scene, j.captured_bytes, j.scene_index]),
-    builds.map(b => [b.key, b.status])]);
+    builds.map(b => [b.key, b.status, b.progress])]);
   if (sig === jobsSig) return; jobsSig = sig;
   const jobRows = list.map(j => {
     const [txt, cls] = jobBadge(j, queue), run = !TERMINAL.has(j.status);
@@ -873,13 +911,17 @@ function renderJobs(list, queue, builds) {
       : b.status === 'READY' ? 'bg-success-50 text-success-700 dark:bg-success-500/15 dark:text-success-400'
       : b.status === 'QUEUED' ? 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200'
       : 'bg-blue-light-50 text-blue-light-700 dark:bg-blue-light-500/15 dark:text-blue-light-400';
+    const pct = b.status === 'RUNNING' && typeof b.progress === 'number' ? Math.round(b.progress * 100) : null;
+    const dlUrl = b.status === 'READY' ? buildDownloadUrl(b) : null;
     return `<div class="rounded-xl border border-gray-200 p-3 dark:border-gray-800">
       <div class="flex flex-wrap items-center gap-2">
         <span class="${BADGE} ${cls}">${buildMode(b.mode)}</span>
         <strong class="text-gray-800 dark:text-white/90">${buildLabel(b)}</strong>
-        <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${buildSt(b.status)}</span>
+        <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${buildSt(b.status)}${pct != null ? ` · ${pct}%` : ''}${b.size ? ` · ${mb(b.size)}` : ''}</span>
+        ${dlUrl ? `<a class="${BTN_PRIMARY}" href="${dlUrl}" download>${L('build.download')}</a>` : ''}
         <span class="ml-auto font-mono text-[11px] text-gray-400">${(b.updated_at || '').slice(11, 19)}</span>
       </div>
+      ${pct != null ? `<div class="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800"><div class="h-full rounded-full bg-brand-500" style="width:${pct}%"></div></div>` : ''}
       ${b.error ? `<div class="mt-1.5 text-theme-xs text-error-500">${b.error}</div>` : ''}
     </div>`;
   }).join('');
@@ -978,9 +1020,12 @@ function renderSysload(sys) {
 // ============ main refresh loop ============
 async function refresh() {
   try {
-    const [s, d, t] = await Promise.all([api('/api/status'), api('/api/storage'), api('/api/tapes')]);
+    const [s, d, t] = await Promise.all([api('/api/status'), api('/api/storage'), api(`/api/tapes${wsQS()}`)]);
     window.__tapes = t;
     api('/api/sysload').then(renderSysload).catch(() => {});  // best-effort footer widget, never blocks the dashboard
+    $('#captureTzDefault').textContent = L('capture.tzDefault', { tz: s.default_recording_tz || 'Europe/Warsaw' });
+    if (!$('#workspacePick').options.length) loadWorkspaces();
+    $('#captureWsNote').textContent = currentWorkspace === 'default' ? '' : L('capture.wsNote', { ws: currentWorkspace });
     const c = s.camera, on = c.connected;
     $('#camPill').textContent = on ? L('cam.pill.online') : L('cam.pill.offline');
     $('#camPill').className = `inline-flex items-center rounded-full border px-3 py-1.5 text-theme-xs font-medium ${on ? 'border-success-500 text-success-600 dark:text-success-400' : 'border-error-500 text-error-600 dark:text-error-400'}`;
@@ -1063,11 +1108,24 @@ $('#start').onclick = async () => {
     const tape = $('#tape').value.trim(), manual = $('#manual').checked;
     const body = { manual_transport: manual, rewind: !manual };
     if (tape) body.tape_id = tape;
+    const tz = $('#captureTz').value;
+    if (tz) body.timezone = tz;
+    if (currentWorkspace !== 'default') body.workspace = currentWorkspace;
     await api('/api/capture/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     refresh();
   } catch (e) { alert(e.message); }
 };
 $('#cancel').onclick = () => api('/api/capture/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(refresh);
+$('#workspacePick').onchange = e => setWorkspace(e.target.value);
+$('#workspaceAdd').onclick = async () => {
+  const name = prompt(L('workspace.prompt'));
+  if (!name) return;
+  try {
+    await api('/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+    await loadWorkspaces();
+    setWorkspace(name.trim());
+  } catch (e) { alert(e.message); }
+};
 
 // ============ hash router: one section at a time, deep-linkable ============
 const SECTIONS = ['pulpit', 'zadania', 'kasety', 'duplikaty', 'timeline', 'logi', 'info'];

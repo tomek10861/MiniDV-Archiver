@@ -8,23 +8,31 @@ import shutil
 import subprocess
 import tempfile
 import time
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 NICE_PREFIX: list[str] = []  # set by process_capture(nice=True) to yield CPU/IO to a concurrent capture
+_FFMPEG_TIME_RE = re.compile(r"\btime=(\d+):(\d\d):(\d\d\.\d+)")
 
 
-def run(cmd: list[str], log=None, timeout=None) -> subprocess.CompletedProcess:
+def run(cmd: list[str], log=None, timeout=None, progress=None) -> subprocess.CompletedProcess:
     """Streams stdout+stderr and hands `log` a batch every ~0.5s (or 50 lines), rather
     than the whole output as one blob at the end — engine._log() timestamps each batch
     as it arrives, so a flood of e.g. ffmpeg decode warnings can be read against
     wall-clock time (errors packed into 20s vs. spread across an hour of tape) instead
-    of landing as one undated wall of text."""
+    of landing as one undated wall of text. `progress`, if given, is called with the
+    seconds of output ffmpeg has encoded so far — read off its own periodic
+    "time=HH:MM:SS.ms" status line, throttled to ~1/s regardless of how often ffmpeg
+    actually prints (every frame, on a fast encode)."""
     if NICE_PREFIX and cmd and cmd[0] in {"zstd", "ffmpeg", "dvgrab"}:
         cmd = NICE_PREFIX + cmd
     proc = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
     lines: list[str] = []
     pending: list[str] = []
+    last_progress = 0.0  # 0, not monotonic() -- the first matching line should report immediately, not wait a full second
     started = last_flush = time.monotonic()
 
     def flush():
@@ -41,6 +49,11 @@ def run(cmd: list[str], log=None, timeout=None) -> subprocess.CompletedProcess:
             lines.append(line)
             pending.append(line)
             elapsed = time.monotonic()
+            if progress and elapsed - last_progress >= 1.0:
+                m = _FFMPEG_TIME_RE.search(line)
+                if m:
+                    progress(int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3]))
+                    last_progress = elapsed
             if len(pending) >= 50 or elapsed - last_flush >= 0.5:
                 flush()
             if timeout and elapsed - started > timeout:
@@ -193,15 +206,38 @@ def _meta_args(meta: dict | None) -> list[str]:
     return out
 
 
+def max_plausible_year() -> int:
+    """Upper bound for a DV VAUX recording year we trust as real, not RTC garbage —
+    a tape can't have been filmed in the future. Pinned to the current year (+1 for
+    slack against a host clock a little ahead) rather than a fixed constant, which
+    would otherwise start rejecting every genuinely-dated capture the year after
+    whichever year it was hardcoded to."""
+    return datetime.now().year + 1
+
+
+def local_to_utc_iso(naive_dt: str, tz_name: str) -> str:
+    """A naive 'YYYY-MM-DDTHH:MM:SS' wall-clock string — the camera's own clock,
+    which has no timezone of its own — interpreted as tz_name and converted to a
+    real UTC instant. Falls back to the old (wrong but non-crashing) bare-UTC-label
+    behavior if tz_name isn't a real zone, rather than failing the whole encode."""
+    try:
+        local = datetime.fromisoformat(naive_dt).replace(tzinfo=ZoneInfo(tz_name))
+        return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    except (ValueError, ZoneInfoNotFoundError):
+        return naive_dt + ".000000Z"
+
+
 def scene_metadata(tape_id: str, index: int, dt: str | None, dt_source: str,
-                   tc_start: str | None, tc_end: str | None) -> dict:
-    """Container tags for a proxy so a downloaded file still says which tape it came from."""
-    valid = dt if (dt and dt[:4].isdigit() and 1990 <= int(dt[:4]) <= 2025) else None
+                   tc_start: str | None, tc_end: str | None, tz_name: str = "Europe/Warsaw") -> dict:
+    """Container tags for a proxy so a downloaded file still says which tape it came
+    from. `tz_name` is the zone the camera's clock was (almost certainly) set to —
+    the DV VAUX date has no timezone of its own (see local_to_utc_iso)."""
+    valid = dt if (dt and dt[:4].isdigit() and 1990 <= int(dt[:4]) <= max_plausible_year()) else None
     comment = f"MiniDV {tape_id} · scena {index} · TC {tc_start or '?'}-{tc_end or '?'}"
     if dt:
         comment += f" · nagrano {dt.replace('T', ' ')} ({dt_source})"
     return {"title": f"{tape_id} · scena {index:02d}", "comment": comment,
-            "creation_time": (valid + ".000000Z") if valid else None,
+            "creation_time": local_to_utc_iso(valid, tz_name) if valid else None,
             "date": valid[:10] if valid else None}
 
 
@@ -254,11 +290,31 @@ def _restore_filter_chain(vf: str, *, decimate: bool = False, stabilize: bool = 
     return chain
 
 
+def _duration_seconds(path: Path) -> float | None:
+    """Best-effort source duration for a progress fraction — None (progress just
+    never fires) rather than raising if ffprobe can't tell, e.g. a raw .dv
+    elementary stream without reliable container-level duration metadata."""
+    try:
+        info = probe_json(["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "json", str(path)])
+        d = float((info.get("format") or {}).get("duration") or 0)
+        return d if d > 0 else None
+    except (RuntimeError, ValueError, TypeError):
+        return None
+
+
+def _fraction_progress(progress, total: float | None):
+    """Wrap a 0..1 fraction callback into the seconds-based one `run()` expects —
+    or None if there's no callback or no known total to divide by."""
+    if not progress or not total:
+        return None
+    return lambda secs: progress(min(1.0, max(0.0, secs / total)))
+
+
 def restore_mp4(sources: list[Path], target: Path, *, vf: str, crf: int, preset: str,
                 decimate: bool = False, stabilize: bool = False, stabilize_shakiness: int = 8,
                 stabilize_smoothing: int = 20, upscale: bool = False, upscale_factor: int = 2,
                 upscale_scaler: str = "ewa_lanczos4sharpest",
-                meta: dict | None = None, log=None) -> None:
+                meta: dict | None = None, log=None, progress=None) -> None:
     """Denoise / repair variant — decoded from the DV master(s), filtered, re-encoded.
     `sources` are .dv.zst archive paths (raw DV concatenates, so several = one pass).
     Only ever *reads* the master; every intermediate (.src.dv, .trf) is a throwaway
@@ -284,13 +340,13 @@ def restore_mp4(sources: list[Path], target: Path, *, vf: str, crf: int, preset:
                                       stabilize_smoothing=stabilize_smoothing, stabilize_trf=trf,
                                       upscale=upscale, upscale_factor=upscale_factor,
                                       upscale_scaler=upscale_scaler)
-        cmd = ["ffmpeg", "-y", "-v", "warning", "-f", "dv", "-i", str(raw), "-map", "0:v:0", "-map", "0:a?",
+        cmd = ["ffmpeg", "-y", "-v", "warning", "-stats", "-f", "dv", "-i", str(raw), "-map", "0:v:0", "-map", "0:a?",
                "-vf", chain]
         if decimate:
             cmd += ["-fps_mode", "vfr", "-af", "aresample=async=1"]
         cmd += ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"] + _meta_args(meta) + [str(target)]
-        run(cmd, log=log)
+        run(cmd, log=log, progress=_fraction_progress(progress, _duration_seconds(raw)))
     finally:
         raw.unlink(missing_ok=True)
         trf.unlink(missing_ok=True)
@@ -298,7 +354,7 @@ def restore_mp4(sources: list[Path], target: Path, *, vf: str, crf: int, preset:
 
 
 def compress_share(source, target: Path, *, max_mb: int, crf: int, preset: str,
-                   meta: dict | None = None, log=None) -> None:
+                   meta: dict | None = None, log=None, progress=None) -> None:
     """Re-encode to ~max_mb, same resolution — for Messenger/FB. `source` is one proxy
     Path, or a list of proxies to concatenate first (in one pass, via the concat demuxer)."""
     global NICE_PREFIX
@@ -322,44 +378,59 @@ def compress_share(source, target: Path, *, max_mb: int, crf: int, preset: str,
             half_fps = f"{int(num)}/{int(den or 1) * 2}"
         except ValueError:
             half_fps = "25/1"
-        run(["ffmpeg", "-y", "-v", "warning", *in_args, "-map", "0:v:0", "-map", "0:a?",
+        run(["ffmpeg", "-y", "-v", "warning", "-stats", *in_args, "-map", "0:v:0", "-map", "0:a?",
              "-r", half_fps, "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
              "-maxrate", str(vbps), "-bufsize", str(vbps * 2), "-pix_fmt", "yuv420p",
-             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"] + _meta_args(meta) + [str(target)], log=log)
+             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"] + _meta_args(meta) + [str(target)], log=log,
+            progress=_fraction_progress(progress, dur))
     finally:
         if listing:
             listing.unlink(missing_ok=True)
         NICE_PREFIX = []
 
 
-def concat_mp4(sources: list[Path], target: Path, meta: dict | None = None, log=None) -> None:
+def concat_mp4(sources: list[Path], target: Path, meta: dict | None = None, log=None, progress=None) -> None:
     """Join several proxies (identical encode params) into one MP4 — stream copy, no re-encode."""
     global NICE_PREFIX
     NICE_PREFIX = ["nice", "-n", "8"] if shutil.which("nice") else []
     listing = target.with_suffix(".concat.txt")
     listing.write_text("".join(f"file '{Path(p).resolve()}'\n" for p in sources))
     try:
-        run(["ffmpeg", "-y", "-v", "warning", "-f", "concat", "-safe", "0", "-i", str(listing),
-             "-c", "copy", "-movflags", "+faststart"] + _meta_args(meta) + [str(target)], log=log)
+        dur = sum(d for d in (_duration_seconds(p) for p in sources) if d) or None
+        run(["ffmpeg", "-y", "-v", "warning", "-stats", "-f", "concat", "-safe", "0", "-i", str(listing),
+             "-c", "copy", "-movflags", "+faststart"] + _meta_args(meta) + [str(target)], log=log,
+            progress=_fraction_progress(progress, dur))
     finally:
         listing.unlink(missing_ok=True)
         NICE_PREFIX = []
 
 
+def build_archive(sources: list[Path], target: Path) -> None:
+    """Zip several scene proxies as separate files (not merged into one video) —
+    arcname is <tape_id>/<scene_file>, tape_id taken from each source's parent
+    directory name, so a cross-tape timeline selection never collides on names.
+    Proxies are already H.264-compressed, so the archive itself is stored, not
+    re-deflated."""
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as zf:
+        for src in sources:
+            zf.write(src, arcname=f"{src.parent.name}/{src.name}")
+
+
 def process_capture(capture: Path, tape_id: str, storage: Path, zstd_level: int, log, state,
                     capture_drop_lines: list[str] | None = None, nice: bool = False,
-                    mp4_preset: str = "medium") -> dict:
+                    mp4_preset: str = "medium", recording_tz: str = "Europe/Warsaw") -> dict:
     global NICE_PREFIX
     NICE_PREFIX = (["nice", "-n", "12", "ionice", "-c", "3"]
                    if nice and shutil.which("nice") and shutil.which("ionice") else [])
     try:
-        return _process_capture(capture, tape_id, storage, zstd_level, log, state, capture_drop_lines or [], mp4_preset)
+        return _process_capture(capture, tape_id, storage, zstd_level, log, state, capture_drop_lines or [],
+                                mp4_preset, recording_tz)
     finally:
         NICE_PREFIX = []
 
 
 def _process_capture(capture: Path, tape_id: str, storage: Path, zstd_level: int, log, state,
-                     capture_drop_lines: list[str], mp4_preset: str) -> dict:
+                     capture_drop_lines: list[str], mp4_preset: str, recording_tz: str) -> dict:
     work = capture.parent
     split_dir = work / "split"
     tape_dir = storage / "tapes" / tape_id
@@ -371,8 +442,11 @@ def _process_capture(capture: Path, tape_id: str, storage: Path, zstd_level: int
     scenes, discontinuities = split_capture(capture, split_dir, log)
     results = []
     checksum_lines = []
+    first_valid_dt = None  # first scene's own (naive, local) recording datetime -> tape.mp4's creation_time
     for index, scene in enumerate(scenes, 1):
         dt, dt_source = recording_datetime(scene, storage / "tmp")
+        if first_valid_dt is None and dt and dt[:4].isdigit() and 1990 <= int(dt[:4]) <= max_plausible_year():
+            first_valid_dt = dt
         stamp = dt.replace("T", "_").replace(":", "-") if dt else "UNKNOWN-DATE"
         scene_id = f"{index:04d}_{stamp}"
         archive = tape_dir / f"{scene_id}.dv.zst"
@@ -396,7 +470,7 @@ def _process_capture(capture: Path, tape_id: str, storage: Path, zstd_level: int
         timecode_end = last_frame_timecode(scene, frame_size, storage / "tmp")
         state("ENCODING_MP4", scene_id, total=len(scenes))
         encode_mp4(scene, proxy, interlaced, log, mp4_preset,
-                   scene_metadata(tape_id, index, dt, dt_source, timecode_start, timecode_end),
+                   scene_metadata(tape_id, index, dt, dt_source, timecode_start, timecode_end, recording_tz),
                    top_field_first=top_first)
         state("VERIFYING_MP4", scene_id, total=len(scenes))
         proxy_probe = ffprobe(proxy)
@@ -453,11 +527,12 @@ def _process_capture(capture: Path, tape_id: str, storage: Path, zstd_level: int
             # stream copy of the per-scene proxies (identical encode params) -> one
             # continuous review file the player can scrub end to end.
             first_dt = next((r["scene_id"][5:15].replace("_", "-") for r in results
-                             if r["scene_id"][5:9].isdigit() and 1990 <= int(r["scene_id"][5:9]) <= 2025), None)
+                             if r["scene_id"][5:9].isdigit() and 1990 <= int(r["scene_id"][5:9]) <= max_plausible_year()), None)
             run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy",
                  "-movflags", "+faststart"]
                 + _meta_args({"title": f"{tape_id} — cała taśma", "date": first_dt,
-                              "creation_time": f"{first_dt}T00:00:00.000000Z" if first_dt else None,
+                              "creation_time": local_to_utc_iso(first_valid_dt, recording_tz)
+                              if first_valid_dt else None,
                               "comment": f"MiniDV {tape_id} · {len(results)} scen · sklejony podgląd"})
                 + [str(tape_dir / "tape.mp4")], log=log)
             tape["proxy_full"] = {"filename": "tape.mp4", "size": (tape_dir / "tape.mp4").stat().st_size}

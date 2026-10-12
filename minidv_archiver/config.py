@@ -5,6 +5,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _default_recording_tz() -> str:
+    """The DV VAUX recording date has no timezone of its own — it's whatever the
+    camera's clock was set to, almost always local (wall-clock) time. MINIDV_TZ (or
+    the generic TZ) names that zone; a container that only has bare UTC (the common
+    Docker default, since nothing sets the host's real zone inside it) is never
+    actually where the camera was, so that specific case falls back to Warsaw."""
+    tz = os.getenv("MINIDV_DEFAULT_RECORDING_TZ") or os.getenv("TZ") or "Europe/Warsaw"
+    return "Europe/Warsaw" if tz.upper() in ("UTC", "GMT", "ETC/UTC") else tz
+
+
 @dataclass(frozen=True)
 class Config:
     storage: Path = Path(os.getenv("MINIDV_STORAGE", "/srv/minidv"))
@@ -67,6 +77,11 @@ class Config:
     # very noisy source than a softer kernel, but MiniDV footage is soft to begin
     # with and reads better sharpened.
     restore_upscale_scaler: str = os.getenv("MINIDV_UPSCALE_SCALER", "ewa_lanczos4sharpest")
+    # Timezone the camera's clock was (almost certainly) set to, for turning a naive
+    # DV VAUX recording date into a real UTC instant before it goes into an MP4's
+    # creation_time — overridable per capture (operator knows a specific tape was
+    # filmed abroad), see Engine.start()'s `timezone` param.
+    default_recording_tz: str = _default_recording_tz()
     bind: str = os.getenv("MINIDV_BIND", "0.0.0.0")
     port: int = int(os.getenv("MINIDV_PORT", "8080"))
     # How often the background pass refreshes the tape/scene index (state/jobs.db);

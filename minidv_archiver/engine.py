@@ -12,6 +12,7 @@ import uuid
 from collections.abc import MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import library_index
 from .camera import Camera, CameraError
@@ -20,6 +21,8 @@ from .media import process_capture, sha256
 from .store import TERMINAL, JobStore, now
 
 MAX_JOBS = 30
+# Human label, not a filename (unlike tape_id) -- spaces are fine (e.g. "Kasia").
+WORKSPACE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
 
 __all__ = ["Engine", "now", "TERMINAL", "MAX_JOBS"]
 
@@ -164,11 +167,12 @@ class Engine:
             job["updated_at"] = now()
             self._write_job(job)
 
-    def _new_job(self, tape_id: str, manual_transport: bool) -> dict:
+    def _new_job(self, tape_id: str, manual_transport: bool, timezone: str | None = None,
+                workspace: str = "default") -> dict:
         return {"id": uuid.uuid4().hex, "tape_id": tape_id, "stage": "capture", "status": "CREATED",
                 "created_at": now(), "updated_at": now(), "current_scene": None, "dropped_frames": 0,
                 "logs": "", "history": [], "manual_transport": manual_transport, "error": None,
-                "rewind": True, "duration": None}
+                "rewind": True, "duration": None, "timezone": timezone, "workspace": workspace}
 
     def jobs_list(self) -> list[dict]:
         return self.store.list_jobs()
@@ -206,17 +210,28 @@ class Engine:
         except Exception:  # noqa: BLE001
             pass
 
-    def tapes(self) -> list[dict]:
-        return library_index.tapes_list(self.config, self.store)
+    def tapes(self, workspace: str | None = None) -> list[dict]:
+        return library_index.tapes_list(self.config, self.store, workspace)
 
-    def timeline(self) -> dict:
-        return library_index.timeline(self.config, self.store)
+    def timeline(self, workspace: str | None = None) -> dict:
+        return library_index.timeline(self.config, self.store, workspace)
 
-    def timeline_month(self, year: int, month: int) -> list[dict]:
-        return library_index.month_scenes(self.config, self.store, year, month)
+    def timeline_month(self, year: int, month: int, workspace: str | None = None) -> list[dict]:
+        return library_index.month_scenes(self.config, self.store, year, month, workspace)
 
-    def duplicates(self) -> dict:
-        return library_index.duplicates(self.config, self.store)
+    def duplicates(self, workspace: str | None = None) -> dict:
+        return library_index.duplicates(self.config, self.store, workspace)
+
+    # ---- workspaces: operator-created labels, "default" always implicit ----
+    def list_workspaces(self) -> list[str]:
+        return ["default"] + [n for n in self.store.list_workspaces() if n != "default"]
+
+    def create_workspace(self, name: str) -> dict:
+        name = (name or "").strip()
+        if not name or not WORKSPACE_RE.fullmatch(name):
+            raise ValueError("nieprawidłowa nazwa workspace")
+        self.store.ensure_workspace(name)
+        return {"name": name}
 
     def dismiss_duplicate_group(self, members: list[dict]) -> dict:
         """Operator says this group is a false positive — persist every pairwise
@@ -286,20 +301,24 @@ class Engine:
         return {"tape_id": tape_id, "updated": updated}
 
     # ---- backfill creation_time/date onto MP4s that never got it ----------
-    def start_metadata_backfill(self, tape_id: str) -> dict:
+    def start_metadata_backfill(self, tape_id: str, force: bool = False) -> dict:
         self._tape_dir(tape_id)
-        return self._enqueue_build(tape_id, "METABACKFILL", [tape_id], "backfill_meta",
-                                   f"{tape_id} · uzupełnienie daty nagrania w MP4")
+        return self._enqueue_build(tape_id, "METABACKFILL-F" if force else "METABACKFILL", [tape_id],
+                                   "backfill_meta", f"{tape_id} · uzupełnienie daty nagrania w MP4")
 
-    def _backfill_metadata_tape(self, tape_id: str) -> dict:
+    def _backfill_metadata_tape(self, tape_id: str, force: bool = False) -> dict:
         """Writes creation_time/date onto scene MP4s (and tape.mp4) that are missing
         it — from the recording datetime already sitting in each scene's .json — via
         a stream-copy remux (media.remux_metadata): no re-encode, master untouched.
-        Keeps tape.sha256 truthful by recomputing the checksum of anything it edits."""
-        from .media import ffprobe, remux_metadata, scene_metadata, sha256 as file_sha256
+        Keeps tape.sha256 truthful by recomputing the checksum of anything it edits.
+        force=True also *recomputes* an existing tag instead of skipping it — for
+        tapes processed before local_to_utc_iso existed, whose creation_time was
+        wrongly stamped as if the camera's local time were already UTC."""
+        from .media import ffprobe, local_to_utc_iso, max_plausible_year, remux_metadata, scene_metadata, sha256 as file_sha256
         d = self.config.tapes / tape_id
         if d.parent != self.config.tapes or not (d / "tape.json").exists():
             return {"tape_id": tape_id, "updated": 0}
+        tz_name = self.config.default_recording_tz
         updated, first_dt, hashes = 0, None, {}
         for sj in sorted(d.glob("[0-9]*.json")):
             try:
@@ -307,19 +326,19 @@ class Engine:
             except (OSError, ValueError):
                 continue
             dt = (meta.get("recording") or {}).get("datetime")
-            valid = dt and dt[:4].isdigit() and 1990 <= int(dt[:4]) <= 2025
+            valid = dt and dt[:4].isdigit() and 1990 <= int(dt[:4]) <= max_plausible_year()
             if valid and first_dt is None:
                 first_dt = dt
             proxy_name = ((meta.get("files") or {}).get("proxy") or {}).get("filename") or f"{sj.stem}.mp4"
             proxy = d / proxy_name
             if not valid or not proxy.exists():
                 continue
-            if ffprobe(proxy).get("format", {}).get("tags", {}).get("creation_time"):
+            if ffprobe(proxy).get("format", {}).get("tags", {}).get("creation_time") and not force:
                 continue
             tc = meta.get("timecode") or {}
             tags = scene_metadata(tape_id, meta.get("scene_index", 1), dt,
                                   (meta.get("recording") or {}).get("datetime_source", "DV_VAUX"),
-                                  tc.get("start"), tc.get("end"))
+                                  tc.get("start"), tc.get("end"), tz_name)
             remux_metadata(proxy, tags)
             meta.setdefault("files", {}).setdefault("proxy", {})["sha256"] = file_sha256(proxy)
             meta["files"]["proxy"]["size"] = proxy.stat().st_size
@@ -329,10 +348,10 @@ class Engine:
             updated += 1
         tape_mp4 = d / "tape.mp4"
         if (tape_mp4.exists() and first_dt
-                and not ffprobe(tape_mp4).get("format", {}).get("tags", {}).get("creation_time")):
+                and (force or not ffprobe(tape_mp4).get("format", {}).get("tags", {}).get("creation_time"))):
             tape_meta = json.loads((d / "tape.json").read_text())
             remux_metadata(tape_mp4, {"title": f"{tape_id} — cała taśma", "date": first_dt[:10],
-                                      "creation_time": first_dt + ".000000Z",
+                                      "creation_time": local_to_utc_iso(first_dt, tz_name),
                                       "comment": f"MiniDV {tape_id} · {tape_meta.get('scene_count', 0)} scen · sklejony podgląd"})
             updated += 1
         if hashes:
@@ -361,7 +380,8 @@ class Engine:
             if existing and (existing["status"] in ("QUEUED", "RUNNING")
                              or (existing["status"] == "READY" and Path(existing["path"]).exists())):
                 return dict(existing)
-            out = self.config.storage / "tmp" / "share" / f"{tape_id}_{token}.mp4"
+            ext = ".zip" if mode == "archive" else ".mp4"
+            out = self.config.storage / "tmp" / "share" / f"{tape_id}_{token}{ext}"
             build = {"key": key, "token": token, "tape_id": tape_id, "mode": mode, "title": title,
                      "sources": [str(p) for p in sources], "status": "QUEUED", "path": str(out),
                      "size": None, "error": None, "stabilize": stabilize, "upscale": upscale}
@@ -409,16 +429,28 @@ class Engine:
         return self._enqueue_build(tape_id, scene_id or "TAPE", [src], "share", f"{tape_id}{label}")
 
     def start_selection(self, tape_id: str, scene_ids: list[str], share: bool = False,
-                        restore: bool = False, stabilize: bool = False, upscale: bool = False) -> dict:
+                        restore: bool = False, stabilize: bool = False, upscale: bool = False,
+                        archive: bool = False) -> dict:
         """Join several scenes into one MP4 — stream copy, ~FB-size re-encode, or a
-        repair pass from those scenes' DV masters (restore=True)."""
+        repair pass from those scenes' DV masters (restore=True) — or, with
+        archive=True, skip merging entirely and zip each scene's proxy as its own
+        file (restore/stabilize/upscale don't apply to that mode)."""
         d = self._tape_dir(tape_id)
         ids = sorted({s for s in scene_ids if re.fullmatch(r"[0-9A-Za-z._-]{1,80}", s or "")})
+        if not ids:
+            raise FileNotFoundError("pusta lista scen")
+        if archive:
+            srcs = [d / f"{s}.mp4" for s in ids]
+            missing = [p.name for p in srcs if not p.exists()]
+            if missing:
+                raise FileNotFoundError("brak scen: " + ", ".join(missing))
+            token = "SEL-" + hashlib.sha1("\n".join(ids).encode()).hexdigest()[:12] + "-ZIP"
+            return self._enqueue_build(tape_id, token, srcs, "archive", f"{tape_id} · {len(ids)} scen (ZIP)")
         suffix = ".dv.zst" if restore else ".mp4"
         srcs = [d / f"{s}{suffix}" for s in ids]
         missing = [p.name for p in srcs if not p.exists()]
-        if not srcs or missing:
-            raise FileNotFoundError("brak scen: " + ", ".join(missing) if missing else "pusta lista scen")
+        if missing:
+            raise FileNotFoundError("brak scen: " + ", ".join(missing))
         tag = self._restore_tag(stabilize, upscale) if restore else "-FB" if share else ""
         token = "SEL-" + hashlib.sha1("\n".join(ids).encode()).hexdigest()[:12] + tag
         mode = "restore" if restore else "share" if share else "concat"
@@ -427,13 +459,16 @@ class Engine:
 
     PLAYLIST_BUCKET = "_playlist"
 
-    def start_playlist(self, items: list[dict], title: str | None = None) -> dict:
+    def start_playlist(self, items: list[dict], title: str | None = None, restore: bool = False,
+                       stabilize: bool = False, upscale: bool = False, archive: bool = False) -> dict:
         """Join scenes picked from possibly *different* tapes (the timeline's
         cross-tape multi-select) into one MP4 — same stream-copy concat as
-        start_selection, just not confined to one tape's directory. Unlike
-        start_selection this does NOT sort scenes by id: order is the caller's
-        (the timeline sends its already time-sorted scene order), since here
-        scene_index carries no cross-tape meaning to sort by."""
+        start_selection, just not confined to one tape's directory — or repair
+        from their DV masters (restore=True), or skip merging and zip each
+        scene's proxy as its own file (archive=True). Unlike start_selection this
+        does NOT sort scenes by id: order is the caller's (the timeline sends its
+        already time-sorted scene order), since here scene_index carries no
+        cross-tape meaning to sort by."""
         pairs, seen = [], set()
         for it in items or []:
             tid, sid = (it or {}).get("tape_id"), (it or {}).get("scene_id")
@@ -447,16 +482,21 @@ class Engine:
             pairs.append((tid, sid))
         if not pairs:
             raise FileNotFoundError("pusta lista scen")
+        suffix = ".dv.zst" if (restore and not archive) else ".mp4"
         srcs = []
         for tid, sid in pairs:
             d = self._tape_dir(tid)
-            p = d / f"{sid}.mp4"
+            p = d / f"{sid}{suffix}"
             if not p.exists():
-                raise FileNotFoundError(f"nie ma pliku {tid}/{sid}.mp4")
+                raise FileNotFoundError(f"nie ma pliku {tid}/{sid}{suffix}")
             srcs.append(p)
-        token = "PL-" + hashlib.sha1("\n".join(f"{t}/{s}" for t, s in pairs).encode()).hexdigest()[:12]
+        tag = "-ZIP" if archive else (self._restore_tag(stabilize, upscale) if restore else "")
+        token = "PL-" + hashlib.sha1("\n".join(f"{t}/{s}" for t, s in pairs).encode()).hexdigest()[:12] + tag
         ttl = title or f"Wybrane sceny ({len(pairs)})"
-        return self._enqueue_build(self.PLAYLIST_BUCKET, token, srcs, "concat", ttl)
+        mode = "archive" if archive else "restore" if restore else "concat"
+        return self._enqueue_build(self.PLAYLIST_BUCKET, token, srcs, mode, ttl,
+                                   stabilize=stabilize if (restore and not archive) else False,
+                                   upscale=upscale if (restore and not archive) else False)
 
     def playlist_status(self, token: str) -> dict:
         return self.compress_status(self.PLAYLIST_BUCKET, token)
@@ -478,19 +518,26 @@ class Engine:
                     continue
             out = Path(build["path"])
             try:
-                from .media import compress_share, concat_mp4, restore_mp4
+                from .media import build_archive, compress_share, concat_mp4, restore_mp4
                 out.parent.mkdir(parents=True, exist_ok=True)
                 self._prune_share()
                 self.store.prune_builds()
                 srcs = [Path(s) for s in build["sources"]]
+
+                def on_progress(frac: float, _build=build) -> None:
+                    _build["progress"] = round(min(1.0, max(0.0, frac)), 4)
+                    self.store.put_build(_build)
+
                 if build["mode"] == "reprobe":
                     self._reprobe_tape(build["sources"][0], force=build["token"].endswith("-F"))
                 elif build["mode"] == "backfill_meta":
-                    self._backfill_metadata_tape(build["sources"][0])
+                    self._backfill_metadata_tape(build["sources"][0], force=build["token"].endswith("-F"))
                 elif build["mode"] == "delete":
                     self.delete_scenes(build["tape_id"], build["sources"], _from_build=True)
                 elif build["mode"] == "concat":
-                    concat_mp4(srcs, out, meta={"title": build["title"]}, log=lambda m: None)
+                    concat_mp4(srcs, out, meta={"title": build["title"]}, log=lambda m: None, progress=on_progress)
+                elif build["mode"] == "archive":
+                    build_archive(srcs, out)
                 elif build["mode"] == "restore":
                     restore_mp4(srcs, out, vf=self.config.restore_filters, crf=self.config.restore_crf,
                                 preset=self.config.restore_preset, decimate=self.config.restore_decimate,
@@ -500,11 +547,11 @@ class Engine:
                                 upscale=bool(build.get("upscale")),
                                 upscale_factor=self.config.restore_upscale_factor,
                                 upscale_scaler=self.config.restore_upscale_scaler,
-                                meta={"title": build["title"]}, log=lambda m: None)
+                                meta={"title": build["title"]}, log=lambda m: None, progress=on_progress)
                 else:
                     compress_share(srcs if len(srcs) > 1 else srcs[0], out, max_mb=self.config.share_max_mb,
                                    crf=self.config.share_crf, preset=self.config.share_preset,
-                                   meta={"title": build["title"]}, log=lambda m: None)
+                                   meta={"title": build["title"]}, log=lambda m: None, progress=on_progress)
                 build.update(status="READY",
                              size=None if build["mode"] in ("reprobe", "backfill_meta", "delete")
                              else out.stat().st_size)
@@ -710,7 +757,7 @@ class Engine:
 
     # ---- capture --------------------------------------------------------
     def start(self, tape_id: str | None = None, rewind: bool = True, duration: int | None = None,
-              manual_transport: bool = False) -> dict:
+              manual_transport: bool = False, timezone: str | None = None, workspace: str | None = None) -> dict:
         manual_transport, rewind = self._compat_override(self.config.allow_fcp, manual_transport, rewind)
         with self.lock:
             if self.capture_tape or self.store.capture_job():
@@ -720,7 +767,18 @@ class Engine:
                 raise ValueError("invalid tape_id")
             if (self.config.tapes / tape_id).exists() or (self.config.working / tape_id).exists() or tape_id in self.jobs:
                 raise FileExistsError(f"tape_id already exists: {tape_id}")
-            job = self._new_job(tape_id, manual_transport)
+            timezone = timezone or None
+            if timezone:
+                try:
+                    ZoneInfo(timezone)
+                except ZoneInfoNotFoundError:
+                    raise ValueError(f"nieznana strefa czasowa: {timezone}") from None
+            workspace = (workspace or "").strip() or "default"
+            if not WORKSPACE_RE.fullmatch(workspace):
+                raise ValueError("nieprawidłowa nazwa workspace")
+            if workspace != "default":
+                self.store.ensure_workspace(workspace)
+            job = self._new_job(tape_id, manual_transport, timezone, workspace)
             job["rewind"], job["duration"] = rewind, duration
             self.store.put_job(job)
             # role "all": run the capture in this process now.
@@ -1013,12 +1071,14 @@ class Engine:
                                    lambda m: self._log(job, m),
                                    lambda s, sid=None, total=None: self._set(job, s, sid, total=total),
                                    meta["drop_lines"], nice=self.config.nice_processing,
-                                   mp4_preset=self.config.mp4_preset)
+                                   mp4_preset=self.config.mp4_preset,
+                                   recording_tz=job.get("timezone") or self.config.default_recording_tz)
             tape_path = self.config.tapes / tape_id / "tape.json"
             tape["capture_started_at"] = meta["started_at"]
             tape["capture_completed_at"] = now()
             tape["camera"] = meta["camera"]
             tape["capture_dropped_frames"] = meta["drops"]
+            tape["workspace"] = job.get("workspace") or "default"
             tape_path.write_text(json.dumps(tape, indent=2) + "\n")
             checksum_path = tape_path.parent / "tape.sha256"
             lines = [line for line in checksum_path.read_text().splitlines() if not line.endswith("  tape.json")]
@@ -1053,7 +1113,8 @@ class Engine:
         result = process_capture(capture, tape_id, self.config.storage, self.config.zstd_level,
                                  lambda m: self._log(job, m),
                                  lambda s, sid=None, total=None: self._set(job, s, sid, total=total),
-                                 nice=self.config.nice_processing, mp4_preset=self.config.mp4_preset)
+                                 nice=self.config.nice_processing, mp4_preset=self.config.mp4_preset,
+                                 recording_tz=self.config.default_recording_tz)
         capture.unlink()
         shutil.rmtree(work, ignore_errors=True)
         self._reindex(tape_id)

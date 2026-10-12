@@ -190,3 +190,12 @@ def test_dismiss_duplicate_pair_is_order_independent_and_idempotent(tmp_path):
     assert s.dismissed_duplicate_pairs() == {("A/0001_s", "B/0001_s")}
     s.dismiss_duplicate_pair("A/0001_s", "B/0001_s")       # dismissing again is a no-op, not an error
     assert s.dismissed_duplicate_pairs() == {("A/0001_s", "B/0001_s")}
+
+
+def test_ensure_workspace_is_idempotent_and_ordered_by_creation(tmp_path):
+    s = _store(tmp_path)
+    assert s.list_workspaces() == []
+    s.ensure_workspace("Kasia")
+    s.ensure_workspace("Piotr")
+    s.ensure_workspace("Kasia")  # already exists -> no-op, not a duplicate or an error
+    assert s.list_workspaces() == ["Kasia", "Piotr"]

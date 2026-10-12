@@ -62,6 +62,10 @@ CREATE TABLE IF NOT EXISTS dup_dismissed (
     dismissed_at TEXT,
     PRIMARY KEY (scene_a, scene_b)
 );
+CREATE TABLE IF NOT EXISTS workspaces (
+    name       TEXT PRIMARY KEY,
+    created_at TEXT
+);
 """
 
 
@@ -356,6 +360,19 @@ class JobStore:
     def dismissed_duplicate_pairs(self) -> set[tuple[str, str]]:
         with self._lock:
             return {(r[0], r[1]) for r in self._conn.execute("SELECT scene_a, scene_b FROM dup_dismissed")}
+
+    # ---- workspaces: operator-created labels so several people's captures ----
+    # don't mix in one view. "default" always exists implicitly (every tape
+    # without one belongs to it) — it never needs a row here.
+    def ensure_workspace(self, name: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO workspaces (name, created_at) VALUES (?,?) ON CONFLICT(name) DO NOTHING",
+                (name, now()))
+
+    def list_workspaces(self) -> list[str]:
+        with self._lock:
+            return [r[0] for r in self._conn.execute("SELECT name FROM workspaces ORDER BY created_at")]
 
     # ---- camera transport requests (api -> grabber) --------------------
     def enqueue_cam_command(self, name: str) -> int:

@@ -8,7 +8,7 @@ import subprocess
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .config import Config
 from .engine import Engine
@@ -73,6 +73,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = unquote(urlparse(self.path).path)
+        workspace = (parse_qs(urlparse(self.path).query).get("workspace") or [None])[0]
         try:
             if path == "/api/capture/preview.mjpg":
                 return self.stream_preview()
@@ -80,7 +81,8 @@ class Handler(BaseHTTPRequestHandler):
                 info = ENGINE.camera.info()  # sysfs only, never sends AV/C
                 camera = {**info, "transport": "CONNECTED" if info["connected"] else "NO_CAMERA", "timecode": None,
                           "avc_enabled": CONFIG.allow_fcp, "mode": "auto" if CONFIG.allow_fcp else "manual"}
-                return self.json({"camera": camera, "job": ENGINE.current_job(), **ENGINE.status()})
+                return self.json({"camera": camera, "job": ENGINE.current_job(),
+                                  "default_recording_tz": CONFIG.default_recording_tz, **ENGINE.status()})
             if path == "/api/storage":
                 return self.json(ENGINE.storage())
             if path == "/api/sysload":
@@ -91,15 +93,17 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/jobs/"):
                 job = ENGINE.job_by_ref(path.rsplit("/", 1)[-1])
                 return self.json(job or {"error": "not found"}, 200 if job else 404)
+            if path == "/api/workspaces":
+                return self.json(ENGINE.list_workspaces())
             if path == "/api/tapes":
-                return self.json(ENGINE.tapes())
+                return self.json(ENGINE.tapes(workspace))
             if path == "/api/timeline":
-                return self.json(ENGINE.timeline())
+                return self.json(ENGINE.timeline(workspace))
             if path == "/api/duplicates":
-                return self.json(ENGINE.duplicates())
+                return self.json(ENGINE.duplicates(workspace))
             parts = path.strip("/").split("/")
             if len(parts) == 4 and parts[:2] == ["api", "timeline"] and parts[2].isdigit() and parts[3].isdigit():
-                return self.json(ENGINE.timeline_month(int(parts[2]), int(parts[3])))
+                return self.json(ENGINE.timeline_month(int(parts[2]), int(parts[3]), workspace))
             if len(parts) >= 5 and parts[:2] == ["api", "tapes"] and parts[3] == "files":
                 target = archive_file(parts[2], "/".join(parts[4:]))
                 if not target:
@@ -107,9 +111,11 @@ class Handler(BaseHTTPRequestHandler):
                 forced = urlparse(self.path).query == "dl=1" or "&dl=1" in self.path or "?dl=1" in self.path
                 return self.send_file(target, inline=target.suffix.lower() in INLINE_SUFFIXES and not forced)
             if len(parts) == 4 and parts[:3] == ["api", "playlist", "build"]:
-                token = parts[3].removesuffix(".mp4")
+                name = parts[3]
+                ext = ".zip" if name.endswith(".zip") else ".mp4"
+                token = name.removesuffix(ext)
                 job = ENGINE.playlist_status(token)
-                disk = CONFIG.storage / "tmp" / "share" / f"{ENGINE.PLAYLIST_BUCKET}_{token}.mp4"
+                disk = CONFIG.storage / "tmp" / "share" / f"{ENGINE.PLAYLIST_BUCKET}_{token}{ext}"
                 if job.get("status") == "READY" and job.get("path") and Path(job["path"]).exists():
                     return self.send_file(Path(job["path"]), inline=False)
                 if job.get("status") != "RUNNING" and job.get("status") != "QUEUED" and disk.exists():
@@ -117,11 +123,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"error": "nagranie jeszcze się przygotowuje "
                                   "(albo wygasło — zbuduj ponownie)", "state": job.get("status")}, 409)
             if len(parts) >= 5 and parts[:2] == ["api", "tapes"] and parts[3] == "compressed":
-                token = parts[4].removesuffix(".mp4")
+                name = parts[4]
+                ext = ".zip" if name.endswith(".zip") else ".mp4"
+                token = name.removesuffix(ext)
                 if token in ("TAPE", "tape"):
                     token = "TAPE"
                 job = ENGINE.compress_status(parts[2], token)
-                disk = CONFIG.storage / "tmp" / "share" / f"{parts[2]}_{token}.mp4"
+                disk = CONFIG.storage / "tmp" / "share" / f"{parts[2]}_{token}{ext}"
                 if job.get("status") == "READY" and job.get("path") and Path(job["path"]).exists():
                     return self.send_file(Path(job["path"]), inline=False)
                 if job.get("status") != "RUNNING" and job.get("status") != "QUEUED" and disk.exists():
@@ -184,15 +192,21 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/capture/start":
                 data = self.body()
                 return self.json(ENGINE.start(data.get("tape_id"), data.get("rewind", True), data.get("duration"),
-                                              data.get("manual_transport", False)), 202)
+                                              data.get("manual_transport", False), data.get("timezone"),
+                                              data.get("workspace")), 202)
             if path == "/api/capture/stop":
                 return self.json(ENGINE.stop(self.body().get("tape_id")))
+            if path == "/api/workspaces":
+                return self.json(ENGINE.create_workspace(self.body().get("name", "")), 201)
             if path == "/api/playlist/build":
                 data = self.body()
                 items = data.get("items")
                 if not isinstance(items, list) or not items:
                     return self.json({"error": "pusta lista scen"}, 400)
-                return self.json(ENGINE.start_playlist(items, data.get("title")), 202)
+                return self.json(ENGINE.start_playlist(items, data.get("title"), restore=bool(data.get("restore")),
+                                                        stabilize=bool(data.get("stabilize")),
+                                                        upscale=bool(data.get("upscale")),
+                                                        archive=bool(data.get("archive"))), 202)
             if path == "/api/duplicates/dismiss":
                 members = self.body().get("members")
                 if not isinstance(members, list) or len(members) < 2:
@@ -211,13 +225,14 @@ class Handler(BaseHTTPRequestHandler):
                 scenes = data.get("scenes")
                 if isinstance(scenes, list) and scenes:
                     return self.json(ENGINE.start_selection(cparts[2], scenes, bool(data.get("share")),
-                                                            restore=restore, stabilize=stabilize, upscale=upscale), 202)
+                                                            restore=restore, stabilize=stabilize, upscale=upscale,
+                                                            archive=bool(data.get("archive"))), 202)
                 return self.json(ENGINE.start_compress(cparts[2], None, restore=restore,
                                                         stabilize=stabilize, upscale=upscale), 202)
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "reprobe":
                 return self.json(ENGINE.start_reprobe(cparts[2], bool(self.body().get("force"))), 202)
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "backfill-meta":
-                return self.json(ENGINE.start_metadata_backfill(cparts[2]), 202)
+                return self.json(ENGINE.start_metadata_backfill(cparts[2], bool(self.body().get("force"))), 202)
             if len(cparts) == 5 and cparts[:2] == ["api", "tapes"] and cparts[3:5] == ["scenes", "delete"]:
                 scenes = self.body().get("scenes")
                 if not isinstance(scenes, list) or not scenes:

@@ -141,17 +141,27 @@ def _ensure(config, store) -> None:
         reindex(config, store)
 
 
-def tapes_list(config, store) -> list[dict]:
+def _in_workspace(doc: dict, workspace: str | None) -> bool:
+    """workspace=None -> no filter (every caller that wants isolation passes one
+    explicitly; the api itself stays usable un-filtered). A tape with no workspace
+    field — everything captured before this existed — belongs to "default"."""
+    return workspace is None or (doc.get("workspace") or "default") == workspace
+
+
+def tapes_list(config, store, workspace: str | None = None) -> list[dict]:
     _ensure(config, store)
-    return [{k: v for k, v in doc.items() if not k.startswith("_")} for doc in store.list_index()]
+    return [{k: v for k, v in doc.items() if not k.startswith("_")}
+            for doc in store.list_index() if _in_workspace(doc, workspace)]
 
 
-def timeline(config, store) -> dict:
+def timeline(config, store, workspace: str | None = None) -> dict:
     """Year → month aggregates for the iPhone-style browser (no scene lists here)."""
     _ensure(config, store)
     years: dict[int, dict] = {}
     undated = 0
     for doc in store.list_index():
+        if not _in_workspace(doc, workspace):
+            continue
         tid = doc.get("tape_id")
         for s in (doc.get("_index") or {}).get("scenes") or []:
             dt = s.get("date")
@@ -216,12 +226,16 @@ def _same_recording(a: dict, b: dict) -> bool:
     return False
 
 
-def duplicates(config, store) -> dict:
+def duplicates(config, store, workspace: str | None = None) -> dict:
     """Group scenes across tapes that look like the same recording, ordered best-first
-    by error score (dropped + discontinuities + decode errors). Nothing is deleted."""
+    by error score (dropped + discontinuities + decode errors). Nothing is deleted.
+    Filtering by workspace isn't just cosmetic here: it also keeps two different
+    people's unrelated footage from ever being compared against each other."""
     _ensure(config, store)
     scenes, unprobed = [], 0
     for doc in store.list_index():
+        if not _in_workspace(doc, workspace):
+            continue
         tid = doc.get("tape_id")
         for s in (doc.get("_index") or {}).get("scenes") or []:
             fp = s.get("fingerprint") or {}
@@ -276,10 +290,12 @@ def duplicates(config, store) -> dict:
     return {"groups": out, "unprobed": unprobed, "scenes_indexed": len(scenes)}
 
 
-def month_scenes(config, store, year: int, month: int) -> list[dict]:
+def month_scenes(config, store, year: int, month: int, workspace: str | None = None) -> list[dict]:
     _ensure(config, store)
     res = []
     for doc in store.list_index():
+        if not _in_workspace(doc, workspace):
+            continue
         tid, label = doc.get("tape_id"), doc.get("label")
         for s in (doc.get("_index") or {}).get("scenes") or []:
             dt = s.get("date")

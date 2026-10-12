@@ -151,6 +151,7 @@ Przy Dockerze wpisz je do `.env` (compose je czyta). Przy systemd idą do
 | `MINIDV_CAMERA_GUID` | *(auto)* | puste = pierwsze urządzenie taśmowe AV/C na magistrali; ustaw GUID, gdy podłączonych jest kilka |
 | `MINIDV_ALLOW_FCP` | `1` | `1` = transport przez AV/C; `0` = ręczne PLAY/STOP na kamerze |
 | `MINIDV_MP4_PRESET` | `medium` | preset x264 dla proxy (`veryfast` ~4–6× szybszy, większe pliki) |
+| `MINIDV_DEFAULT_RECORDING_TZ` | `Europe/Warsaw` | strefa, na którą był ustawiony zegar kamery — do zamiany daty z DV VAUX na prawdziwy `creation_time` UTC; nadpisywalne per zgranie |
 | `MINIDV_SHARE_MAX_MB` | `90` | docelowy rozmiar re-enkodu „udostępnij" |
 | `MINIDV_RESTORE_FILTERS` | `bwdif…,atadenoise,deblock…` | łańcuch `-vf` ffmpeg dla wariantu „napraw" |
 | `MINIDV_STABILIZE_SHAKINESS` | `8` | 1–10, jak mocno przebieg 1 szuka trzęsienia (domyślnie vidstab ma `5`) |
@@ -204,6 +205,7 @@ JSON po HTTP (serwuje proces `api`; `nginx` proxuje do niego `/api`).
 `/api/tapes` (z indeksu) · `/api/tapes/{id}` · `/api/tapes/{id}/scenes` ·
 `/api/tapes/{id}/scenes/{scene_id}` ·
 `/api/timeline` · `/api/timeline/{rok}/{miesiąc}` · `/api/duplicates` ·
+`/api/workspaces` — lista nazw workspace, `"default"` zawsze pierwszy ·
 `/api/tapes/{id}/files/{name}` (pliki archiwum; `Range` dla MP4; `?dl=1` wymusza
 pobranie) ·
 `/api/tapes/{id}/compressed/{token}.mp4` — serwuje build na żądanie; `token` to
@@ -211,20 +213,42 @@ pobranie) ·
 +upscale), albo `SEL-<hash>[-FB|-RES[-STAB][-UP]]` ·
 `/api/playlist/build/{token}.mp4` — serwuje build złożony ze scen z kilku kaset (niżej).
 
+`/api/tapes`, `/api/timeline`, `/api/timeline/{rok}/{miesiąc}` i `/api/duplicates`
+przyjmują `?workspace=<nazwa>`, zawężając wynik do kaset zgranych w tym
+workspace (więc materiał jednej osoby nigdy nie trafi na listę, oś czasu ani do
+wykrywania duplikatów razem z materiałem innej); pomiń dla `"default"`.
+
 **`POST`**
-`/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?}` ·
+`/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?, timezone?, workspace?}` —
+`timezone` to strefa IANA (np. `Europe/London`) dla taśmy nagranej w innej strefie
+niż `MINIDV_DEFAULT_RECORDING_TZ`; pomiń, żeby użyć tej domyślnej ·
+`workspace` oznacza zgraną taśmę tak, by była widoczna tylko na liście/osi
+czasu/w duplikatach razem z innymi z tego samego workspace; pomiń dla `"default"` ·
+`/api/workspaces` `{name}` — tworzy nowy (na razie pusty, do pierwszego zgrania)
+workspace ·
 `/api/capture/stop` `{tape_id?}` ·
 `/api/tape/{play,stop,rewind}` (409, jeśli `MINIDV_ALLOW_FCP` != 1) ·
 `/api/tapes/{id}/scenes/{scene}/compress` `{restore?, stabilize?, upscale?}` ·
-`/api/tapes/{id}/compress` `{scenes?, share?, restore?, stabilize?, upscale?}`
-(brak body = cała taśma; stabilize/upscale działają tylko z `restore: true`) ·
+`/api/tapes/{id}/compress` `{scenes?, share?, restore?, stabilize?, upscale?, archive?}`
+(brak body = cała taśma; stabilize/upscale działają tylko z `restore: true`;
+`archive: true` nie łączy scen, tylko pakuje proxy każdej zaznaczonej sceny
+osobno do ZIP — wymaga `scenes`, `share`/`restore`/`stabilize`/`upscale` są
+wtedy ignorowane — pobierz z `/compressed/{token}.zip` zamiast `.mp4`) ·
 `/api/tapes/{id}/rename` `{new_id}` ·
 `/api/tapes/{id}/meta` `{label?, recording_date?}` ·
 `/api/tapes/{id}/reprobe` `{force?}` (sonda jakości / odcisk) ·
-`/api/playlist/build` `{items: [{tape_id, scene_id}, ...], title?}` — złącza sceny
-z jednej lub kilku kaset (w podanej kolejności) w jedno MP4, np. z zaznaczenia na osi
-czasu. Wywołaj ponownie z tym samym body, żeby odpytać status
-(`QUEUED`/`RUNNING`/`READY`) — ten sam wzorzec co pozostałe buildy na żądanie ·
+`/api/tapes/{id}/backfill-meta` `{force?}` — dopisuje `creation_time`/`date` do
+scen MP4 (i `tape.mp4`), które go nie mają, z daty nagrania już zapisanej w
+`.json` każdej sceny; `force: true` przelicza też sceny, które już mają tag
+(np. żeby naprawić taśmę przetworzoną przed poprawką strefy czasowej) ·
+`/api/playlist/build` `{items: [{tape_id, scene_id}, ...], title?, restore?,
+stabilize?, upscale?, archive?}` — złącza sceny z jednej lub kilku kaset (w
+podanej kolejności) w jedno MP4, np. z zaznaczenia na osi czasu;
+`restore`/`stabilize`/`upscale` naprawiają je z masterów DV zamiast zwykłego
+złączenia; `archive: true` zamiast tego pakuje proxy każdej sceny osobno do
+ZIP (pobierz z `/build/{token}.zip`). Wywołaj ponownie z tym samym body, żeby
+odpytać status (`QUEUED`/`RUNNING`/`READY`) — ten sam wzorzec co pozostałe
+buildy na żądanie ·
 `/api/tapes/{id}/scenes/delete` `{scenes: [...]}` — usuwanie scen przebudowuje
 proxy całej taśmy, więc to też leci w tle jako build (odpytuj tak samo) zamiast
 blokować żądanie, co przy kasecie z setkami scen potrafiło wywalić timeout.

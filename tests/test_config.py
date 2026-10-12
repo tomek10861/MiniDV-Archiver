@@ -21,5 +21,21 @@ def test_camera_guid_defaults_to_autodetect(monkeypatch):
     assert _reload(monkeypatch, MINIDV_CAMERA_GUID="0x0800460101B2603D").camera_guid == "0800460101b2603d"
 
 
+def test_default_recording_tz_corrects_bare_utc_to_warsaw(monkeypatch):
+    """The camera's clock is local time, never UTC -- a container that only has
+    bare UTC (the common Docker default; nothing else sets it inside one) is never
+    actually where the camera was, so that specific reading gets corrected."""
+    assert _reload(monkeypatch, MINIDV_DEFAULT_RECORDING_TZ=None, TZ=None).default_recording_tz == "Europe/Warsaw"
+    assert _reload(monkeypatch, MINIDV_DEFAULT_RECORDING_TZ=None, TZ="UTC").default_recording_tz == "Europe/Warsaw"
+    assert _reload(monkeypatch, MINIDV_DEFAULT_RECORDING_TZ=None, TZ="Etc/UTC").default_recording_tz == "Europe/Warsaw"
+
+
+def test_default_recording_tz_honors_an_explicit_non_utc_setting(monkeypatch):
+    assert _reload(monkeypatch, MINIDV_DEFAULT_RECORDING_TZ=None, TZ="America/New_York").default_recording_tz \
+        == "America/New_York"
+    assert _reload(monkeypatch, MINIDV_DEFAULT_RECORDING_TZ="Asia/Tokyo", TZ="America/New_York").default_recording_tz \
+        == "Asia/Tokyo"      # the more specific MINIDV_ var wins over the generic TZ
+
+
 def teardown_module(module):
     importlib.reload(config_mod)
