@@ -2,111 +2,168 @@
 
 [English](README.md) · **Polski**
 
-Bezstratne zgrywanie i archiwizacja kaset MiniDV / DV przez FireWire (IEEE 1394),
-z panelem WWW do przeglądania nagrań.
+[![License: MIT](https://img.shields.io/badge/licencja-MIT-green)](LICENSE)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+![Docker Compose](https://img.shields.io/badge/docker-compose-2496ED)
+![Linux · FireWire](https://img.shields.io/badge/linux-FireWire%20%2F%20IEEE%201394-lightgrey)
+![UI: English · Polski](https://img.shields.io/badge/UI-English%20%C2%B7%20Polski-orange)
 
-**Masterem jest zawsze surowy strumień DV** — zgrany przez `dvgrab`, pocięty na
-sceny po przerwach timecode / daty nagrania na taśmie, zapisany jako `.dv`
-skompresowany `zstd` i po kompresji zweryfikowany bajt‑po‑bajcie. Wszystko inne
-(proxy H.264, plik podglądowy całej taśmy, miniatury, metadane JSON) to pochodne,
-które można odtworzyć.
+**Ocal rodzinne kasety MiniDV co do bitu, a potem naprawdę coś w nich znajdź.**
 
-**Pulpit**
+Podłączasz kamerę przez FireWire i klikasz *Rozpocznij*. Każda kaseta staje się
+zweryfikowanym, bajt w bajt wiernym archiwum podzielonym na sceny. Przeglądasz je potem
+jak Zdjęcia w telefonie:
+- oś czasu rok → miesiąc;
+- widok Osoby, który rozpoznaje twarze;
+- eksport jednym kliknięciem, do wysłania rodzinie albo do naprawy starego obrazu.
 
-![Pulpit — panel zgrywania i karty statusu](docs/dashboard.png)
+Wszystko działa na Twoim własnym Linuksie, bez chmury.
 
-**Oś czasu** — rok → miesiąc → scena, jak w iPhone Photos
+![Pulpit: panel zgrywania i karty statusu](docs/dashboard.png)
 
-![Widok osi czasu](docs/timeline.png)
+<table>
+<tr>
+<td width="50%"><img src="docs/timeline.png" alt="Oś czasu: rok → miesiąc → scena"></td>
+<td>
 
-> UI jest po angielsku i po polsku (przełącznik w nagłówku). API i szczegółowe
-> dokumenty w `docs/` są po angielsku. Pulpit to układ
-> [TailAdmin](https://github.com/TailAdmin/tailadmin-free-tailwind-dashboard-template)
-> (MIT) — zawendorowany w `frontend/vendor/`, więc **do uruchomienia nie trzeba
-> nic budować**. Reszta konfigurowana zmiennymi środowiskowymi.
+**W skrócie**
+
+- 🎞️ **Bezstratne zgrywanie**: surowy strumień DV, skompresowany zstd i sprawdzony
+  bajt po bajcie
+- ✂️ **Automatyczny podział na sceny** z datą i godziną nagrania odczytaną z taśmy
+- 🗓️ **Oś czasu** według daty nagrania, ze wszystkich kaset naraz
+- 🧑‍🤝‍🧑 **Osoby**: rozpoznawanie twarzy na Twoim komputerze. Podpisujesz twarz i
+  widzisz każde nagranie z tą osobą
+- 🧹 **Naprawa**: usuwanie przeplotu, odszumianie, usuwanie bloków, opcjonalnie
+  stabilizacja i wyższa rozdzielczość
+- ⬇️ **Udostępnianie**: MP4 ~90 MB na Messengera, jeden film z wielu kaset albo ZIP
+- 🐳 **Jedno `docker compose up`**: cztery małe usługi, interfejs PL / EN
+
+</td>
+</tr>
+</table>
 
 ---
 
-## Co robi
+**Spis treści:** [Funkcje](#funkcje) · [Szybki start](#szybki-start-docker) ·
+[Wymagania](#wymagania) · [Konfiguracja](#konfiguracja) · [Użycie](#użycie) ·
+[API](#api) · [FireWire](#kompatybilność-kamer-i-uwagi-o-firewire) ·
+[Rozwój](#rozwój)
 
-- **Zgrywa** surowy DV z dowolnej kamery / magnetowidu MiniDV z AV/C
-  (`dvgrab -noavc`), z automatycznym sterowaniem transportem (PLAY/STOP/REW przez
-  AV/C) albo w pełni ręcznie.
-- **Wykrywanie końca taśmy** odporne na puste odcinki: czeka (i restartuje
-  `dvgrab`, jeśli ten padnie na utracie sygnału) przez przerwy, kończy krótko po
-  faktycznym końcu materiału i bezstratnie skleja segmenty.
-- **Podział na sceny** po nieciągłościach DV (`dvgrab -autosplit`).
-- **Zweryfikowana archiwizacja**: `sha256` surowej sceny, kompresja `zstd`,
-  `zstd -t`, dekompresja strumieniowa i porównanie hasha — oryginalny `.dv` jest
-  usuwany dopiero, gdy `.dv.zst` odtwarza go dokładnie.
-- **Pochodne**: proxy MP4 H.264/AAC per scena, jeden ciągły `tape.mp4` (kopia
-  strumienia proxy), miniatury i bogaty `*.json` (timecode, data nagrania z VAUX,
-  przeplot, układ audio, znaczniki zgubionych klatek). Metadane kontenera
-  (`creation_time`, tytuł, komentarz) stemplowane z taśmy, żeby pobrany plik dalej
-  wiedział, skąd pochodzi.
-- **Współbieżny pipeline**: zgrywanie trzyma slot FireWire na wyłączność; podział +
-  kompresja + kodowanie idą w tle w kolejce, więc kolejną taśmę można zacząć, gdy
-  poprzednia się jeszcze przetwarza.
-- **Działa jako jeden proces albo cztery kontenery**: `grabber` (FireWire),
-  `converter` (przetwarzanie / re-enkodowanie w tle), `api` (HTTP/JSON) i `ui`
-  (`nginx`) koordynują się przez mały store SQLite (`state/jobs.db`), więc api da
-  się zrestartować, a converter przenieść na inną maszynę bez przerywania
-  zgrywania. Ten sam kod działa też jako pojedynczy proces. Zob.
+## Funkcje
+
+### 🎞️ Zgrywanie: włączasz i idziesz
+
+- **Działa z każdą kamerą i magnetowidem MiniDV z AV/C** (przez `dvgrab`). Sterowanie
+  jest automatyczne (przewijanie, PLAY i STOP przez AV/C) albo w pełni ręczne, dla kamer,
+  które źle znoszą AV/C.
+- **Mądre wykrywanie końca taśmy.** Przetrzymuje puste fragmenty i zaniki sygnału:
+  ponownie uruchamia `dvgrab` i bezstratnie skleja kawałki. Kończy krótko po tym, jak
+  nagranie naprawdę się skończy.
+- **Podgląd na żywo** w trakcie zgrywania, z czasem taśmy i liczbą zgranych bajtów.
+- **Praca potokowa.** Zgrywanie zajmuje port FireWire, a dzielenie, kompresja i
+  kodowanie idą w kolejce w tle, więc od razu możesz wkładać następną kasetę.
+  Przetwarzanie pokazuje postęp scena po scenie i przewidywany czas.
+- **Strefa czasowa zegara kamery dla każdego zgrywania.** Data z taśmy DV nie ma strefy.
+  Wybierasz, na jaką strefę był ustawiony zegar (np. wakacje za granicą), i każdy
+  `creation_time` wskazuje właściwy moment.
+- **Workspace'y.** Kasety różnych osób czy rodzin się nie mieszają: każdy workspace ma
+  własne kasety, oś czasu, duplikaty i osoby.
+
+### 🔒 Archiwum: master, któremu zaufasz za 30 lat
+
+- **Masterem jest surowe DV.** Dla każdej sceny: `sha256` → `zstd` → `zstd -t` →
+  dekompresja strumieniowa → porównanie. Oryginalny `.dv` znika dopiero wtedy, gdy
+  `.dv.zst` odtwarza go dokładnie.
+- **Pochodne, które zawsze odtworzysz**:
+  - proxy H.264/AAC dla każdej sceny;
+  - jeden ciągły `tape.mp4`;
+  - miniatury;
+  - szczegółowy JSON sceny (timecode, data nagrania z VAUX, przeplot, układ audio,
+    zgubione klatki).
+- **Pliki pamiętają swoje pochodzenie.** MP4 mają `creation_time`, tytuł i komentarz z
+  taśmy. *📅 Uzupełnij datę nagrania* dopisuje je do starszych plików.
+- **`sha256sum -c tape.sha256`** sprawdza cały katalog kasety. Format jest opisany w
+  [`docs/ARCHIVE_FORMAT.md`](docs/ARCHIVE_FORMAT.md).
+- **Taśma jest tylko do odczytu.** Polecenie `RECORD` nigdy nie jest wysyłane.
+
+### 🗓️ Przeglądanie: jak Zdjęcia, nie jak foldery
+
+- **Oś czasu**: rok → miesiąc → scena. Sceny z różnych kaset nagrane tego samego dnia
+  układają się według faktycznej godziny nagrania.
+- **Kasety**: siatka albumów, karty scen, podgląd w oknie, odtwarzanie całej taśmy z
+  rozdziałami do przewijania kliknięciem.
+- **Lista albo kafelki.** Kliknięcie kafelka otwiera pełnoekranowy podgląd z
+  przesuwaniem palcem i strzałkami.
+- **Porządki z poziomu UI**: zmiana nazwy kaset, etykiety, daty nagrania, usuwanie scen
+  i kaset. Długie operacje idą w tle.
+- **Duplikaty.** Sonda jakości liczy błędy dekodowania i robi odcisk każdej sceny. Widok
+  *Duplikaty* grupuje to samo nagranie z osobnych zgrań jednej kasety, wskazuje
+  najczystszą wersję i ma przycisk *✓ Zostaw najlepsze we wszystkich grupach*. Fałszywe
+  dopasowania odrzucasz przyciskiem *✕ To nie duplikat*.
+
+### 🧑‍🤝‍🧑 Osoby: rozpoznawanie twarzy, które nie opuszcza Twojego komputera
+
+- **Podpisz twarz raz, a strona osoby pokaże każde nagranie, w którym się pojawia.**
+  Przyciski typu **▶ 0:12–0:20** startują odtwarzanie dokładnie w chwili, gdy ją widać.
+- **Edycja jak w telefonie**:
+  - nadanie imienia, które już istnieje, łączy dwie osoby;
+  - *⇄ To ta sama osoba co…* łączy przez wybór z listy;
+  - **✕** przy twarzy oznacza „to nie ta osoba”;
+  - obcych można ukryć.
+- **Dwa etapy.**
+  1. Szybki skan nowych scen (OpenCV YuNet + SFace). Z każdej sekundy nagrania
+     analizuje pierwszą nierozmazaną klatkę.
+  2. Dokładna analiza wraca do każdej znalezionej twarzy, ocenia ujęcia (przodem, ostre,
+     duże) i najlepsze z nich przepuszcza przez ArcFace. Potem grupuje wszystkich od
+     nowa:
+     - dwie twarze z jednej klatki to nigdy ta sama osoba;
+     - twarze z profilu lub rozmazane dołączają tylko przy wyraźnym dopasowaniu;
+     - **Twoje połączenia, odłączenia i imiona są twardymi regułami**, których
+       przeliczenie nie złamie.
+- **Szanuje komputer, na którym działa.**
+  - Skanuje co noc o 3:00 albo na żądanie, zawsze jeden skan naraz.
+  - Widać go w *Zadaniach* z paskiem postępu i przewidywanym czasem, można go przerwać.
+  - Na czas zgrywania i przetwarzania się wstrzymuje. Działa na jednym rdzeniu z
+    najniższym priorytetem i wznawia od miejsca przerwania.
+  - Na czterordzeniowym i7 z 2017 roku szybki etap idzie około 10× szybciej niż czas
+    rzeczywisty.
+- **Osobno dla każdego workspace'u.** Twarze z różnych workspace'ów nigdy nie są ze sobą
+  porównywane.
+
+### 🧹 Naprawa i ⬇️ udostępnianie
+
+- **🧹 Napraw** buduje oczyszczone MP4 **dekodowane z mastera DV**, nie z proxy:
+  - usuwanie przeplotu `bwdif` z wykrytą kolejnością pól;
+  - `atadenoise` i `deblock` (cały łańcuch filtrów da się skonfigurować);
+  - opcjonalnie **stabilizacja** (dwuprzebiegowy `libvidstab`);
+  - opcjonalnie **wyższa rozdzielczość**: upscaler `libplacebo` z ffmpeg przez Vulkan,
+    wymaga GPU w `/dev/dri`.
+- **⬇ FB** koduje scenę, zaznaczenie albo całą taśmę do MP4 ~90 MB w tej samej
+  rozdzielczości, na Messengera lub Facebooka.
+- **🎬 Zbuduj jeden film** ze scen wybranych z różnych kaset, prosto z osi czasu: jako
+  bezstratne sklejenie albo naprawione z masterów.
+- **📦 ZIP** pobiera zaznaczone sceny jako osobne pliki.
+- **Master i proxy nigdy nie są modyfikowane.** Wyniki są tymczasowe i same się
+  sprzątają.
+
+### 🐳 Utrzymanie
+
+- **Cztery kontenery albo jeden proces.**
+  - **`grabber`** obsługuje FireWire.
+  - **`converter`** robi przetwarzanie, re-enkodowanie i skan twarzy.
+  - **`api`** serwuje HTTP/JSON.
+  - **`ui`** to nginx z interfejsem.
+
+  Koordynują się przez mały magazyn zadań SQLite, więc api można zrestartować, a
+  converter przenieść na inną maszynę w trakcie zgrywania. Zob.
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-- **Pulpit**: status zgrywania na żywo, lista zadań w tle (zgrywania + re-enkodowania
-  / sondy w kolejce) z logami, przeglądarka taśm z miniaturami scen, podgląd wideo
-  w oknie, odtwarzanie całej taśmy z rozdziałami klik-do-przewinięcia, pobieranie
-  (master `.dv.zst`, proxy, JSON). Angielski / polski, przełączane w nagłówku.
-- **Oś czasu i metadane**: indeks per taśma/scena (odświeżany w tle) zasila
-  przeglądarkę rok → miesiąc → scena w stylu iPhone Photos; zmiana nazwy taśm i
-  edycja etykiet / dat nagrania z poziomu UI.
-- **Wykrywanie duplikatów**: opcjonalna sonda jakości liczy per scena liczbę błędów
-  dekodowania i odcisk treści; widok *Duplikaty* grupuje to samo nagranie z
-  osobnych zgrań tej samej kasety i oznacza wersję z mniejszą liczbą błędów, żeby
-  zostawić najczystszą, a resztę skasować.
-- **Osoby (rozpoznawanie twarzy)**: skan na samym CPU (OpenCV YuNet + SFace) proxy
-  scen — z każdej sekundy analizowana pierwsza nierozmazana klatka — grupuje twarze w
-  osoby osobno dla każdego workspace, jak w Zdjęciach na iPhonie: podpisz, połącz „to ta
-  sama osoba", odłącz złą twarz, a po kliknięciu osoby masz wszystkie nagrania z nią i
-  przyciski „▶ 0:12" startujące odtwarzanie w tym momencie. Co noc
-  (`MINIDV_FACES_SCAN_AT`, domyślnie 03:00) albo ręcznie, zawsze jeden skan naraz,
-  widoczny i do przerwania w Zadaniach; wstrzymuje się na czas zgrywania/przetwarzania
-  i wznawia od miejsca przerwania. Drugi, dokładny etap ponownie analizuje każdą
-  znalezioną twarz — najlepsze ujęcia (przodem, ostre, duże) dostają wektor ArcFace — i
-  grupuje wszystkich od nowa: dwie twarze z jednej klatki nigdy nie są łączone, twarze z
-  profilu/rozmazane dołączają tylko do wyraźnie pasującej osoby, a Twoje połączenia,
-  „to nie ta osoba” i imiona są twardymi regułami. (Wagi ArcFace pochodzą z insightface,
-  licencja tylko do użytku niekomercyjnego.)
-- **Eksport „udostępnij"**: przycisk „⬇ FB" na żądanie re-enkoduje scenę (albo całą
-  taśmę) do MP4 ~90 MB w tej samej rozdzielczości na Messengera/Facebooka i podaje
-  gotowy plik. Tymczasowe, jedno na raz, auto-czyszczone.
-- **Wariant „napraw"**: opcjonalny przycisk „🧹 Restore" buduje MP4 z
-  odszumianiem/naprawą **dekodowany z mastera DV** (nie z proxy) — deinterlacing
-  `bwdif` z wykrytą parzystością pól, potem `atadenoise` + `deblock` (cały łańcuch
-  konfigurowalny przez `MINIDV_RESTORE_FILTERS`). Master i zwykłe proxy pozostają
-  nietknięte. Dwa opcjonalne checkboxy rozszerzają to dalej, oba domyślnie
-  wyłączone i doklejane na końcu tego łańcucha: dwuprzebiegowa
-  stabilizacja (`libvidstab`, już w obrazie) i ostrzejszy upscale przez GPU
-  (filtr `libplacebo` ffmpeg przez Vulkan — to nie jest model AI, ale wyraźnie
-  lepszy kernel niż zwykły lanczos; wymaga przepuszczenia `/dev/dri` do
-  kontenera converter, patrz `compose.override.yaml.example`).
-
-Nigdy nie wysyła opcode'u `RECORD`. Taśma traktowana wyłącznie do odczytu.
-
-## Wymagania
-
-Host to zawsze **Linux ze stosem jądra `firewire_ohci` / `firewire_core`** i
-działającym kontrolerem OHCI 1394 (`/dev/fw*`), plus kamera / magnetowid MiniDV z
-portem DV/i.LINK, w trybie **PLAYER / VCR**.
-
-- **Docker** (zalecane): Docker Engine + Compose. `dvgrab`, `ffmpeg`, `zstd`,
-  `linux-firewire-utils` są w obrazie — nic więcej nie trzeba instalować.
-- **Bare-metal**: Python **3.11+** (tylko biblioteka standardowa, bez zależności
-  pip) oraz te narzędzia w `PATH`:
-
-  ```bash
-  sudo apt install dvgrab ffmpeg zstd linux-firewire-utils util-linux python3
-  ```
+- **Odporne na awarie.** Po restarcie przerwane przetwarzanie wraca do kolejki z
+  surowego DV.
+- **Pulpit**: obciążenie serwera (CPU, pamięć, swap), wolne miejsce z szacunkiem, ile
+  godzin DV jeszcze się zmieści, i status kamery.
+- **Opcjonalne logowanie HTTP basic auth** dla wystawienia do internetu. Domyślnie jest
+  wyłączone, więc świeży klon działa od razu w sieci lokalnej.
 
 ## Szybki start (Docker)
 
@@ -123,208 +180,184 @@ Cztery kontenery współdzielą `/srv/minidv` (i jego `state/jobs.db`):
 
 | usługa | kontener | robi |
 |---|---|---|
-| `grabber` | `privileged`, host `/dev` + `/sys` | trzyma FireWire, uruchamia `dvgrab` |
-| `converter` | — | podział na sceny, zstd + weryfikacja bajtowa, proxy, re-enkodowania, sondy jakości |
-| `api` | `expose: 8080` (nie publikowany) | HTTP/JSON; czyta system plików + store |
-| `ui` | `nginx`, publikuje `:8088` | serwuje `frontend/`, proxuje `/api` → `api:8080` |
+| `grabber` | `privileged`, `/dev` + `/sys` hosta | trzyma FireWire, uruchamia `dvgrab` |
+| `converter` | — | podział na sceny, zstd + weryfikacja bajtowa, proxy, re-enkodowanie, sondy jakości, rozpoznawanie twarzy |
+| `api` | `expose: 8080` (niepublikowany) | HTTP/JSON; czyta system plików + magazyn zadań |
+| `ui` | `nginx`, publikuje `:8088` | serwuje `frontend/`, przekazuje `/api` → `api:8080` |
 
-Dowolną z nich zrestartujesz bez ruszania reszty (`docker compose restart api`).
-Port publikuje tylko `ui` — **domyślnie nie ma uwierzytelniania**, więc zablokuj
-`:8088` firewallem do zaufanej sieci, albo włącz HTTP basic auth przy wystawieniu
-do internetu (np. za Cloudflare Tunnel) — patrz [`docker/.htpasswd.example`](docker/.htpasswd.example);
-domyślnie wyłączone, nic do konfiguracji poza tym. `grabber` jest `privileged`,
-bo węzeł `/dev/fw*` kamery jest hot-plugowany; on oraz api/converter montują
-host `/sys` tylko do odczytu, żeby `camera.info()` mogło rozwiązać węzeł FireWire.
+Każdą usługę można zrestartować bez ruszania pozostałych
+(`docker compose restart api`).
+
+Port publikuje tylko `ui`, a **domyślnie nie ma logowania**. Albo trzymaj `:8088` za
+zaporą w zaufanej sieci lokalnej, albo włącz basic auth przy wystawieniu do internetu
+(np. przez Cloudflare Tunnel), zob. [`docker/.htpasswd.example`](docker/.htpasswd.example).
+
+`grabber` jest `privileged`, bo węzeł `/dev/fw*` kamery pojawia się dynamicznie. On, api
+i converter montują też `/sys` hosta tylko do odczytu, żeby `camera.info()` mogło
+znaleźć węzeł FireWire.
 
 ### Inne sposoby uruchomienia
 
 ```bash
 sudo ./scripts/install.sh            # systemd, jeden proces na :8080
-sudo ./scripts/install.sh --split    # systemd, bare-metal grabber + converter + api + nginx
+sudo ./scripts/install.sh --split    # systemd, grabber + converter + api + nginx bez Dockera
 MINIDV_STORAGE=$HOME/minidv python3 -m minidv_archiver.server   # bez instalacji, jeden proces
 ```
 
-`scripts/install.sh` kopiuje aplikację do `/opt/minidv-archive`, instaluje regułę
-udev (`systemd/99-minidv-firewire.rules`) i unit(y), po czym je uruchamia;
-konfigurację edytuj w `/etc/minidv-archive.env`. Unity systemd w wariancie split
-i bare-metalowy konfig nginx (`deploy/nginx-minidv.conf`) to odpowiednik czterech
-kontenerów bez Dockera — zob. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+`scripts/install.sh`:
+- kopiuje aplikację do `/opt/minidv-archive`;
+- instaluje regułę udev (`systemd/99-minidv-firewire.rules`) i jednostki systemd;
+- uruchamia je.
+
+Konfiguracja trafia do `/etc/minidv-archive.env`.
+
+## Wymagania
+
+Host to zawsze **Linux ze stosem jądra `firewire_ohci` / `firewire_core`** i działającym
+kontrolerem OHCI 1394 (`/dev/fw*`). Do tego kamera albo magnetowid MiniDV z portem
+DV/i.LINK, przełączony w tryb **PLAYER / VCR**.
+
+- **Docker** (zalecane): Docker Engine + Compose. Wszystko jest w obrazie:
+  - `dvgrab`, `ffmpeg`, `zstd`, `linux-firewire-utils`;
+  - OpenCV, onnxruntime i modele twarzy (~210 MB, sumy kontrolne sprawdzane przy
+    budowaniu).
+- **Bez Dockera**: Python **3.11+** i te narzędzia w `PATH`:
+
+  ```bash
+  sudo apt install dvgrab ffmpeg zstd linux-firewire-utils util-linux python3
+  pip install ".[faces]"       # opcjonalnie: Osoby / rozpoznawanie twarzy
+  ```
+
+  Rdzeń korzysta tylko z biblioteki standardowej Pythona. Bez dodatku `faces` widok
+  Osoby po prostu pokazuje, że rozpoznawanie jest niedostępne.
 
 ## Konfiguracja
 
-Wszystko przez zmienne środowiskowe — pełna lista z domyślnymi w
-[`.env.example`](.env.example). Te, które najczęściej ruszysz:
-
-Przy Dockerze wpisz je do `.env` (compose je czyta). Przy systemd idą do
-`/etc/minidv-archive.env`.
+Wszystko ustawiasz zmiennymi środowiskowymi: w `.env` przy Dockerze albo w
+`/etc/minidv-archive.env` przy systemd. Pełna lista z wartościami domyślnymi jest w
+[`.env.example`](.env.example). Najczęściej zmieniane:
 
 | Zmienna | Domyślnie | Znaczenie |
 |---|---|---|
-| `MINIDV_STORAGE` | `/srv/minidv` | katalog główny archiwum (bind-mount do każdego kontenera) |
-| `MINIDV_CAMERA_GUID` | *(auto)* | puste = pierwsze urządzenie taśmowe AV/C na magistrali; ustaw GUID, gdy podłączonych jest kilka |
-| `MINIDV_ALLOW_FCP` | `1` | `1` = transport przez AV/C; `0` = ręczne PLAY/STOP na kamerze |
-| `MINIDV_MP4_PRESET` | `medium` | preset x264 dla proxy (`veryfast` ~4–6× szybszy, większe pliki) |
-| `MINIDV_DEFAULT_RECORDING_TZ` | `Europe/Warsaw` | strefa, na którą był ustawiony zegar kamery — do zamiany daty z DV VAUX na prawdziwy `creation_time` UTC; nadpisywalne per zgranie |
-| `MINIDV_SHARE_MAX_MB` | `90` | docelowy rozmiar re-enkodu „udostępnij" |
-| `MINIDV_RESTORE_FILTERS` | `bwdif…,atadenoise,deblock…` | łańcuch `-vf` ffmpeg dla wariantu „napraw" |
-| `MINIDV_STABILIZE_SHAKINESS` | `8` | 1–10, jak mocno przebieg 1 szuka trzęsienia (domyślnie vidstab ma `5`) |
-| `MINIDV_STABILIZE_SMOOTHING` | `20` | jak mocno przebieg 2 wygładza ścieżkę kamery (domyślnie vidstab ma `15`) |
-| `MINIDV_UPSCALE_FACTOR` | `2` | mnożnik skali dla checkboxa „Wyższa rozdzielczość" |
-| `MINIDV_UPSCALE_SCALER` | `ewa_lanczos4sharpest` | kernel skalowania libplacebo (jego najostrzejszy wbudowany) |
-| `MINIDV_INDEX_INTERVAL` | `300` | sekundy między odświeżeniami indeksu taśm/scen w tle |
+| `MINIDV_STORAGE` | `/srv/minidv` | katalog archiwum (montowany do każdego kontenera) |
+| `MINIDV_CAMERA_GUID` | *(auto)* | puste = pierwsze urządzenie taśmowe AV/C na magistrali |
+| `MINIDV_ALLOW_FCP` | `1` | `1` = sterowanie przez AV/C; `0` = ręczne PLAY/STOP na kamerze |
+| `MINIDV_MP4_PRESET` | `medium` | preset x264 dla proxy (`veryfast` ~4–6× szybciej, większe pliki) |
+| `MINIDV_DEFAULT_RECORDING_TZ` | `Europe/Warsaw` | strefa zegara kamery, do zamiany daty z DV na prawdziwy `creation_time`; nadpisywalna przy zgrywaniu |
+| `MINIDV_SHARE_MAX_MB` | `90` | docelowy rozmiar pliku „udostępnij” |
+| `MINIDV_RESTORE_FILTERS` | `bwdif…,atadenoise,deblock…` | łańcuch `-vf` ffmpeg dla „napraw” |
+| `MINIDV_STABILIZE_SHAKINESS` / `_SMOOTHING` | `8` / `20` | siła vidstab dla opcji *Stabilizacja* |
+| `MINIDV_UPSCALE_FACTOR` / `_SCALER` | `2` / `ewa_lanczos4sharpest` | opcja *Wyższa rozdzielczość* |
+| `MINIDV_FACES` | `1` | `0` wyłącza rozpoznawanie twarzy |
+| `MINIDV_FACES_SCAN_AT` | `03:00` | codzienny skan nowych scen (czas lokalny); puste = tylko ręcznie |
+| `MINIDV_FACES_THREADS` | `1` | wątki CPU dla skanu twarzy (`2` ≈ dwa razy szybciej) |
+| `MINIDV_FACES_CLUSTER` | `0.24` | jak chętnie łączyć twarze (niżej = mniej rozbitych osób, więcej pomieszanych) |
+| `MINIDV_INDEX_INTERVAL` | `300` | co ile sekund odświeżać indeks kaset/scen w tle |
 | `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | nasłuch HTTP api (wewnątrz kontenera) |
 
 ## Użycie
 
-1. Włóż kasetę, przełącz kamerę na **PLAYER / VCR**, podłącz FireWire.
-2. Otwórz pulpit (`:8088` przy Dockerze, `:8080` w trybie jednoprocesowym) →
-   **New capture** → *Start* (id taśmy nadawane automatycznie, np. `TAPE-0001`).
-3. **Tryb auto** (`MINIDV_ALLOW_FCP=1`): sam przewija i wciska PLAY.
-   **Tryb ręczny**: poczekaj na `WAITING FOR PLAY`, wciśnij **PLAY** na kamerze;
-   po materiale wciśnij **STOP** (albo zatrzyma się sam po limicie pustego ogona).
-4. Zgrywanie przechodzi do pipeline'u w tle; kolejną taśmę zaczynasz kiedy chcesz.
-   Wyniki przeglądasz w **Tapes** / **Timeline**.
+1. Włóż kasetę, przełącz kamerę na **PLAYER / VCR** i podłącz FireWire (najpierw
+   przeczytaj [ostrzeżenie o kablach](#kompatybilność-kamer-i-uwagi-o-firewire)).
+2. Otwórz pulpit (`:8088` z Dockerem, `:8080` w trybie jednego procesu). Opcjonalnie
+   wybierz **workspace** i **strefę czasową zegara kamery**, potem **Nowe zgrywanie** →
+   *Rozpocznij*. Identyfikator kasety nada się sam, np. `TAPE-0001`.
+3. **Tryb automatyczny** (`MINIDV_ALLOW_FCP=1`): program sam przewinie i włączy PLAY.
+   **Tryb ręczny**: poczekaj na `CZEKAM NA PLAY`, naciśnij **PLAY** na kamerze, a na końcu
+   materiału **STOP**. Możesz też poczekać, aż zatrzyma się sam po pustym końcu taśmy.
+4. Zgrywanie przechodzi do przetwarzania w tle, więc możesz od razu wkładać następną
+   kasetę. Wyniki są w **Kasetach**, na **Osi czasu** i w **Osobach**, a praca w tle w
+   **Zadaniach**.
 
 ### CLI
 
 ```bash
 python3 -m minidv_archiver.cli camera status        # transport AV/C + timecode
-python3 -m minidv_archiver.cli camera play|stop     # tylko gdy MINIDV_ALLOW_FCP=1
-python3 -m minidv_archiver.cli process take.dv --tape-id TAPE-0007   # wciągnij istniejący .dv
-python3 -m minidv_archiver.cli serve                # jeden proces (capture + converter + api)
-python3 -m minidv_archiver.cli grabber              # split: samo zgrywanie FireWire
-python3 -m minidv_archiver.cli converter            # split: przetwarzanie / re-enkodowania w tle
-python3 -m minidv_archiver.cli api                  # split: samo HTTP/JSON
+python3 -m minidv_archiver.cli camera play|stop     # tylko przy MINIDV_ALLOW_FCP=1
+python3 -m minidv_archiver.cli process take.dv --tape-id TAPE-0007   # wczytaj istniejący .dv
+python3 -m minidv_archiver.cli serve                # jeden proces (zgrywanie + converter + api)
+python3 -m minidv_archiver.cli grabber              # podział: tylko zgrywanie FireWire
+python3 -m minidv_archiver.cli converter            # podział: przetwarzanie w tle
+python3 -m minidv_archiver.cli api                  # podział: tylko HTTP/JSON
 ```
 
-### Weryfikacja / odtworzenie mastera
+### Weryfikacja i odtworzenie mastera
 
 ```bash
 zstd -t 0001_*.dv.zst                       # integralność archiwum
-zstd -dc 0001_*.dv.zst > recovered.dv       # dokładny surowy DV z powrotem
-sha256sum -c tape.sha256                    # każdy plik w katalogu taśmy
+zstd -dc 0001_*.dv.zst > recovered.dv       # dokładnie surowe DV z powrotem
+sha256sum -c tape.sha256                    # każdy plik w katalogu kasety
 ```
 
-Kompletne przykładowe archiwum (jedna prawdziwa ~6 s scena, ~20 MB) jest w
-[`examples/demo-tape/`](examples/demo-tape/) — skopiuj je do
-`$MINIDV_STORAGE/tapes/`, żeby zobaczyć w pulpicie.
+[`examples/demo-tape/`](examples/demo-tape/) zawiera kompletne przykładowe archiwum:
+jedną prawdziwą scenę ~6 s, ~20 MB. Skopiuj je do `$MINIDV_STORAGE/tapes/`, żeby
+zobaczyć je w pulpicie.
 
 ## API
 
-JSON po HTTP (serwuje proces `api`; `nginx` proxuje do niego `/api`).
+JSON przez HTTP, serwowany przez proces `api` (`nginx` przekazuje do niego `/api`).
+Każdy endpoint listy przyjmuje `?workspace=<nazwa>`, domyślnie `"default"`. Długie
+zadania (re-enkodowanie, usuwanie scen, skany) zwracają `202`, a ich stan sprawdzasz,
+powtarzając to samo wywołanie, aż przejdzie przez `QUEUED` → `RUNNING` → `READY`.
+Pełna lista endpointów (po angielsku) jest w [README.md](README.md#api).
 
-**`GET`**
-`/api/status` · `/api/storage` · `/api/jobs` · `/api/jobs/{id}` ·
-`/api/tapes` (z indeksu) · `/api/tapes/{id}` · `/api/tapes/{id}/scenes` ·
-`/api/tapes/{id}/scenes/{scene_id}` ·
-`/api/timeline` · `/api/timeline/{rok}/{miesiąc}` · `/api/duplicates` ·
-`/api/workspaces` — lista nazw workspace, `"default"` zawsze pierwszy ·
-`/api/tapes/{id}/files/{name}` (pliki archiwum; `Range` dla MP4; `?dl=1` wymusza
-pobranie) ·
-`/api/tapes/{id}/compressed/{token}.mp4` — serwuje build na żądanie; `token` to
-`TAPE`, `<scene_id>`, `<scene_id>-RES[-STAB][-UP]` (napraw, +stabilizacja,
-+upscale), albo `SEL-<hash>[-FB|-RES[-STAB][-UP]]` ·
-`/api/playlist/build/{token}.mp4` — serwuje build złożony ze scen z kilku kaset (niżej).
+## Kompatybilność kamer i uwagi o FireWire
 
-`/api/tapes`, `/api/timeline`, `/api/timeline/{rok}/{miesiąc}` i `/api/duplicates`
-przyjmują `?workspace=<nazwa>`, zawężając wynik do kaset zgranych w tym
-workspace (więc materiał jednej osoby nigdy nie trafi na listę, oś czasu ani do
-wykrywania duplikatów razem z materiałem innej); pomiń dla `"default"`.
-
-**`POST`**
-`/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?, timezone?, workspace?}` —
-`timezone` to strefa IANA (np. `Europe/London`) dla taśmy nagranej w innej strefie
-niż `MINIDV_DEFAULT_RECORDING_TZ`; pomiń, żeby użyć tej domyślnej ·
-`workspace` oznacza zgraną taśmę tak, by była widoczna tylko na liście/osi
-czasu/w duplikatach razem z innymi z tego samego workspace; pomiń dla `"default"` ·
-`/api/workspaces` `{name}` — tworzy nowy (na razie pusty, do pierwszego zgrania)
-workspace ·
-`/api/capture/stop` `{tape_id?}` ·
-`/api/tape/{play,stop,rewind}` (409, jeśli `MINIDV_ALLOW_FCP` != 1) ·
-`/api/tapes/{id}/scenes/{scene}/compress` `{restore?, stabilize?, upscale?}` ·
-`/api/tapes/{id}/compress` `{scenes?, share?, restore?, stabilize?, upscale?, archive?}`
-(brak body = cała taśma; stabilize/upscale działają tylko z `restore: true`;
-`archive: true` nie łączy scen, tylko pakuje proxy każdej zaznaczonej sceny
-osobno do ZIP — wymaga `scenes`, `share`/`restore`/`stabilize`/`upscale` są
-wtedy ignorowane — pobierz z `/compressed/{token}.zip` zamiast `.mp4`) ·
-`/api/tapes/{id}/rename` `{new_id}` ·
-`/api/tapes/{id}/meta` `{label?, recording_date?}` ·
-`/api/tapes/{id}/reprobe` `{force?}` (sonda jakości / odcisk) ·
-`/api/tapes/{id}/backfill-meta` `{force?}` — dopisuje `creation_time`/`date` do
-scen MP4 (i `tape.mp4`), które go nie mają, z daty nagrania już zapisanej w
-`.json` każdej sceny; `force: true` przelicza też sceny, które już mają tag
-(np. żeby naprawić taśmę przetworzoną przed poprawką strefy czasowej) ·
-`/api/playlist/build` `{items: [{tape_id, scene_id}, ...], title?, restore?,
-stabilize?, upscale?, archive?}` — złącza sceny z jednej lub kilku kaset (w
-podanej kolejności) w jedno MP4, np. z zaznaczenia na osi czasu;
-`restore`/`stabilize`/`upscale` naprawiają je z masterów DV zamiast zwykłego
-złączenia; `archive: true` zamiast tego pakuje proxy każdej sceny osobno do
-ZIP (pobierz z `/build/{token}.zip`). Wywołaj ponownie z tym samym body, żeby
-odpytać status (`QUEUED`/`RUNNING`/`READY`) — ten sam wzorzec co pozostałe
-buildy na żądanie ·
-`/api/tapes/{id}/scenes/delete` `{scenes: [...]}` — usuwanie scen przebudowuje
-proxy całej taśmy, więc to też leci w tle jako build (odpytuj tak samo) zamiast
-blokować żądanie, co przy kasecie z setkami scen potrafiło wywalić timeout.
-
-**`DELETE`**
-`/api/tapes/{id}` ·
-`/api/jobs/{tape_id}` (kasuje wpis ukończonego/błędnego zadania; odmawia dla
-działającego albo już zarchiwizowanego).
-
-## Zgodność kamer i uwagi o FireWire
-
-> **⚠ Okablowanie — przejściówka 6-pin ↔ 4-pin potrafi spalić złącze.** Wtyk
-> FireWire 6-pin niesie zasilanie magistrali (~8–30 V); wtyk i.LINK 4-pin nie.
-> Tania albo źle zrobiona przejściówka 6→4, albo wpięcie jej „na gorąco", może
-> podać zasilanie na port, który nie miał go dostać, i **fizycznie spalić złącze
-> FireWire w kamerze albo w PC** (tu tak padła stara kamera). Zasady:
+> **⚠ Kable: przejściówka 6-pin ↔ 4-pin potrafi spalić port.** 6-pinowe złącze FireWire
+> przenosi zasilanie magistrali (~8–30 V), a 4-pinowe i.LINK nie. Tania lub źle zrobiona
+> przejściówka, albo podłączanie na gorąco, może wpuścić napięcie do portu, który nie
+> jest na to przygotowany, i **spalić złącze FireWire kamery albo komputera**. Tak
+> właśnie skończyła tu jedna stara kamera.
 >
-> - **PC wyłączony** → najpierw wepnij wtyk **6-pin** do PC.
-> - **Kamera wyłączona** → wepnij wtyk **4-pin** do kamery.
-> - Dopiero potem włącz oba. **Nigdy nie wpinaj żadnego końca na gorąco.**
-> - Jeśli karta w PC ma port 4-pin, wolij zwykły kabel **4-pin ↔ 4-pin**, albo
->   sprawdzoną przejściówkę; unikaj najtańszych.
+> - **Komputer wyłączony** → najpierw wepnij końcówkę **6-pin** do komputera.
+> - **Kamera wyłączona** → wepnij końcówkę **4-pin** do kamery.
+> - Dopiero wtedy włącz oba urządzenia. **Nigdy nie podłączaj żadnego końca na gorąco.**
+> - Jeśli karta w komputerze ma port 4-pin, użyj zwykłego kabla **4-pin ↔ 4-pin** albo
+>   sprawdzonej przejściówki.
 
-Większość magnetowidów i kamer DV działa przez AV/C bez problemu. Część starszych
-PHY i.LINK jest na granicy: odpadają z magistrali albo ją resetują przy
-transakcjach FCP. Jeśli tak masz:
+Większość magnetowidów i kamer DV dobrze działa przez AV/C. Niektóre starsze układy
+i.LINK są na granicy: wypadają z magistrali albo resetują ją przy transakcjach FCP.
+Jeśli trafisz na taki:
 
 - Ustaw `MINIDV_ALLOW_FCP=0` i steruj PLAY/STOP ręcznie.
-- Zresetuj kamerę prądowo (wyciągnij zasilacz na ~30–60 s), żeby odblokować
-  zawieszony PHY — w oprogramowaniu się tego nie da.
-- Trzymaj kontroler FireWire i ewentualny mostek PCIe-do-PCI poza runtime PM
-  (`ATTR{power/control}="on"`) — `systemd/99-minidv-firewire.rules` ma przykład
-  pod VIA VT6306 + ASMedia ASM1083.
+- Odłącz kamerze zasilacz na 30–60 s, żeby odblokować zawieszony układ. Programowo
+  się tego nie da zrobić.
+- Wyłącz zarządzanie energią (runtime PM) dla kontrolera FireWire i ewentualnego mostka
+  PCIe–PCI (`ATTR{power/control}="on"`). `systemd/99-minidv-firewire.rules` ma przykład
+  dla VIA VT6306 + ASMedia ASM1083.
 
-**Sony DCR-PC2E** to przerobiony przykład wszystkiego powyższego; zob.
+**Sony DCR-PC2E** to przykład wszystkich powyższych problemów naraz; zob.
 [`docs/FIREWIRE.md`](docs/FIREWIRE.md).
 
-Więcej dokumentów (po angielsku): [architektura](docs/ARCHITECTURE.md) ·
+Więcej dokumentacji (po angielsku): [architektura](docs/ARCHITECTURE.md) ·
 [format archiwum](docs/ARCHIVE_FORMAT.md) · [metadane DV](docs/DV_METADATA.md) ·
-[magazyn](docs/STORAGE.md).
+[przechowywanie](docs/STORAGE.md).
 
 ## Rozwój
 
 ```bash
-python3 -m pip install -e ".[dev]"
+python3 -m pip install -e ".[dev,faces]"
 python3 -m pytest -q
 ```
 
-Tylko biblioteka standardowa; aplikacja rozmawia z `dvgrab` / `ffmpeg` / `zstd`
-jako podprocesami. Obraz kontenera przebudowujesz przez
-`docker compose up -d --build` po każdej zmianie kodu.
+Aplikacja steruje `dvgrab`, `ffmpeg` i `zstd` jako podprocesami. Tylko rozpoznawanie
+twarzy ma zależności Pythona (OpenCV, numpy, onnxruntime), a jego testy bez nich same się
+pomijają. Po zmianie kodu przebuduj obraz: `docker compose up -d --build`.
 
-Front to `frontend/index.html` + `frontend/app.js` + `frontend/i18n.js` (czysty JS,
-angielski/polski) z zawendorowanym CSS TailAdmin. Po edycji znaczników lub klas
-przebuduj CSS:
+Frontend to zwykły JavaScript bez kroku budowania: `frontend/index.html`,
+`frontend/app.js` i `frontend/i18n.js` (angielski/polski), ostylowany dołączonym CSS
+TailAdmin. Po zmianie znaczników lub klas przebuduj CSS:
 
 ```bash
-scripts/build-css.sh          # potrzebuje Node + npm; nadpisuje frontend/vendor/tailadmin.css
+scripts/build-css.sh          # wymaga Node + npm; nadpisuje frontend/vendor/tailadmin.css
 ```
-
-Zewnętrzne zasoby frontu i ich licencje wypisane w
-[`frontend/vendor/README.md`](frontend/vendor/README.md).
 
 ## Licencja
 
-MIT — zob. [LICENSE](LICENSE).
+MIT; zob. [LICENSE](LICENSE).
+
+Dołączone i pobierane elementy zewnętrzne mają własne licencje:
+- TailAdmin i Alpine.js: MIT;
+- modele YuNet i SFace z OpenCV Zoo: MIT / Apache-2.0;
+- wagi ArcFace (insightface `buffalo_l`): **wyłącznie do użytku niekomercyjnego**. Dla
+  rodzinnego archiwum to w porządku; przed użyciem komercyjnym trzeba to sprawdzić.
