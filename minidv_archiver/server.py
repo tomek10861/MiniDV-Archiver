@@ -101,7 +101,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(ENGINE.timeline(workspace))
             if path == "/api/duplicates":
                 return self.json(ENGINE.duplicates(workspace))
+            if path == "/api/faces/status":
+                return self.json(ENGINE.faces_status(workspace))
+            if path == "/api/persons":
+                return self.json(ENGINE.persons(workspace))
             parts = path.strip("/").split("/")
+            if len(parts) == 3 and parts[:2] == ["api", "persons"] and parts[2].isdigit():
+                try:
+                    return self.json(ENGINE.person(int(parts[2])))
+                except FileNotFoundError as exc:      # e.g. just merged into someone else
+                    return self.json({"error": str(exc)}, 404)
+            if (len(parts) == 4 and parts[:3] == ["api", "faces", "thumb"]
+                    and parts[3].endswith(".jpg") and parts[3][:-4].isdigit()):
+                from .faces import thumb_path
+                target = thumb_path(CONFIG, int(parts[3][:-4]))
+                return self.send_file(target) if target.is_file() else self.json({"error": "not found"}, 404)
             if len(parts) == 4 and parts[:2] == ["api", "timeline"] and parts[2].isdigit() and parts[3].isdigit():
                 return self.json(ENGINE.timeline_month(int(parts[2]), int(parts[3]), workspace))
             if len(parts) >= 5 and parts[:2] == ["api", "tapes"] and parts[3] == "files":
@@ -212,7 +226,24 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(members, list) or len(members) < 2:
                     return self.json({"error": "potrzeba co najmniej 2 scen"}, 400)
                 return self.json(ENGINE.dismiss_duplicate_group(members))
+            if path == "/api/faces/scan":
+                return self.json(ENGINE.start_face_scan(), 202)
+            if path == "/api/faces/scan/cancel":
+                return self.json(ENGINE.cancel_face_scan())
             cparts = path.strip("/").split("/")
+            if len(cparts) == 3 and cparts[:2] == ["api", "persons"] and cparts[2].isdigit():
+                b = self.body()
+                return self.json(ENGINE.update_person(int(cparts[2]), name=b.get("name"), hidden=b.get("hidden")))
+            if len(cparts) == 4 and cparts[:2] == ["api", "persons"] and cparts[2].isdigit() and cparts[3] == "merge":
+                into = self.body().get("into")
+                if not isinstance(into, int):
+                    return self.json({"error": "brak osoby docelowej"}, 400)
+                return self.json(ENGINE.merge_persons(int(cparts[2]), into))
+            if len(cparts) == 5 and cparts[:3] == ["api", "faces", "tracks"] and cparts[3].isdigit() and cparts[4] == "move":
+                pid = self.body().get("person_id")
+                if pid is not None and not isinstance(pid, int):
+                    return self.json({"error": "zła osoba"}, 400)
+                return self.json(ENGINE.move_face(int(cparts[3]), pid))
             if len(cparts) >= 4 and cparts[:2] == ["api", "tapes"] and cparts[-1] == "compress":
                 data = self.body()
                 restore = bool(data.get("restore"))

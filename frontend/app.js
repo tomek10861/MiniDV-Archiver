@@ -65,6 +65,8 @@ function setWorkspace(name) {
   currentWorkspace = name || 'default';
   try { localStorage.setItem('workspace', currentWorkspace); } catch (_) {}
   tl.data = null; tl.year = null; tl.month = null; dupCache = null; tapesSig = null;
+  people.list = null; people.person = null; people.merging = false;
+  if (currentRoute().section === 'osoby') go('#osoby');
   refresh();
 }
 async function loadWorkspaces() {
@@ -158,9 +160,10 @@ function sceneGridHTML(items) {   // items: [{tapeId, s}] -- s is a full scene r
       </button>`;
     }).join('') + '</div>';
 }
-let modalItems = [], modalIdx = -1, modalOpenTape = false;
-function openSceneModal(items, idx, openTapeLink) {
+let modalItems = [], modalIdx = -1, modalOpenTape = false, modalSeek = null;
+function openSceneModal(items, idx, openTapeLink, seekTo) {
   modalItems = items; modalIdx = idx; modalOpenTape = !!openTapeLink;
+  modalSeek = seekTo > 0 ? seekTo : null;          // People view: start where the person shows up
   $('#scModal').classList.remove('hidden'); $('#scModal').classList.add('flex');
   renderSceneModal();
 }
@@ -176,7 +179,12 @@ function renderSceneModal() {
     rec = s.recording || {}, v = s.video || {}, arch = f.archive || {}, prox = f.proxy || {};
   const file = n => `/api/tapes/${enc}/files/${encodeURIComponent(sid)}.${n}`;
   const video = $('#scModalVideo');
-  video.pause(); video.src = file('mp4'); video.load(); video.play().catch(() => {});
+  video.pause(); video.src = file('mp4'); video.load();
+  if (modalSeek != null) {
+    const at = modalSeek; modalSeek = null;
+    video.addEventListener('loadedmetadata', () => { try { video.currentTime = at; } catch (_) {} }, { once: true });
+  }
+  video.play().catch(() => {});
   $('#scModalTitle').innerHTML = `<div class="truncate">${tapeId} · ${L('scene.n', { n: s.scene_index })}</div>
     <div class="mt-0.5 truncate font-mono text-theme-xs font-normal text-gray-500 dark:text-gray-400">
       ${tc.start || '?'} – ${tc.end || '?'} · ${durTxt(s.frame_count, v.standard)} ·
@@ -854,6 +862,203 @@ $('#dupView').addEventListener('click', async e => {
   if (dm) dismissDuplicateGroup(+dm.dataset.g, dm);
 });
 
+// ============ people: faces found in the footage, named like iPhone Photos ============
+// Scoped to the current workspace (the server never matches faces across workspaces).
+let people = { list: null, showAll: false, person: null, merging: false, scan: null };
+const faceThumb = id => id ? `/api/faces/thumb/${id}.jpg` : '';
+const avatar = (id, cls) => id
+  ? `<img loading="lazy" src="${faceThumb(id)}" alt="" class="${cls} rounded-full bg-gray-100 object-cover dark:bg-gray-800">`
+  : `<div class="${cls} grid place-items-center rounded-full bg-gray-100 text-gray-300 dark:bg-gray-800">?</div>`;
+const mmss = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+const nRec = n => window.i18n.lang === 'pl'
+  ? `${n} ${n === 1 ? 'nagranie' : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'nagrania' : 'nagrań')}`
+  : `${n} ${n === 1 ? 'recording' : 'recordings'}`;
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const postJSON = (url, body) => api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+
+async function loadPeople(force) {
+  if (force || !people.list) {
+    try {
+      const [list, st] = await Promise.all([api(`/api/persons${wsQS()}`), api(`/api/faces/status${wsQS()}`)]);
+      people.list = list; people.scan = st;
+    } catch (e) { $('#peopleView').innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
+  }
+  renderFaceBar();
+  renderSubbar();
+  const r = currentRoute();
+  if (r.person) openPerson(r.person); else renderPeople();
+}
+
+function renderFaceBar() {
+  const st = people.scan; if (!st) return;
+  const b = st.scan, running = b && (b.status === 'QUEUED' || b.status === 'RUNNING');
+  if (!st.available) { $('#faceBar').innerHTML = `<p class="text-theme-xs text-orange-500">${L('people.unavailable')}</p>`; return; }
+  const pct = running && typeof b.progress === 'number' ? Math.round(b.progress * 100) : null;
+  $('#faceBar').innerHTML = `<div class="flex flex-wrap items-center gap-3 text-theme-xs text-gray-500 dark:text-gray-400">
+      <span>${L('people.scanned', { n: st.scanned, total: st.scenes })}</span>
+      ${st.scan_at ? `<span>${L('people.auto', { at: st.scan_at })}</span>` : ''}
+      ${running
+        ? `<span class="font-mono text-gray-700 dark:text-gray-200">${b.status === 'QUEUED' ? L('build.st.QUEUED') : `${b.stage ? L('people.stage', { n: b.stage, name: L('people.stage' + b.stage) }) + ' · ' : ''}${pct ?? 0}%`}${b.detail ? ' · ' + esc(b.detail) : ''}${b.eta_s ? ' · ' + L('job.eta', { t: fmtDuration(b.eta_s) }) : ''}</span>
+           <button id="faceScanStop" class="${BTN_DANGER}">${L('people.scanStop')}</button>`
+        : `<button id="faceScanStart" class="${BTN_PRIMARY}">${L('people.scanNow')}</button>`}
+    </div>
+    ${running ? `<div class="mt-2 h-1.5 max-w-md overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800"><div class="h-full rounded-full bg-brand-500" style="width:${pct ?? 0}%"></div></div>` : ''}`;
+}
+
+function personTile(p) {
+  return `<button data-go="#osoby/${p.id}" class="group flex flex-col items-center gap-1.5 rounded-xl p-2 text-center hover:bg-gray-50 dark:hover:bg-white/[0.04]">
+    ${avatar(p.cover, 'h-24 w-24 transition group-hover:ring-2 group-hover:ring-brand-500')}
+    <span class="max-w-full truncate text-theme-sm font-medium ${p.name ? 'text-gray-800 dark:text-white/90' : 'text-gray-400'}">${p.name ? esc(p.name) : L('people.addName')}</span>
+    <span class="text-[11px] text-gray-400">${nRec(p.scenes)}</span>
+  </button>`;
+}
+
+function renderPeople() {
+  const view = $('#peopleView'), list = people.list || [];
+  const named = list.filter(p => p.name && !p.hidden);
+  const unnamed = list.filter(p => !p.name && !p.hidden).sort((a, b) => b.scenes - a.scenes || b.tracks - a.tracks);
+  const often = unnamed.filter(p => p.scenes >= 2), rare = unnamed.filter(p => p.scenes < 2);
+  const hidden = list.filter(p => p.hidden);
+  const grid = ps => `<div class="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8">${ps.map(personTile).join('')}</div>`;
+  const head = (t, extra) => `<div class="mb-2 mt-6 flex flex-wrap items-center gap-3 first:mt-0"><h3 class="text-theme-sm font-semibold text-gray-700 dark:text-gray-200">${t}</h3>${extra || ''}</div>`;
+  if (!list.length) {
+    view.innerHTML = `<p class="text-theme-sm text-gray-400">${L('people.empty')}</p>`;
+    return;
+  }
+  view.innerHTML =
+    (named.length ? head(L('people.named', { n: named.length })) + grid(named) : '')
+    + (often.length || rare.length ? head(L('people.who'), rare.length
+        ? `<button id="peopleShowAll" class="${BTN}">${people.showAll ? L('people.hideRare') : L('people.showRare', { n: rare.length })}</button>` : '')
+      + grid(people.showAll ? [...often, ...rare] : often)
+      + (!often.length && !people.showAll ? `<p class="text-theme-xs text-gray-400">${L('people.onlyRare')}</p>` : '') : '')
+    + (hidden.length ? head(L('people.hidden', { n: hidden.length })) + grid(hidden) : '');
+}
+
+async function openPerson(id) {
+  const view = $('#peopleView');
+  if (!people.person || people.person.id !== id) view.innerHTML = `<p class="text-theme-sm text-gray-400">${L('loading')}</p>`;
+  let p;
+  try { p = await api(`/api/persons/${id}`); }
+  catch (e) { view.innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
+  if (currentRoute().person !== id) return;
+  // full scene records for the modal player (same source as Kasety / timeline)
+  const tapeIds = [...new Set(p.scenes.map(s => s.tape_id))];
+  await Promise.all(tapeIds.filter(t => !scenesCache[t]).map(async t => {
+    try { scenesCache[t] = await api(`/api/tapes/${encodeURIComponent(t)}/scenes`); } catch (_) { scenesCache[t] = []; }
+  }));
+  people.person = p;
+  renderPerson();
+}
+
+let personItems = [];                 // [{tapeId, s}] for the modal's prev/next, one per scene of this person
+function renderPerson() {
+  const p = people.person, view = $('#peopleView'), cover = p.tracks[0] && p.tracks[0].id;
+  personItems = p.scenes.map(sc => ({ tapeId: sc.tape_id,
+    s: (scenesCache[sc.tape_id] || []).find(x => x.scene_id === sc.scene_id) || { scene_id: sc.scene_id, scene_index: sc.scene_index } }));
+  const others = (people.list || []).filter(o => o.id !== p.id);
+  view.innerHTML = `
+    <div class="flex flex-wrap items-center gap-4">
+      ${avatar(cover, 'h-24 w-24')}
+      <div class="min-w-0">
+        <h3 class="truncate text-xl font-semibold ${p.name ? 'text-gray-800 dark:text-white/90' : 'text-gray-400'}">${p.name ? esc(p.name) : L('people.unnamed')}</h3>
+        <div class="text-theme-xs text-gray-500 dark:text-gray-400">${nRec(p.scenes.length)}</div>
+        <div class="mt-2 flex flex-wrap gap-2">
+          <button id="personName" class="${p.name ? BTN : BTN_PRIMARY}">${p.name ? L('people.rename') : L('people.addName')}</button>
+          <button id="personMerge" class="${BTN}">${L('people.merge')}</button>
+          <button id="personHide" class="${BTN}">${p.hidden ? L('people.unhide') : L('people.hide')}</button>
+        </div>
+      </div>
+    </div>
+    ${people.merging ? `<div class="mt-4 rounded-xl border border-brand-500/40 bg-brand-50/60 p-3 dark:bg-brand-500/[0.08]">
+        <div class="mb-2 flex items-center gap-3 text-theme-sm">${L('people.mergePick')}<button id="mergeCancel" class="${BTN}">${L('sel.clear')}</button></div>
+        <div class="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8">${others.map(o => `
+          <button data-merge-into="${o.id}" class="flex flex-col items-center gap-1 rounded-xl p-2 hover:bg-white dark:hover:bg-white/[0.06]">
+            ${avatar(o.cover, 'h-16 w-16')}
+            <span class="max-w-full truncate text-theme-xs ${o.name ? 'text-gray-800 dark:text-white/90' : 'text-gray-400'}">${o.name ? esc(o.name) : nRec(o.scenes)}</span>
+          </button>`).join('') || `<p class="text-theme-xs text-gray-400">${L('people.noOthers')}</p>`}</div>
+      </div>` : ''}
+    <h4 class="mb-2 mt-6 text-theme-sm font-semibold text-gray-700 dark:text-gray-200">${L('people.faces', { n: p.tracks.length })}</h4>
+    <p class="mb-2 text-theme-xs text-gray-400">${L('people.facesHint')}</p>
+    <div class="flex flex-wrap gap-2">${p.tracks.map(t => `
+      <div class="relative">
+        <button data-face-seek="${t.id}" title="${esc(t.tape_id)} · ${mmss(t.first)}">${avatar(t.id, 'h-16 w-16')}</button>
+        ${p.tracks.length > 1 ? `<button data-face-out="${t.id}" title="${L('people.notThis')}" class="absolute -right-1 -top-1 grid h-5 w-5 place-items-center rounded-full bg-gray-800 text-[11px] text-white hover:bg-error-500">✕</button>` : ''}
+      </div>`).join('')}</div>
+    <h4 class="mb-2 mt-6 text-theme-sm font-semibold text-gray-700 dark:text-gray-200">${L('people.recordings')}</h4>
+    <div class="grid gap-3">${p.scenes.map((sc, i) => `
+      <div class="flex gap-4 rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-white/[0.02]">
+        <button data-play="${i}" data-at="${sc.segments[0] ? sc.segments[0][0] : 0}" class="shrink-0">
+          <img loading="lazy" src="/api/tapes/${encodeURIComponent(sc.tape_id)}/files/thumbnails/${encodeURIComponent(sc.scene_id)}.jpg" alt="" class="h-24 w-32 rounded-lg bg-black object-cover">
+        </button>
+        <div class="min-w-0 flex-1">
+          <div class="truncate font-semibold text-gray-800 dark:text-white/90">${esc(sc.label || sc.tape_id)} · ${L('tl.scene', { n: sc.scene_index ?? '?' })}</div>
+          <div class="text-theme-xs text-gray-500 dark:text-gray-400">${sc.date || L('tl.noDate')}${sc.time ? ' ' + sc.time.slice(0, 5) : ''}${sc.label ? ' · ' + esc(sc.tape_id) : ''}</div>
+          <div class="mt-2 flex flex-wrap items-center gap-1.5 text-theme-xs">
+            <span class="text-gray-400">${L('people.seenAt')}</span>
+            ${sc.segments.map(([a, b]) => `<button data-play="${i}" data-at="${a}" class="${BTN} font-mono">▶ ${mmss(a)}${b > a ? '–' + mmss(b) : ''}</button>`).join('')}
+            <a class="${LINK} ml-2" href="#kasety/${encodeURIComponent(sc.tape_id)}/${encodeURIComponent(sc.scene_id)}">${L('tl.openInTapes')}</a>
+          </div>
+        </div>
+      </div>`).join('')}</div>`;
+}
+
+async function personAction(fn) {
+  try { await fn(); } catch (e) { alert(e.message); }
+}
+$('#faceBar').addEventListener('click', e => {
+  if (e.target.id === 'faceScanStart') personAction(async () => { await postJSON('/api/faces/scan'); await loadPeople(true); refresh(); });
+  if (e.target.id === 'faceScanStop' && confirm(L('people.confirmStop'))) personAction(async () => { await postJSON('/api/faces/scan/cancel'); await loadPeople(true); });
+});
+$('#peopleView').addEventListener('click', e => {
+  const nav = e.target.closest('[data-go]'); if (nav) { go(nav.dataset.go); return; }
+  if (e.target.id === 'peopleShowAll') { people.showAll = !people.showAll; renderPeople(); return; }
+  const p = people.person;
+  if (e.target.id === 'personName') {
+    const name = prompt(L('people.namePrompt'), p.name || '');
+    if (name === null) return;
+    const clash = name.trim() && (people.list || []).find(o => o.id !== p.id && (o.name || '').toLowerCase() === name.trim().toLowerCase());
+    if (clash && !confirm(L('people.confirmSameName', { name: clash.name }))) return;
+    personAction(async () => {
+      const r = await postJSON(`/api/persons/${p.id}`, { name: name.trim() });
+      people.list = null; go('#osoby/' + r.id);     // r.id differs when the name merged two people
+    });
+    return;
+  }
+  if (e.target.id === 'personHide') {
+    personAction(async () => { await postJSON(`/api/persons/${p.id}`, { hidden: !p.hidden }); people.person = null; await loadPeople(true); });
+    return;
+  }
+  if (e.target.id === 'personMerge' || e.target.id === 'mergeCancel') { people.merging = e.target.id === 'personMerge'; renderPerson(); return; }
+  const into = e.target.closest('[data-merge-into]');
+  if (into) {
+    const dst = (people.list || []).find(o => o.id === +into.dataset.mergeInto);
+    if (!confirm(L('people.confirmMerge', { name: dst && dst.name ? dst.name : L('people.unnamed') }))) return;
+    personAction(async () => {
+      const r = await postJSON(`/api/persons/${p.id}/merge`, { into: +into.dataset.mergeInto });
+      people.merging = false; people.list = null; go('#osoby/' + r.id);   // p.id no longer exists
+    });
+    return;
+  }
+  const out = e.target.closest('[data-face-out]');
+  if (out) {
+    if (!confirm(L('people.confirmNotThis'))) return;
+    personAction(async () => { await postJSON(`/api/faces/tracks/${out.dataset.faceOut}/move`, { person_id: null }); people.list = null; await loadPeople(true); });
+    return;
+  }
+  const fs = e.target.closest('[data-face-seek]');
+  if (fs) {
+    const t = p.tracks.find(x => x.id === +fs.dataset.faceSeek);
+    const i = t ? p.scenes.findIndex(sc => sc.tape_id === t.tape_id && sc.scene_id === t.scene_id) : -1;
+    if (i >= 0) openSceneModal(personItems, i, true, t.first);
+    return;
+  }
+  const pl = e.target.closest('[data-play]');
+  if (pl) {
+    const i = +pl.dataset.play;
+    if (personItems[i]) openSceneModal(personItems, i, true, +pl.dataset.at);
+  }
+});
+
 // ============ jobs ============
 function jobBadge(j, queue) {
   if (j.stage === 'capture') return [L('job.badge.capture'), 'bg-brand-500 text-white'];
@@ -867,6 +1072,7 @@ const buildMode = m => L('build.mode.' + m) || m.toUpperCase();
 const buildSt = st => L('build.st.' + st) || st;
 const buildLabel = b => {
   const t = b.token || '';
+  if (b.mode === 'faces') return L('build.facesLabel');
   if (t.startsWith('REPROBE') || t === 'METABACKFILL' || t.startsWith('SEL-') || t.startsWith('DEL-') || ['TAPE', 'tape'].includes(t)) return b.tape_id;
   return `${b.tape_id} · ${t.replace(/-RES$/, '')}`;
 };
@@ -886,7 +1092,7 @@ let jobsSig = '';
 function renderJobs(list, queue, builds) {
   builds = activeBuilds(builds);
   const sig = JSON.stringify([list.map(j => [j.tape_id, j.status, j.current_scene, j.captured_bytes, j.scene_index]),
-    builds.map(b => [b.key, b.status, b.progress])]);
+    builds.map(b => [b.key, b.status, b.progress, b.detail])]);
   if (sig === jobsSig) return; jobsSig = sig;
   const jobRows = list.map(j => {
     const [txt, cls] = jobBadge(j, queue), run = !TERMINAL.has(j.status);
@@ -909,10 +1115,17 @@ function renderJobs(list, queue, builds) {
   const buildRows = builds.map(b => {
     const cls = b.status === 'ERROR' ? 'bg-error-50 text-error-700 dark:bg-error-500/15 dark:text-error-400'
       : b.status === 'READY' ? 'bg-success-50 text-success-700 dark:bg-success-500/15 dark:text-success-400'
-      : b.status === 'QUEUED' ? 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200'
+      : b.status === 'QUEUED' || b.status === 'CANCELLED' ? 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200'
       : 'bg-blue-light-50 text-blue-light-700 dark:bg-blue-light-500/15 dark:text-blue-light-400';
     const pct = b.status === 'RUNNING' && typeof b.progress === 'number' ? Math.round(b.progress * 100) : null;
     const dlUrl = b.status === 'READY' ? buildDownloadUrl(b) : null;
+    const live = b.status === 'QUEUED' || b.status === 'RUNNING';
+    // the face scan reports which scene it's on, counts and an ETA, and can be stopped
+    const extra = b.mode === 'faces' ? [live && b.stage && L('people.stage', { n: b.stage, name: L('people.stage' + b.stage) }),
+      b.detail && esc(b.detail),
+      live && b.total != null && (b.stage === 2 ? L('build.facesRefine', { done: b.done ?? 0, total: b.total })
+        : L('build.facesCount', { done: b.done ?? 0, total: b.total, faces: b.faces ?? 0 })),
+      live && b.eta_s && L('job.eta', { t: fmtDuration(b.eta_s) })].filter(Boolean).join(' · ') : '';
     return `<div class="rounded-xl border border-gray-200 p-3 dark:border-gray-800">
       <div class="flex flex-wrap items-center gap-2">
         <span class="${BADGE} ${cls}">${buildMode(b.mode)}</span>
@@ -920,7 +1133,9 @@ function renderJobs(list, queue, builds) {
         <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${buildSt(b.status)}${pct != null ? ` · ${pct}%` : ''}${b.size ? ` · ${mb(b.size)}` : ''}</span>
         ${dlUrl ? `<a class="${BTN_PRIMARY}" href="${dlUrl}" download>${L('build.download')}</a>` : ''}
         <span class="ml-auto font-mono text-[11px] text-gray-400">${(b.updated_at || '').slice(11, 19)}</span>
+        ${b.mode === 'faces' && live ? `<button class="bcancel ${BTN}">${L('job.stop')}</button>` : ''}
       </div>
+      ${extra ? `<div class="mt-1 font-mono text-theme-xs text-gray-500 dark:text-gray-400">${extra}</div>` : ''}
       ${pct != null ? `<div class="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800"><div class="h-full rounded-full bg-brand-500" style="width:${pct}%"></div></div>` : ''}
       ${b.error ? `<div class="mt-1.5 text-theme-xs text-error-500">${b.error}</div>` : ''}
     </div>`;
@@ -928,6 +1143,11 @@ function renderJobs(list, queue, builds) {
   $('#jobs').innerHTML = (jobRows + buildRows) || `<p class="text-theme-sm text-gray-400">${L('jobs.empty')}</p>`;
 }
 $('#jobs').addEventListener('click', async e => {
+  if (e.target.closest('.bcancel')) {
+    if (!confirm(L('people.confirmStop'))) return;
+    try { await postJSON('/api/faces/scan/cancel'); refresh(); } catch (err) { alert(err.message); }
+    return;
+  }
   const b = e.target.closest('.jstop');
   if (b) {
     if (!confirm(L('job.confirmStop', { tape: b.dataset.tape }))) return;
@@ -1093,6 +1313,16 @@ async function refresh() {
       if (!busy && refresh._reprobeWasBusy) loadDuplicates(true);   // auto-refresh once the scans finish
       refresh._reprobeWasBusy = busy;
     }
+    if (currentRoute().section === 'osoby') {
+      const fb = (s.compress || []).find(b => b.mode === 'faces');
+      const fsig = fb ? [fb.status, fb.progress, fb.detail].join('|') : '';
+      if (fsig !== refresh._faceSig) {
+        const ended = refresh._faceSig && fb && !(fb.status === 'QUEUED' || fb.status === 'RUNNING');
+        refresh._faceSig = fsig;
+        if (people.scan) { people.scan.scan = fb || null; renderFaceBar(); }
+        if (ended) loadPeople(true);
+      }
+    }
     renderTapeGrid(t);
     renderLogs(s);
   } catch (e) {
@@ -1128,12 +1358,13 @@ $('#workspaceAdd').onclick = async () => {
 };
 
 // ============ hash router: one section at a time, deep-linkable ============
-const SECTIONS = ['pulpit', 'zadania', 'kasety', 'duplikaty', 'timeline', 'logi', 'info'];
+const SECTIONS = ['pulpit', 'zadania', 'kasety', 'duplikaty', 'timeline', 'osoby', 'logi', 'info'];
 
 function currentRoute() {
   const parts = location.hash.replace(/^#/, '').split('/').map(decodeURIComponent);
   const section = SECTIONS.includes(parts[0]) ? parts[0] : 'pulpit';
-  const r = { section, tape: null, scene: null, year: null, month: null };
+  const r = { section, tape: null, scene: null, year: null, month: null, person: null };
+  if (section === 'osoby' && /^\d+$/.test(parts[1] || '')) r.person = +parts[1];
   if (section === 'kasety' && parts[1]) { r.tape = parts[1]; r.scene = parts[2] || null; }
   if (section === 'timeline' && /^\d{4}$/.test(parts[1] || '')) { r.year = +parts[1]; if (/^\d{1,2}$/.test(parts[2] || '')) r.month = +parts[2]; }
   return r;
@@ -1148,6 +1379,10 @@ function renderSubbar() {
   if (r.section === 'kasety' && r.tape) {
     html = `<button data-go="#kasety" class="inline-flex items-center gap-1 text-gray-600 hover:text-brand-500 dark:text-gray-300">${L('tape.crumbAll')}</button>
       <span class="text-gray-300 dark:text-gray-600">/</span><span class="truncate text-gray-700 dark:text-gray-200">${r.tape}${r.scene ? ' ' + L('tape.crumbScene') : ''}</span>`;
+  } else if (r.section === 'osoby' && r.person) {
+    const p = (people.list || []).find(x => x.id === r.person);
+    html = `<button data-go="#osoby" class="text-gray-600 hover:text-brand-500 dark:text-gray-300">${L('people.crumbAll')}</button>
+      <span class="text-gray-300 dark:text-gray-600">/</span><span class="truncate text-gray-700 dark:text-gray-200">${p && p.name ? esc(p.name) : L('people.unnamed')}</span>`;
   } else if (r.section === 'timeline' && r.year) {
     html = `<button data-go="#timeline" class="text-gray-600 hover:text-brand-500 dark:text-gray-300">${L('tl.crumbAll')}</button>
       <span class="text-gray-300 dark:text-gray-600">/</span>`
@@ -1184,6 +1419,7 @@ function applyRoute() {
     scroller?.scrollTo({ top: 0 });
   } else {
     if (r.section === 'duplikaty') loadDuplicates(false);
+    if (r.section === 'osoby') { if (!r.person) { people.person = null; people.merging = false; } loadPeople(false); }
     scroller?.scrollTo({ top: 0 });
   }
   renderSubbar();

@@ -11,6 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # service, see compose.yaml) — without a device, libplacebo just fails to init and
 # that one build errors, everything else in this image is unaffected.
 
+# Face recognition ("Osoby"): OpenCV's YuNet detector + SFace embedder for the fast
+# scan, ArcFace (onnxruntime) for the refinement pass, all CPU only. The three ONNX
+# models (~213 MB) are baked in and sha256-checked here, so the server never
+# downloads anything at runtime (faces.ensure_models only fetches if missing).
+RUN pip install --no-cache-dir opencv-python-headless==5.0.0.93 numpy==2.5.4 onnxruntime==1.31.0
+COPY minidv_archiver/face_models.py /tmp/face_models.py
+RUN python /tmp/face_models.py /opt/face-models && rm /tmp/face_models.py
+ENV MINIDV_FACES_MODELS=/opt/face-models
+
 WORKDIR /app
 COPY minidv_archiver/ ./minidv_archiver/
 COPY frontend/ ./frontend/

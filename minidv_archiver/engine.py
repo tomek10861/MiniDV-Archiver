@@ -14,11 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import library_index
+from . import faces, library_index
 from .camera import Camera, CameraError
 from .config import Config
 from .media import process_capture, sha256
-from .store import TERMINAL, JobStore, now
+from .store import FACES_KEY, TERMINAL, JobStore, now
 
 MAX_JOBS = 30
 # Human label, not a filename (unlike tape_id) -- spaces are fine (e.g. "Kasia").
@@ -91,6 +91,7 @@ class Engine:
             threading.Thread(target=self._process_worker, daemon=True).start()
             threading.Thread(target=self._compress_worker, daemon=True).start()
             threading.Thread(target=self._index_worker, daemon=True).start()
+            threading.Thread(target=self._faces_worker, daemon=True).start()
 
     # ---- storage -----------------------------------------------------------
     def storage(self) -> dict:
@@ -194,6 +195,103 @@ class Engine:
         return {"capture": self.store.capture_job(), "processing": self.store.processing_job(),
                 "queue": self.store.pending(), "jobs": self.store.list_jobs(),
                 "compress": self.store.list_builds()}
+
+    # ---- faces ("Osoby"): scan worker + daily schedule + person edits --------
+    def _faces_worker(self) -> None:
+        # a RUNNING row left by a crash/restart would block every future scan
+        stale = self.store.get_build(FACES_KEY)
+        if stale and stale["status"] == "RUNNING":
+            stale.update(status="CANCELLED", error="przerwane restartem — następny skan dokończy resztę")
+            self.store.put_build(stale)
+        while True:
+            time.sleep(5)
+            try:
+                # cheap checks first: cv2 is only imported once there's work to do
+                if (self.config.faces_enabled and faces.due_today(self.config, self.store)
+                        and faces.available()):
+                    faces.mark_auto_run(self.config, self.store)
+                    try:
+                        self.store.enqueue_face_scan("cron")
+                    except RuntimeError:
+                        pass                       # one already running: the cron just skips
+                build = self.store.claim_face_scan()
+                if build:
+                    self._run_face_scan(build)
+            except Exception:  # noqa: BLE001 - the scheduler must never die
+                pass
+
+    def _run_face_scan(self, build: dict) -> None:
+        try:
+            if not faces.available():
+                raise RuntimeError("brak opencv-python-headless/numpy — zainstaluj dodatek [faces]")
+            res = faces.run_scan(self.config, self.store, build)
+            build.update(status="READY", progress=1.0,
+                         detail=f"{res['scenes']} nowych scen · {res['faces']} twarzy · "
+                                f"{res['refined']} scen dokładnie · {res['persons']} osób")
+        except faces.ScanCancelled:
+            build.update(status="CANCELLED", detail="przerwane — następny skan dokończy resztę")
+        except Exception as exc:  # noqa: BLE001
+            build.update(status="ERROR", error=str(exc))
+        build["cancel"] = False
+        self.store.put_build(build)
+
+    def start_face_scan(self) -> dict:
+        if not self.config.faces_enabled:
+            raise RuntimeError("rozpoznawanie twarzy wyłączone (MINIDV_FACES=0)")
+        return self.store.enqueue_face_scan("manual")
+
+    def cancel_face_scan(self) -> dict:
+        b = self.store.request_build_cancel(FACES_KEY)
+        if not b:
+            raise RuntimeError("żadne skanowanie twarzy nie trwa")
+        return b
+
+    def _drop_faces(self, tape_id: str, scene_ids: list[str] | None = None) -> None:
+        ids, persons = self.store.face_drop_tracks(tape_id, scene_ids)
+        faces.drop_thumbs(self.config, ids)
+        for pid in persons:
+            if self.store.face_person(pid):
+                faces.recompute_person(self.store, pid)
+
+    def faces_status(self, workspace: str | None) -> dict:
+        return faces.status(self.config, self.store, workspace or "default")
+
+    def persons(self, workspace: str | None) -> list[dict]:
+        return faces.persons(self.store, workspace or "default")
+
+    def person(self, person_id: int) -> dict:
+        p = faces.person_detail(self.store, person_id)
+        if not p:
+            raise FileNotFoundError("nie ma takiej osoby")
+        return p
+
+    def update_person(self, person_id: int, *, name=None, hidden=None) -> dict:
+        p = self.store.face_person(person_id)
+        if not p:
+            raise FileNotFoundError("nie ma takiej osoby")
+        if name is not None:
+            name = str(name).strip()[:80]
+            other = name and self.store.face_person_by_name(p["workspace"], name, exclude=person_id)
+            if other:
+                # same name as someone already in this workspace = the same person (iPhone-style)
+                return self.merge_persons(person_id, other)
+        self.store.face_person_update(person_id, name=name, hidden=hidden)
+        return self.store.face_person(person_id)
+
+    def merge_persons(self, src: int, dst: int) -> dict:
+        if src == dst:
+            raise ValueError("to ta sama osoba")
+        self.store.face_merge(src, dst)
+        faces.recompute_person(self.store, dst)
+        return self.store.face_person(dst)
+
+    def move_face(self, track_id: int, person_id: int | None) -> dict:
+        old, new = self.store.face_move_track(track_id, person_id)
+        for pid in (old, new):
+            if self.store.face_person(pid):
+                faces.recompute_person(self.store, pid)
+        self.store.face_prune_empty()
+        return {"track": track_id, "from": old, "to": new}
 
     # ---- tape / scene index (fast /api/tapes + year/month timeline) -------
     def _index_worker(self) -> None:
@@ -511,7 +609,8 @@ class Engine:
                     continue
             else:
                 with self.proc_cv:
-                    while not any(b["status"] == "QUEUED" for b in self.store.list_builds()):
+                    while not any(b["status"] == "QUEUED" and b["key"] != FACES_KEY
+                                  for b in self.store.list_builds()):
                         self.proc_cv.wait()
                 build = self.store.claim_next_build()
                 if not build:
@@ -609,6 +708,7 @@ class Engine:
             self.store.delete_job(tape_id)
             self._drop_share(tape_id)
             self.store.delete_index(tape_id)
+            self._drop_faces(tape_id)
         return {"deleted": tape_id}
 
     def start_delete_scenes(self, tape_id: str, scene_ids: list[str]) -> dict:
@@ -661,6 +761,7 @@ class Engine:
             sha.write_text("\n".join(lines) + "\n")
         with self.lock:
             self._drop_share(tape_id)
+        self._drop_faces(tape_id, removed)
         self._reindex(tape_id)
         return {"tape_id": tape_id, "removed": removed, "remaining": tape["scene_count"]}
 
@@ -711,6 +812,7 @@ class Engine:
                 self.store.put_job(job)
             self._drop_share(tape_id)
             self.store.delete_index(tape_id)
+            self.store.face_rename_tape(tape_id, new_id)
             self._persist()
         self._reindex(new_id)
         return {"tape_id": new_id}

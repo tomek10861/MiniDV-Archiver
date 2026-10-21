@@ -54,6 +54,22 @@ concurrently:
   re-encodes and quality scans. Finished rows older than 6 h are pruned.
 - **library** — the precomputed tape/scene index (`/api/tapes`, timeline,
   duplicates), refreshed by the converter; keyed by tape, skipped when unchanged.
+- **face_persons / face_tracks / face_scanned** — face recognition ("Osoby"): a
+  person (cluster, scoped to one workspace) owns tracks (one person's appearance in
+  one scene: seconds visible + 128-d embedding); `face_scanned` marks scenes done so
+  scans are incremental. The scan itself is the singleton build row `_faces/SCAN`
+  with its own converter thread (`claim_next_build` skips it), cancellable through a
+  `cancel` flag in its payload. Thumbnails live in `<storage>/faces/<track>.jpg`.
+  One scan runs three stages: (1) fast scan of new scenes — YuNet + SFace, one sharp
+  frame per second, greedy assignment; (2) refinement (`face_refine.py`) of tracks
+  not yet refined — re-detect in the seconds the face was visible, score each view
+  (size × sharpness × detector confidence × frontal-ness from landmarks), embed the
+  best views with ArcFace into `face_tracks.arc`; (3) re-cluster each workspace from
+  scratch — average-linkage over frontal tracks, cannot-links for faces sharing a
+  frame and operator "diff" feedback, must-links for "same" (`face_feedback`, written
+  by merge / move), weak tracks attached only with a clear margin, names/hidden kept
+  via `face_persons.anchor`. Applied in one transaction, refused and retried if the
+  operator edited persons meanwhile (`faces_gen`).
 - **cam_commands** — AV/C transport requests from the api to the grabber, with the
   response written back.
 

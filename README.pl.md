@@ -64,6 +64,19 @@ które można odtworzyć.
   dekodowania i odcisk treści; widok *Duplikaty* grupuje to samo nagranie z
   osobnych zgrań tej samej kasety i oznacza wersję z mniejszą liczbą błędów, żeby
   zostawić najczystszą, a resztę skasować.
+- **Osoby (rozpoznawanie twarzy)**: skan na samym CPU (OpenCV YuNet + SFace) proxy
+  scen — z każdej sekundy analizowana pierwsza nierozmazana klatka — grupuje twarze w
+  osoby osobno dla każdego workspace, jak w Zdjęciach na iPhonie: podpisz, połącz „to ta
+  sama osoba", odłącz złą twarz, a po kliknięciu osoby masz wszystkie nagrania z nią i
+  przyciski „▶ 0:12" startujące odtwarzanie w tym momencie. Co noc
+  (`MINIDV_FACES_SCAN_AT`, domyślnie 03:00) albo ręcznie, zawsze jeden skan naraz,
+  widoczny i do przerwania w Zadaniach; wstrzymuje się na czas zgrywania/przetwarzania
+  i wznawia od miejsca przerwania. Drugi, dokładny etap ponownie analizuje każdą
+  znalezioną twarz — najlepsze ujęcia (przodem, ostre, duże) dostają wektor ArcFace — i
+  grupuje wszystkich od nowa: dwie twarze z jednej klatki nigdy nie są łączone, twarze z
+  profilu/rozmazane dołączają tylko do wyraźnie pasującej osoby, a Twoje połączenia,
+  „to nie ta osoba” i imiona są twardymi regułami. (Wagi ArcFace pochodzą z insightface,
+  licencja tylko do użytku niekomercyjnego.)
 - **Eksport „udostępnij"**: przycisk „⬇ FB" na żądanie re-enkoduje scenę (albo całą
   taśmę) do MP4 ~90 MB w tej samej rozdzielczości na Messengera/Facebooka i podaje
   gotowy plik. Tymczasowe, jedno na raz, auto-czyszczone.

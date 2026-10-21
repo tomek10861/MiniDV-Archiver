@@ -75,8 +75,12 @@ def test_grabber_hands_capture_to_converter(tmp_path, monkeypatch):
     grabber.run_capture_from_store(job)
 
     # the job is now handed to the converter, whose worker thread is already running
+    # fake_process reports COMPLETED from inside process_capture, i.e. just before
+    # the engine removes working/<id> -- so wait for the cleanup too, not just the status
     for _ in range(100):
-        if converter.store.get_job("TAPE-0001")["status"] in ("COMPLETED", "ERROR"):
+        if (converter.store.get_job("TAPE-0001")["status"] == "ERROR"
+                or (converter.store.get_job("TAPE-0001")["status"] == "COMPLETED"
+                    and not (storage / "working" / "TAPE-0001").exists())):
             break
         time.sleep(0.05)
     assert converter.store.get_job("TAPE-0001")["status"] == "COMPLETED"

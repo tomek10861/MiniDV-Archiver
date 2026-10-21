@@ -61,6 +61,18 @@ whole-tape review file, thumbnails, JSON metadata) is a derivative you can regen
   counts and a content fingerprint; the *Duplicates* view groups the same recording
   across separate captures of one tape and marks the version with fewer errors so
   you can keep the cleanest and delete the rest.
+- **People (face recognition)**: a CPU-only scan (OpenCV YuNet + SFace) of the scene
+  proxies — per second of video the first non-blurred frame is analysed — groups faces
+  into people per workspace, iPhone-Photos style: name them, merge "same person",
+  split off a wrong face, and click a person to get every recording they appear in with
+  "▶ 0:12" chips that start playback at that moment. Runs nightly (`MINIDV_FACES_SCAN_AT`,
+  default 03:00) or on demand, one scan at a time, visible and stoppable in Tasks;
+  pauses while a capture or conversion runs and resumes where it stopped. A second,
+  detailed pass then re-examines every face found — the best few views (frontal, sharp,
+  large) get an ArcFace embedding — and regroups everyone from scratch: two faces in
+  one frame are never merged, profile/blurry faces only join a clearly-matching person,
+  and your merges / "not this person" / names are kept as hard rules. (ArcFace weights
+  are insightface's, licensed for non-commercial use.)
 - **Share export**: an on-demand "⬇ FB" button re-encodes a scene (or the whole
   tape) to a ~90 MB, same-resolution MP4 for Messenger/Facebook, then hands you the
   file. Temporary, one at a time, auto-pruned.

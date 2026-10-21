@@ -18,6 +18,8 @@ dependencies = []   # stdlib only; needs the external tools listed in the README
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+# face recognition ("Osoby"); the scanner skips itself cleanly without these
+faces = ["opencv-python-headless>=4.8", "numpy>=1.24", "onnxruntime>=1.17"]
 
 [project.urls]
 Repository = "https://github.com/tomek10861/MiniDV-Archiver"

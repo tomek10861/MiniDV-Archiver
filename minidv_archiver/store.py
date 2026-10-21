@@ -66,7 +66,54 @@ CREATE TABLE IF NOT EXISTS workspaces (
     name       TEXT PRIMARY KEY,
     created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS face_persons (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace  TEXT NOT NULL,
+    name       TEXT,
+    hidden     INTEGER NOT NULL DEFAULT 0,
+    centroid   BLOB,
+    n          INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS face_persons_ws ON face_persons(workspace);
+CREATE TABLE IF NOT EXISTS face_tracks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id  INTEGER NOT NULL,
+    workspace  TEXT NOT NULL,
+    tape_id    TEXT NOT NULL,
+    scene_id   TEXT NOT NULL,
+    embedding  BLOB NOT NULL,
+    quality    REAL NOT NULL DEFAULT 0,
+    times      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS face_tracks_person ON face_tracks(person_id);
+CREATE INDEX IF NOT EXISTS face_tracks_scene ON face_tracks(tape_id, scene_id);
+CREATE TABLE IF NOT EXISTS face_scanned (
+    tape_id    TEXT NOT NULL,
+    scene_id   TEXT NOT NULL,
+    model      TEXT,
+    faces      INTEGER,
+    scanned_at TEXT,
+    PRIMARY KEY (tape_id, scene_id)
+);
+-- operator corrections the re-clustering must honour: kind 'same' / 'diff' between two tracks
+CREATE TABLE IF NOT EXISTS face_feedback (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,
+    a          INTEGER NOT NULL,
+    b          INTEGER NOT NULL,
+    created_at TEXT
+);
 """
+
+# columns added after the first release of face recognition (ALTER TABLE on open)
+_MIGRATIONS = {
+    "face_tracks": [("arc", "BLOB"), ("rq", "REAL"), ("frontal", "REAL"), ("refined", "TEXT")],
+    "face_persons": [("anchor", "INTEGER")],
+}
+
+# the one face-scan build row (singleton: see JobStore.enqueue_face_scan)
+FACES_KEY = "_faces/SCAN"
 
 
 def now() -> str:
@@ -84,6 +131,11 @@ class JobStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            for table, cols in _MIGRATIONS.items():
+                have = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                for col, typ in cols:
+                    if col not in have:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
     # ---- low-level -------------------------------------------------------
     def close(self) -> None:
@@ -274,13 +326,17 @@ class JobStore:
         return json.loads(row[0]) if row else None
 
     def put_build(self, build: dict) -> dict:
+        """Upsert; a ``cancel`` flag already set on the row (request_build_cancel,
+        from another process) survives the worker writing its own copy back."""
         build = dict(build)
         build["updated_at"] = now()
         with self._lock:
             self._conn.execute(
                 "INSERT INTO builds (key, tape_id, status, updated_at, payload) VALUES (?,?,?,?,?) "
                 "ON CONFLICT(key) DO UPDATE SET tape_id=excluded.tape_id, status=excluded.status, "
-                "updated_at=excluded.updated_at, payload=excluded.payload",
+                "updated_at=excluded.updated_at, payload=CASE "
+                "WHEN json_extract(builds.payload, '$.cancel') AND excluded.status IN ('QUEUED','RUNNING') "
+                "THEN json_set(excluded.payload, '$.cancel', json('true')) ELSE excluded.payload END",
                 (build["key"], build.get("tape_id"), build.get("status", "QUEUED"),
                  build["updated_at"], json.dumps(build)))
         return build
@@ -302,13 +358,16 @@ class JobStore:
     def prune_builds(self, max_age_hours: float = 6) -> None:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
         with self._lock:
-            self._conn.execute("DELETE FROM builds WHERE status IN ('READY','ERROR') AND updated_at < ?",
+            self._conn.execute("DELETE FROM builds WHERE status IN ('READY','ERROR','CANCELLED') AND updated_at < ?",
                                (cutoff,))
 
     def claim_next_build(self) -> dict | None:
+        """Next share/restore/... build. The face scan has its own worker (it can
+        run for days; it must not hold up a quick FB export), so it's skipped here."""
         with self._lock, self._immediate():
             row = self._conn.execute(
-                "SELECT payload FROM builds WHERE status='QUEUED' ORDER BY updated_at LIMIT 1").fetchone()
+                "SELECT payload FROM builds WHERE status='QUEUED' AND key<>? ORDER BY updated_at LIMIT 1",
+                (FACES_KEY,)).fetchone()
             if not row:
                 return None
             build = json.loads(row[0])
@@ -373,6 +432,363 @@ class JobStore:
     def list_workspaces(self) -> list[str]:
         with self._lock:
             return [r[0] for r in self._conn.execute("SELECT name FROM workspaces ORDER BY created_at")]
+
+    # ---- face scan: one singleton build row, cancellable ------------------
+    def enqueue_face_scan(self, trigger: str) -> dict:
+        """Queue the face scan unless one is already QUEUED/RUNNING — checked and
+        written in one IMMEDIATE transaction, so the cron and a click (or two api
+        processes) can never start two scans side by side."""
+        with self._lock, self._immediate():
+            row = self._conn.execute("SELECT status FROM builds WHERE key=?", (FACES_KEY,)).fetchone()
+            if row and row[0] in ("QUEUED", "RUNNING"):
+                raise RuntimeError("skanowanie twarzy już trwa")
+            build = {"key": FACES_KEY, "token": "SCAN", "tape_id": "_faces", "mode": "faces",
+                     "title": "Rozpoznawanie twarzy", "status": "QUEUED", "trigger": trigger,
+                     "path": "", "size": None, "error": None, "progress": 0.0, "cancel": False,
+                     "updated_at": now(), "queued_at": now()}
+            self._conn.execute(
+                "INSERT INTO builds (key, tape_id, status, updated_at, payload) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET tape_id=excluded.tape_id, status=excluded.status, "
+                "updated_at=excluded.updated_at, payload=excluded.payload",
+                (FACES_KEY, "_faces", "QUEUED", build["updated_at"], json.dumps(build)))
+        return build
+
+    def claim_face_scan(self) -> dict | None:
+        with self._lock, self._immediate():
+            row = self._conn.execute("SELECT payload FROM builds WHERE key=? AND status='QUEUED'",
+                                     (FACES_KEY,)).fetchone()
+            if not row:
+                return None
+            build = json.loads(row[0])
+            build["status"], build["updated_at"], build["started_at"] = "RUNNING", now(), now()
+            self._conn.execute("UPDATE builds SET status='RUNNING', updated_at=?, payload=? WHERE key=?",
+                               (build["updated_at"], json.dumps(build), FACES_KEY))
+            return build
+
+    def request_build_cancel(self, key: str) -> dict | None:
+        """Flag a QUEUED/RUNNING build for cancellation. A QUEUED one is cancelled
+        on the spot; a RUNNING one is stopped by its worker at the next check."""
+        with self._lock, self._immediate():
+            row = self._conn.execute("SELECT payload, status FROM builds WHERE key=?", (key,)).fetchone()
+            if not row or row[1] not in ("QUEUED", "RUNNING"):
+                return None
+            build = json.loads(row[0])
+            build["cancel"] = True
+            if row[1] == "QUEUED":
+                build["status"] = "CANCELLED"
+            build["updated_at"] = now()
+            self._conn.execute("UPDATE builds SET status=?, updated_at=?, payload=? WHERE key=?",
+                               (build["status"], build["updated_at"], json.dumps(build), key))
+            return build
+
+    def build_cancelled(self, key: str) -> bool:
+        with self._lock:
+            row = self._conn.execute("SELECT json_extract(payload, '$.cancel') FROM builds WHERE key=?",
+                                     (key,)).fetchone()
+        return bool(row and row[0])
+
+    def get_meta(self, k: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, k: str, v: str) -> None:
+        with self._lock:
+            self._conn.execute("INSERT INTO meta (k, v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                               (k, v))
+
+    # ---- faces: persons (clusters, per workspace) and their tracks ------------
+    # A track = one person's appearance in one scene (timestamps + embedding).
+    # ``faces_gen`` is bumped on every operator edit that moves tracks between
+    # persons, so a running scan knows to reload its cached centroids.
+    def faces_gen(self) -> int:
+        return int(self.get_meta("faces_gen") or 0)
+
+    def _bump_faces_gen(self) -> None:
+        self._conn.execute("INSERT INTO meta (k, v) VALUES ('faces_gen', '1') "
+                           "ON CONFLICT(k) DO UPDATE SET v=CAST(v AS INTEGER)+1")
+
+    def face_scanned_keys(self, model: str) -> set[tuple[str, str]]:
+        with self._lock:
+            return {(r[0], r[1]) for r in self._conn.execute(
+                "SELECT tape_id, scene_id FROM face_scanned WHERE model=?", (model,))}
+
+    def face_scanned_count(self, tape_ids: set[str] | None = None) -> int:
+        with self._lock:
+            rows = self._conn.execute("SELECT tape_id FROM face_scanned").fetchall()
+        return sum(1 for r in rows if tape_ids is None or r[0] in tape_ids)
+
+    def face_person_centroids(self, workspace: str) -> list[tuple[int, bytes, int]]:
+        with self._lock:
+            return [tuple(r) for r in self._conn.execute(
+                "SELECT id, centroid, n FROM face_persons WHERE workspace=? AND centroid IS NOT NULL", (workspace,))]
+
+    def face_person_create(self, workspace: str, centroid: bytes | None = None, n: int = 0) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO face_persons (workspace, centroid, n, created_at) VALUES (?,?,?,?)",
+                (workspace, centroid, n, now()))
+            return int(cur.lastrowid)
+
+    def face_person_set_centroid(self, person_id: int, centroid: bytes | None, n: int) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE face_persons SET centroid=?, n=? WHERE id=?", (centroid, n, person_id))
+
+    def face_save_scene(self, tape_id: str, scene_id: str, model: str, tracks: list[dict]) -> list[int] | None:
+        """Atomically replace one scene's tracks and mark it scanned. Returns the
+        new track ids (same order), or None — nothing written — if a person a track
+        points at was merged/deleted meanwhile (the caller re-matches and retries)."""
+        with self._lock, self._immediate():
+            for t in tracks:
+                if not self._conn.execute("SELECT 1 FROM face_persons WHERE id=?", (t["person_id"],)).fetchone():
+                    return None
+            self._conn.execute("DELETE FROM face_tracks WHERE tape_id=? AND scene_id=?", (tape_id, scene_id))
+            ids = []
+            for t in tracks:
+                cur = self._conn.execute(
+                    "INSERT INTO face_tracks (person_id, workspace, tape_id, scene_id, embedding, quality, times) "
+                    "VALUES (?,?,?,?,?,?,?)", (t["person_id"], t["workspace"], tape_id, scene_id,
+                                               t["embedding"], t["quality"], json.dumps(t["times"])))
+                ids.append(int(cur.lastrowid))
+            self._conn.execute(
+                "INSERT INTO face_scanned (tape_id, scene_id, model, faces, scanned_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(tape_id, scene_id) DO UPDATE SET model=excluded.model, faces=excluded.faces, "
+                "scanned_at=excluded.scanned_at", (tape_id, scene_id, model, len(tracks), now()))
+            return ids
+
+    def face_persons(self, workspace: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT p.id, p.name, p.hidden, COUNT(t.id), COUNT(DISTINCT t.tape_id || '/' || t.scene_id), "
+                "(SELECT id FROM face_tracks WHERE person_id=p.id ORDER BY COALESCE(rq, quality) DESC LIMIT 1) "
+                "FROM face_persons p LEFT JOIN face_tracks t ON t.person_id=p.id "
+                "WHERE p.workspace=? GROUP BY p.id", (workspace,)).fetchall()
+        return [{"id": r[0], "name": r[1], "hidden": bool(r[2]), "tracks": r[3], "scenes": r[4], "cover": r[5]}
+                for r in rows]
+
+    def face_person(self, person_id: int) -> dict | None:
+        with self._lock:
+            r = self._conn.execute("SELECT id, workspace, name, hidden FROM face_persons WHERE id=?",
+                                   (person_id,)).fetchone()
+        return {"id": r[0], "workspace": r[1], "name": r[2], "hidden": bool(r[3])} if r else None
+
+    def face_tracks(self, person_id: int, with_embedding: bool = False) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, tape_id, scene_id, COALESCE(rq, quality), times, embedding FROM face_tracks WHERE person_id=? "
+                "ORDER BY tape_id, scene_id, id", (person_id,)).fetchall()
+        out = []
+        for r in rows:
+            t = {"id": r[0], "tape_id": r[1], "scene_id": r[2], "quality": r[3], "times": json.loads(r[4])}
+            if with_embedding:
+                t["embedding"] = r[5]
+            out.append(t)
+        return out
+
+    def face_track(self, track_id: int) -> dict | None:
+        with self._lock:
+            r = self._conn.execute("SELECT id, person_id, workspace, tape_id, scene_id FROM face_tracks WHERE id=?",
+                                   (track_id,)).fetchone()
+        return {"id": r[0], "person_id": r[1], "workspace": r[2], "tape_id": r[3], "scene_id": r[4]} if r else None
+
+    def face_person_update(self, person_id: int, *, name=None, hidden=None) -> None:
+        with self._lock:
+            # naming / hiding = "this face is somebody": pin the face the operator was
+            # looking at, so re-clustering knows which new group the name belongs to
+            self._anchor(person_id)
+            if name is not None:
+                self._conn.execute("UPDATE face_persons SET name=? WHERE id=?", (name or None, person_id))
+            if hidden is not None:
+                self._conn.execute("UPDATE face_persons SET hidden=? WHERE id=?", (int(bool(hidden)), person_id))
+
+    def face_person_by_name(self, workspace: str, name: str, exclude: int | None = None) -> int | None:
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT id FROM face_persons WHERE workspace=? AND lower(name)=lower(?) AND id<>? LIMIT 1",
+                (workspace, name, exclude or -1)).fetchone()
+        return r[0] if r else None
+
+    def face_merge(self, src: int, dst: int) -> None:
+        """Fold person ``src`` into ``dst`` (same workspace only). ``dst`` keeps
+        its name, or takes ``src``'s if it had none."""
+        with self._lock, self._immediate():
+            a = self._conn.execute("SELECT workspace, name FROM face_persons WHERE id=?", (src,)).fetchone()
+            b = self._conn.execute("SELECT workspace, name FROM face_persons WHERE id=?", (dst,)).fetchone()
+            if not a or not b:
+                raise FileNotFoundError("nie ma takiej osoby")
+            if a[0] != b[0]:
+                raise ValueError("nie można łączyć osób z różnych workspace")
+            ca, cb = self._anchor(src), self._anchor(dst)
+            if ca and cb:
+                self._feedback("same", ca, cb)
+            self._conn.execute("UPDATE face_tracks SET person_id=? WHERE person_id=?", (dst, src))
+            if not b[1] and a[1]:
+                self._conn.execute("UPDATE face_persons SET name=? WHERE id=?", (a[1], dst))
+            self._conn.execute("DELETE FROM face_persons WHERE id=?", (src,))
+            self._bump_faces_gen()
+
+    def face_move_track(self, track_id: int, person_id: int | None) -> tuple[int, int]:
+        """Move one track to another person of its workspace, or (person_id=None)
+        split it off into a new unnamed person. Returns (old, new) person ids."""
+        with self._lock, self._immediate():
+            t = self._conn.execute("SELECT person_id, workspace FROM face_tracks WHERE id=?", (track_id,)).fetchone()
+            if not t:
+                raise FileNotFoundError("nie ma takiej twarzy")
+            old_anchor = self._anchor(t[0], exclude=track_id)
+            if old_anchor:
+                self._feedback("diff", track_id, old_anchor)
+            if person_id is None:
+                person_id = int(self._conn.execute(
+                    "INSERT INTO face_persons (workspace, created_at) VALUES (?,?)", (t[1], now())).lastrowid)
+            else:
+                p = self._conn.execute("SELECT workspace FROM face_persons WHERE id=?", (person_id,)).fetchone()
+                if not p:
+                    raise FileNotFoundError("nie ma takiej osoby")
+                if p[0] != t[1]:
+                    raise ValueError("nie można przenieść twarzy do innego workspace")
+                new_anchor = self._anchor(person_id)
+                if new_anchor:
+                    self._feedback("same", track_id, new_anchor)
+            self._conn.execute("UPDATE face_tracks SET person_id=? WHERE id=?", (person_id, track_id))
+            self._bump_faces_gen()
+            return t[0], person_id
+
+    def face_drop_tracks(self, tape_id: str, scene_ids: list[str] | None = None) -> tuple[list[int], set[int]]:
+        """Forget a deleted tape's (or some of its scenes') tracks + scanned marks.
+        Returns (dropped track ids, affected person ids); unnamed persons left
+        with no tracks at all are deleted."""
+        with self._lock, self._immediate():
+            if scene_ids is None:
+                where, args = "tape_id=?", [tape_id]
+            else:
+                where, args = (f"tape_id=? AND scene_id IN ({','.join('?' * len(scene_ids))})",
+                               [tape_id, *scene_ids])
+            rows = self._conn.execute(f"SELECT id, person_id FROM face_tracks WHERE {where}", args).fetchall()
+            self._conn.execute(f"DELETE FROM face_tracks WHERE {where}", args)
+            self._conn.execute(f"DELETE FROM face_scanned WHERE {where}", args)
+            persons = {r[1] for r in rows}
+            self._conn.execute("DELETE FROM face_persons WHERE name IS NULL AND id NOT IN "
+                               "(SELECT DISTINCT person_id FROM face_tracks)")
+            if rows:
+                self._bump_faces_gen()
+        return [r[0] for r in rows], persons
+
+    def face_rename_tape(self, old: str, new: str) -> None:
+        with self._lock, self._immediate():
+            self._conn.execute("UPDATE face_tracks SET tape_id=? WHERE tape_id=?", (new, old))
+            self._conn.execute("UPDATE face_scanned SET tape_id=? WHERE tape_id=?", (new, old))
+
+    # ---- refinement + re-clustering (faces.refine / faces.recluster) ----------
+    def _feedback(self, kind: str, a: int, b: int) -> None:
+        if a != b:
+            self._conn.execute("INSERT INTO face_feedback (kind, a, b, created_at) VALUES (?,?,?,?)",
+                               (kind, a, b, now()))
+
+    def _anchor(self, person_id: int, exclude: int | None = None) -> int | None:
+        """The person's anchor track — set to its current cover (best face) the first
+        time the operator acts on the person."""
+        r = self._conn.execute("SELECT anchor FROM face_persons WHERE id=?", (person_id,)).fetchone()
+        if not r:
+            return None
+        if r[0] and r[0] != exclude and self._conn.execute(
+                "SELECT 1 FROM face_tracks WHERE id=? AND person_id=?", (r[0], person_id)).fetchone():
+            return r[0]
+        c = self._conn.execute("SELECT id FROM face_tracks WHERE person_id=? AND id<>? "
+                               "ORDER BY COALESCE(rq, quality) DESC LIMIT 1", (person_id, exclude or -1)).fetchone()
+        if c:
+            self._conn.execute("UPDATE face_persons SET anchor=? WHERE id=?", (c[0], person_id))
+        return c[0] if c else None
+
+    def face_import_rules(self, name: str, pairs: list, anchors: dict[int, int]) -> int:
+        """One-off import of operator corrections reconstructed from elsewhere (see
+        face_refine.import_rules); idempotent per ``name``. Pairs whose tracks no
+        longer exist are skipped. Returns how many pairs were added."""
+        key = f"face_rules_imported:{name}"
+        with self._lock, self._immediate():
+            if self._conn.execute("SELECT 1 FROM meta WHERE k=?", (key,)).fetchone():
+                return 0
+            have = {r[0] for r in self._conn.execute("SELECT id FROM face_tracks")}
+            n = 0
+            for kind, a, b in pairs:
+                if kind in ("same", "diff") and a in have and b in have:
+                    self._feedback(kind, a, b)
+                    n += 1
+            for pid, track in anchors.items():
+                if track in have:
+                    self._conn.execute("UPDATE face_persons SET anchor=? WHERE id=? AND anchor IS NULL", (track, pid))
+            self._conn.execute("INSERT INTO meta (k, v) VALUES (?, ?)", (key, now()))
+            return n
+
+    def face_feedback(self) -> list[tuple[str, int, int]]:
+        with self._lock:
+            return [tuple(r) for r in self._conn.execute("SELECT kind, a, b FROM face_feedback ORDER BY id")]
+
+    def face_scenes_to_refine(self, tag: str) -> list[tuple[str, str]]:
+        with self._lock:
+            return [tuple(r) for r in self._conn.execute(
+                "SELECT DISTINCT tape_id, scene_id FROM face_tracks WHERE refined IS NOT ? "
+                "ORDER BY tape_id, scene_id", (tag,))]
+
+    def face_scene_tracks(self, tape_id: str, scene_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT id, times, embedding FROM face_tracks WHERE tape_id=? AND scene_id=?",
+                                      (tape_id, scene_id)).fetchall()
+        return [{"id": r[0], "times": json.loads(r[1]), "embedding": r[2]} for r in rows]
+
+    def face_save_refined(self, track_id: int, *, arc: bytes | None, rq: float, frontal: float, tag: str) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE face_tracks SET arc=?, rq=?, frontal=?, refined=? WHERE id=?",
+                               (arc, rq, frontal, tag, track_id))
+
+    def face_workspaces(self) -> list[str]:
+        with self._lock:
+            return [r[0] for r in self._conn.execute("SELECT DISTINCT workspace FROM face_tracks")]
+
+    def face_workspace_tracks(self, workspace: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, person_id, tape_id, scene_id, times, arc, rq, frontal FROM face_tracks "
+                "WHERE workspace=?", (workspace,)).fetchall()
+        return [{"id": r[0], "person_id": r[1], "tape_id": r[2], "scene_id": r[3], "times": json.loads(r[4]),
+                 "arc": r[5], "rq": r[6] or 0.0, "frontal": r[7] or 0.0} for r in rows]
+
+    def face_touched_persons(self, workspace: str) -> list[dict]:
+        """Persons the operator acted on (named or hidden), with their anchor track."""
+        with self._lock:
+            ids = [r[0] for r in self._conn.execute(
+                "SELECT id FROM face_persons WHERE workspace=? AND (name IS NOT NULL OR hidden=1)", (workspace,))]
+            out = []
+            for pid in ids:
+                anchor = self._anchor(pid)
+                r = self._conn.execute("SELECT name, hidden FROM face_persons WHERE id=?", (pid,)).fetchone()
+                out.append({"id": pid, "name": r[0], "hidden": bool(r[1]), "anchor": anchor})
+        return out
+
+    def face_apply_clusters(self, workspace: str, gen: int, groups: list[dict]) -> bool:
+        """Re-assign every track of the workspace in one transaction.
+        groups: [{"person_id": int | None (None = new person), "tracks": [ids]}].
+        Refused (False) if the operator edited persons since ``gen`` was read."""
+        with self._lock, self._immediate():
+            cur = self._conn.execute("SELECT v FROM meta WHERE k='faces_gen'").fetchone()
+            if int(cur[0] if cur else 0) != gen:
+                return False
+            for g in groups:
+                pid = g["person_id"]
+                if pid is None or not self._conn.execute("SELECT 1 FROM face_persons WHERE id=?", (pid,)).fetchone():
+                    pid = int(self._conn.execute("INSERT INTO face_persons (workspace, created_at) VALUES (?,?)",
+                                                 (workspace, now())).lastrowid)
+                g["person_id"] = pid
+                self._conn.executemany("UPDATE face_tracks SET person_id=? WHERE id=?",
+                                       [(pid, t) for t in g["tracks"]])
+            self._conn.execute("DELETE FROM face_persons WHERE workspace=? AND name IS NULL AND hidden=0 AND id NOT IN "
+                               "(SELECT DISTINCT person_id FROM face_tracks)", (workspace,))
+            return True
+
+    def face_prune_empty(self) -> None:
+        """Unnamed persons that lost every track (split/merge leftovers) go away."""
+        with self._lock:
+            self._conn.execute("DELETE FROM face_persons WHERE name IS NULL AND id NOT IN "
+                               "(SELECT DISTINCT person_id FROM face_tracks)")
 
     # ---- camera transport requests (api -> grabber) --------------------
     def enqueue_cam_command(self, name: str) -> int:

@@ -91,6 +91,33 @@ class Config:
     # camcorders handle it fine. Set MINIDV_ALLOW_FCP=0 for cameras whose AV/C stack
     # is flaky and resets the 1394 bus on FCP (e.g. Sony DCR-PC2E) -> manual PLAY/STOP.
     allow_fcp: bool = os.getenv("MINIDV_ALLOW_FCP", "1") == "1"
+    # Face recognition ("Osoby"). Needs opencv-python-headless + numpy (in the
+    # Docker image; `pip install .[faces]` on bare metal). The daily scan starts at
+    # MINIDV_FACES_SCAN_AT local time (default_recording_tz) and only picks up
+    # scenes not scanned yet; empty disables the schedule (manual scans still work).
+    faces_enabled: bool = os.getenv("MINIDV_FACES", "1") == "1"
+    faces_scan_at: str = os.getenv("MINIDV_FACES_SCAN_AT", "03:00")
+    # where the two ONNX models live (downloaded + sha256-checked on first scan if
+    # missing); empty -> <storage>/state/models
+    faces_models: str = os.getenv("MINIDV_FACES_MODELS", "")
+    faces_threads: int = int(os.getenv("MINIDV_FACES_THREADS", "1"))
+    # per second of video the first frame whose sharpness (variance of the
+    # Laplacian) reaches this is analysed; blurrier frames are skipped
+    faces_blur: float = float(os.getenv("MINIDV_FACES_BLUR", "40"))
+    faces_min_size: int = int(os.getenv("MINIDV_FACES_MIN_SIZE", "36"))   # px, smaller faces ignored
+    faces_score: float = float(os.getenv("MINIDV_FACES_SCORE", "0.8"))   # detector confidence
+    # cosine similarity for "same person" (SFace's published threshold is 0.363)
+    faces_match: float = float(os.getenv("MINIDV_FACES_MATCH", "0.40"))
+    # Refinement ("dokładna analiza") + re-clustering, ArcFace cosine. Tuned on real
+    # DV footage against the operator's own corrections: only faces at least this
+    # frontal (0..1, from the eye/nose landmarks) build groups; groups join while
+    # their *average* similarity >= faces_cluster_t; weaker faces (profile/blur) only
+    # join an existing group at >= faces_attach_t and a clear margin over the
+    # runner-up. Lower = fewer split people but more mixed ones.
+    faces_core_frontal: float = float(os.getenv("MINIDV_FACES_CORE_FRONTAL", "0.4"))
+    faces_cluster_t: float = float(os.getenv("MINIDV_FACES_CLUSTER", "0.24"))
+    faces_attach_t: float = float(os.getenv("MINIDV_FACES_ATTACH", "0.32"))
+    faces_attach_margin: float = float(os.getenv("MINIDV_FACES_ATTACH_MARGIN", "0.05"))
 
     @property
     def tapes(self) -> Path:
@@ -105,6 +132,6 @@ class Config:
         return self.storage / "state"
 
     def ensure_dirs(self) -> None:
-        for name in ("tapes", "working", "failed", "logs", "tmp", "state"):
+        for name in ("tapes", "working", "failed", "logs", "tmp", "state", "faces"):
             (self.storage / name).mkdir(parents=True, exist_ok=True)
 
