@@ -306,3 +306,38 @@ def test_tape_recording_date_override_moves_all_scenes(tmp_path):
     tl = li.timeline(cfg, s)
     assert [y["year"] for y in tl["years"]] == [2026]
     assert tl["years"][0]["months"][0]["month"] == 9
+
+
+def test_two_digit_year_read_as_19xx_is_put_back_in_the_2000s():
+    assert li.fix_century("1926-10-11") == "2026-10-11"
+    assert li.fix_century("1926-10-11T08:01:24") == "2026-10-11T08:01:24"
+    assert li.fix_century("1979-01-01") == "1979-01-01"      # 2079 would be the future: left alone
+    assert li.fix_century("1998-05-01") == "1998-05-01"
+    assert li._scene_date({}, {"scene_id": "0001_1926-10-11_00-10-39",
+                               "recording": {"datetime": "1926-10-11T00:10:39", "datetime_valid": False}}) == "2026-10-11"
+
+
+def test_undated_date_fills_only_the_scenes_without_a_real_date(tmp_path):
+    cfg = _cfg(tmp_path)
+    _tape(cfg, "T", [("0001_2009-07-16_21-17-36", "2009-07-16T21:17:36", True),
+                     ("0002_2067-02-15_22-26-25", "2067-02-15T22:26:25", False)])
+    doc = li.build_tape_doc(cfg.tapes / "T")
+    assert doc["undated_scenes"] == 1
+    assert [s["date"] for s in doc["_index"]["scenes"]] == ["2009-07-16", None]
+    tape = json.loads((cfg.tapes / "T" / "tape.json").read_text())
+    tape["undated_date"] = "2026-09-01"
+    (cfg.tapes / "T" / "tape.json").write_text(json.dumps(tape))
+    doc = li.build_tape_doc(cfg.tapes / "T")
+    assert [s["date"] for s in doc["_index"]["scenes"]] == ["2009-07-16", "2026-09-01"]
+
+
+def test_operator_scene_dates_win_and_unknown_hides_a_scene(tmp_path):
+    cfg = _cfg(tmp_path)
+    _tape(cfg, "T", [("0001_2009-07-16_21-17-36", "2009-07-16T21:17:36", True),
+                     ("0002_2067-02-15_22-26-25", "2067-02-15T22:26:25", False)])
+    tape = json.loads((cfg.tapes / "T" / "tape.json").read_text())
+    tape["undated_date"] = "2026-09-01"
+    tape["scene_dates"] = {"0001_2009-07-16_21-17-36": "2009-07-20", "0002_2067-02-15_22-26-25": "unknown"}
+    (cfg.tapes / "T" / "tape.json").write_text(json.dumps(tape))
+    doc = li.build_tape_doc(cfg.tapes / "T")
+    assert [s["date"] for s in doc["_index"]["scenes"]] == ["2009-07-20", None]

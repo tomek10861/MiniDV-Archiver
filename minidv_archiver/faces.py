@@ -462,8 +462,11 @@ def person_detail(store, person_id: int) -> dict | None:
         s["segments"] = segments(s.pop("times"))
         out.append(s)
     out.sort(key=lambda s: ((s["date"] or "9999"), s["time"] or "", s["tape_id"], s["scene_id"]))
+    # each face carries its scene's recording date/time, for the person's timeline
     return {**p, "tracks": [{"id": t["id"], "tape_id": t["tape_id"], "scene_id": t["scene_id"],
-                             "quality": t["quality"], "first": min(t["times"]) if t["times"] else 0}
+                             "quality": t["quality"], "first": min(t["times"]) if t["times"] else 0,
+                             "date": scenes[(t["tape_id"], t["scene_id"])]["date"],
+                             "time": scenes[(t["tape_id"], t["scene_id"])]["time"]}
                             for t in sorted(tracks, key=lambda t: -t["quality"])],
             "scenes": out}
 

@@ -161,3 +161,28 @@ def test_reconstructed_rules_import_once_and_skip_missing_tracks(tmp_path):
     assert s.face_feedback() == [("same", a, b)]
     assert s.face_touched_persons("default") == []         # an anchor alone doesn't name anyone
     assert s._conn.execute("SELECT anchor FROM face_persons WHERE id=?", (p,)).fetchone()[0] == a
+
+
+def test_confirmed_faces_return_home_unless_they_clearly_dont_fit():
+    pa, pb = np.random.default_rng(6).normal(size=(2, 512))
+    home = [_track(i, _v(i, 0.3, pa), person=10, scene=f"A{i}") for i in (1, 2, 3)]
+    stray_ok = _track(4, _v(4, 1.6, pa), person=10, scene="B")          # same person, poor view: own group
+    stranger = _track(5, _v(5, 0.3, pb), person=10, scene="C")          # frontal, someone else
+    profile = _track(6, _v(6), person=10, scene="D", frontal=0.1)       # can't judge a profile
+    tracks = home + [stray_ok, stranger, profile]
+    fb = [("confirm", m, 1) for m in (2, 3, 4, 5, 6)]
+    touched = [{"id": 10, "name": "Ola", "hidden": False, "anchor": 1}]
+    groups = plan_clusters(tracks, fb, touched, **KW)
+    ola = set(next(g for g in groups if g["person_id"] == 10)["tracks"])
+    assert {1, 2, 3, 4, 6} <= ola and 5 not in ola
+
+
+def test_a_person_split_by_the_model_is_rejoined_by_confirmations():
+    rng = np.random.default_rng(7)
+    young, old = rng.normal(size=(2, 512))          # the model sees two people...
+    tracks = ([_track(i, _v(i, 0.3, young), person=10, scene=f"Y{i}") for i in (1, 2, 3)]
+              + [_track(i, _v(i, 0.3, old), person=10, scene=f"O{i}") for i in (4, 5, 6)])
+    fb = [("confirm", m, 1) for m in (2, 3, 4, 5, 6)]  # ...the operator merged them into one
+    touched = [{"id": 10, "name": "Ola", "hidden": False, "anchor": 1}]
+    assert _groups(plan_clusters(tracks, fb, touched, **KW)) == [[1, 2, 3, 4, 5, 6]]
+    assert _groups(plan_clusters(tracks, fb + [("diff", 4, 1)], touched, **KW)) == [[1, 2, 3], [4, 5, 6]]

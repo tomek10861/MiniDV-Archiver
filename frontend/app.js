@@ -342,7 +342,7 @@ function renderTapeDetail(t, force) {
   const id = t.tape_id, e = encodeURIComponent(id), full = t.proxy_full;
   const scenes = scenesCache[id] || [];
   const ft = fromTimeline && fromTimeline.tape === id ? fromTimeline : null;
-  const sig = JSON.stringify([id, t.scene_count, t.label, t.recording_date, !!full,
+  const sig = JSON.stringify([id, t.scene_count, t.label, t.recording_date, t.undated_date, t.undated_scenes, !!full,
     (full || {}).size, scenes.length, [...selected].sort(), ft && [ft.year, ft.month]]);
   if (!force && sig === detailSig && $('#tapeDetail').dataset.tape === id) return;
   detailSig = sig;
@@ -360,6 +360,7 @@ function renderTapeDetail(t, force) {
       <button id="tapeRename" class="${BTN}">${L('tape.rename')}</button>
       <button id="tapeLabel" class="${BTN}">${L('tape.label')}</button>
       <button id="tapeDate" class="${BTN}">${L('tape.date')}</button>
+      ${t.undated_scenes || t.undated_date ? `<button id="tapeUndated" class="${BTN}" title="${L('tape.undatedHint')}">${L('tape.undated', { n: t.undated_scenes || 0 })}${t.undated_date ? ': ' + t.undated_date : ''}</button>` : ''}
     </div>
     ${repairOptsHTML()}
     <div class="tape-tools mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-theme-xs">
@@ -502,7 +503,7 @@ async function renameTape(id) {
 }
 async function editTapeMeta(id, field) {
   const cur = currentTape()[field] || '';
-  const q = field === 'label' ? L('prompt.label') : L('prompt.date');
+  const q = field === 'label' ? L('prompt.label') : field === 'undated_date' ? L('prompt.undated') : L('prompt.date');
   const v = prompt(q, cur);
   if (v === null) return;
   try {
@@ -551,6 +552,7 @@ $('#tapeDetail').addEventListener('click', e => {
   if (e.target.id === 'tapeRename') { renameTape(openTapeId); return; }
   if (e.target.id === 'tapeLabel') { editTapeMeta(openTapeId, 'label'); return; }
   if (e.target.id === 'tapeDate') { editTapeMeta(openTapeId, 'recording_date'); return; }
+  if (e.target.closest('#tapeUndated')) { editTapeMeta(openTapeId, 'undated_date'); return; }
   const rp = e.target.closest('.repair'); if (rp) { repairCompress(rp); return; }
   const rpb = e.target.closest('.reprobe');
   if (rpb) {
@@ -941,6 +943,7 @@ async function openPerson(id) {
   try { p = await api(`/api/persons/${id}`); }
   catch (e) { view.innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
   if (currentRoute().person !== id) return;
+  if (!people.person || people.person.id !== id) { people.tlRange = null; people.tlOpenSlot = null; }
   // full scene records for the modal player (same source as Kasety / timeline)
   const tapeIds = [...new Set(p.scenes.map(s => s.tape_id))];
   await Promise.all(tapeIds.filter(t => !scenesCache[t]).map(async t => {
@@ -977,6 +980,7 @@ function renderPerson() {
             <span class="max-w-full truncate text-theme-xs ${o.name ? 'text-gray-800 dark:text-white/90' : 'text-gray-400'}">${o.name ? esc(o.name) : nRec(o.scenes)}</span>
           </button>`).join('') || `<p class="text-theme-xs text-gray-400">${L('people.noOthers')}</p>`}</div>
       </div>` : ''}
+    <div id="personTl" class="mt-6"></div>
     <h4 class="mb-2 mt-6 text-theme-sm font-semibold text-gray-700 dark:text-gray-200">${L('people.faces', { n: p.tracks.length })}</h4>
     <p class="mb-2 text-theme-xs text-gray-400">${L('people.facesHint')}</p>
     <div class="flex flex-wrap gap-2">${p.tracks.map(t => `
@@ -1000,7 +1004,163 @@ function renderPerson() {
           </div>
         </div>
       </div>`).join('')}</div>`;
+  renderPersonTimeline();
 }
+
+// ---- person timeline: faces on a date axis, scaled from the oldest to the newest ----
+// The axis is cut into slots ~half a thumbnail wide; each slot shows its best face
+// (p.tracks comes sorted best-first), alternating above / below the line so twice as
+// many fit, with a "+n" badge for the faces it stands in for. Clicking a face opens a
+// bubble with every face of its slot; clicking a year (or a month) zooms into it.
+const DAY = 864e5;
+const faceAt = t => t.date ? Date.parse(`${t.date}T${t.time || '12:00:00'}Z`) : null;
+const fmtDay = iso => { const [y, m, d] = iso.split('-').map(Number); return `${d} ${PL_MON[m - 1]} ${y}`; };
+function personTlTicks(a, b) {
+  const span = b - a, out = [], y0 = new Date(a).getUTCFullYear(), y1 = new Date(b).getUTCFullYear();
+  if (span > 2.5 * 365 * DAY) {
+    const step = span > 30 * 365 * DAY ? 5 : span > 12 * 365 * DAY ? 2 : 1;
+    for (let y = y0; y <= y1 + 1; y++) {
+      const t = Date.UTC(y, 0, 1);
+      if (t >= a && t <= b && y % step === 0) out.push({ t, label: String(y), zoom: [t, Date.UTC(y + 1, 0, 1)] });
+    }
+  } else if (span > 60 * DAY) {
+    const step = span > 400 * DAY ? 3 : 1;
+    for (let y = y0; y <= y1; y++) for (let m = 0; m < 12; m++) {
+      const t = Date.UTC(y, m, 1);
+      if (t >= a && t <= b && m % step === 0)
+        out.push({ t, label: m === 0 || step === 3 && m < 3 ? `${PL_MON[m]} ${y}` : PL_MON[m], zoom: [t, Date.UTC(y, m + 1, 1)] });
+    }
+  } else {
+    const step = Math.max(1, Math.ceil(span / DAY / 10));
+    for (let t = Date.UTC(new Date(a).getUTCFullYear(), new Date(a).getUTCMonth(), new Date(a).getUTCDate()); t <= b; t += step * DAY)
+      if (t >= a) out.push({ t, label: fmtDay(new Date(t).toISOString().slice(0, 10)) });
+  }
+  return out;
+}
+function renderPersonTimeline() {
+  const host = $('#personTl'), p = people.person;
+  if (!host || !p) return;
+  const dated = p.tracks.filter(t => t.date).map(t => ({ ...t, at: faceAt(t) }));
+  if (!dated.length) { host.innerHTML = ''; return; }
+  const ats = dated.map(t => t.at), first = Math.min(...ats), last = Math.max(...ats);
+  let [a, b] = people.tlRange || [first, last];
+  const shown = dated.filter(t => t.at >= a && t.at <= b);
+  if (b - a < 20 * DAY) { const mid = (a + b) / 2; a = mid - 10 * DAY; b = mid + 10 * DAY; }
+  const pad = (b - a) * 0.02; a -= pad; b += pad;
+  // EDGE keeps the first/last thumbnail (and its "+n" badge) inside the frame
+  const W = host.clientWidth || 800, TH = 44, SLOT = 26, EDGE = 10, inner = W - TH - 2 * EDGE, x0 = TH / 2 + EDGE;
+  const n = Math.max(1, Math.floor(inner / SLOT)), x = t => x0 + (t - a) / (b - a) * inner;
+  const slots = Array.from({ length: n }, () => []);
+  shown.forEach(t => slots[Math.min(n - 1, Math.max(0, Math.floor((t.at - a) / (b - a) * n)))].push(t));
+  const AXIS = 66;                                   // y of the line; rows above (0) and below (AXIS + 22)
+  const canRemove = p.tracks.length > 1;
+  const thumbs = slots.map((s, i) => {
+    if (!s.length) return '';
+    const t = s[0], cx = x0 + (i + 0.5) * inner / n, up = i % 2 === 0, top = up ? 0 : AXIS + 22;
+    const more = s.length > 1 ? `<span class="absolute -right-1 ${up ? '-top-1' : '-bottom-1'} rounded-full bg-brand-500 px-1 text-[10px] font-semibold leading-4 text-white">+${s.length - 1}</span>` : '';
+    return `<div class="absolute w-px bg-gray-300 dark:bg-gray-600" style="left:${cx}px;top:${up ? TH : AXIS}px;height:${up ? AXIS - TH : 22}px"></div>
+      <div class="group absolute hover:z-10" style="left:${cx - TH / 2}px;top:${top}px">
+        <button data-slot="${i}"
+          title="${fmtDay(t.date)} · ${esc(t.tape_id)}${s.length > 1 ? ' · ' + L('people.tlMore', { n: s.length - 1 }) : ''}"
+          class="relative block transition group-hover:scale-125">${avatar(t.id, 'h-11 w-11 ring-2 ring-white dark:ring-gray-900')}${more}</button>
+        ${s.length === 1 && canRemove ? `<button data-face-out="${t.id}" title="${L('people.notThis')}"
+          class="absolute -left-1.5 ${up ? '-top-1.5' : '-bottom-1.5'} grid h-5 w-5 place-items-center rounded-full bg-gray-800 text-[11px] text-white hover:bg-error-500 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100">✕</button>` : ''}
+      </div>`;
+  }).join('');
+  const tickList = personTlTicks(a, b);
+  // label only every k-th tick when they'd collide (narrow screens); the marks all stay
+  const every = Math.max(1, Math.ceil(64 / (inner / Math.max(1, tickList.length))));
+  const tickLabel = k => {
+    const cls = 'absolute -translate-x-1/2 whitespace-nowrap text-[11px] text-gray-500 dark:text-gray-400';
+    const pos = `left:${x(k.t)}px;top:${AXIS + 4}px`;
+    return k.zoom
+      ? `<button data-tl-zoom="${k.zoom.join(',')}" title="${L('people.tlZoom')}" class="${cls} hover:text-brand-500" style="${pos}">${k.label}</button>`
+      : `<span class="${cls}" style="${pos}">${k.label}</span>`;
+  };
+  const ticks = tickList.map((k, i) => `<div class="absolute w-px bg-gray-300 dark:bg-gray-600" style="left:${x(k.t)}px;top:${AXIS - 4}px;height:9px"></div>
+    ${i % every ? '' : tickLabel(k)}`).join('');
+  const undated = p.tracks.length - dated.length;
+  personTlSlots = slots;
+  host.classList.add('relative');
+  host.innerHTML = `
+    <div class="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+      <h4 class="text-theme-sm font-semibold text-gray-700 dark:text-gray-200">${L('people.tlTitle')}</h4>
+      <span class="text-theme-xs text-gray-400">${fmtDay(new Date(first).toISOString().slice(0, 10))} – ${fmtDay(new Date(last).toISOString().slice(0, 10))}
+        · ${L('people.tlCount', { n: shown.length })}</span>
+      ${undated ? `<button data-tl-undated class="text-theme-xs text-brand-500 hover:underline">${L('people.tlUndated', { n: undated })}</button>` : ''}
+      ${people.tlRange ? `<button data-tl-reset class="${BTN}">${L('people.tlAll')}</button>` : ''}
+    </div>
+    <div class="relative overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-white/[0.02]" style="height:${AXIS + 22 + TH + 8}px">
+      <div class="relative" style="margin:4px 0">
+        <div class="absolute h-0.5 rounded-full bg-gray-300 dark:bg-gray-600" style="left:${x0}px;width:${inner}px;top:${AXIS}px"></div>
+        ${ticks}${thumbs}
+      </div>
+    </div>`;
+  // a review bubble that was open stays open across re-renders (e.g. after removing a
+  // face), unless the width changed and the slots now mean something else
+  const open = people.tlOpenSlot;
+  if (open && open.width === W && tlBubbleFaces(open.slot).length) openTlSlot(open.slot);
+  else people.tlOpenSlot = null;
+}
+
+// ---- review bubble: every face of a grouped slot (key = slot index) or the
+// undated ones (key = 'undated'); play, remove, or fix the date of each ----
+let personTlSlots = [];
+function tlBubbleFaces(key) {
+  const p = people.person;
+  if (key === 'undated') return p ? p.tracks.filter(t => !t.date).map(t => ({ ...t, at: 0 })) : [];
+  return personTlSlots[key] || [];
+}
+function openTlSlot(key) {
+  const host = $('#personTl'), faces = tlBubbleFaces(key);
+  const btn = host && host.querySelector(key === 'undated' ? '[data-tl-undated]' : `[data-slot="${key}"]`);
+  if (!btn || !faces.length) return closeTlSlot();
+  people.tlOpenSlot = { slot: key, width: host.clientWidth };
+  const list = [...faces].sort((u, v) => u.at - v.at), canRemove = people.person.tracks.length > 1;
+  const range = key === 'undated' ? L('people.tlNoDate')
+    : list[0].date === list[list.length - 1].date ? fmtDay(list[0].date)
+    : `${fmtDay(list[0].date)} – ${fmtDay(list[list.length - 1].date)}`;
+  host.querySelector('#personTlPop')?.remove();
+  const pop = document.createElement('div');
+  pop.id = 'personTlPop';
+  pop.className = 'absolute z-30 w-80 max-w-[calc(100%-0.5rem)] rounded-xl border border-gray-200 bg-white p-3 shadow-theme-lg dark:border-gray-700 dark:bg-gray-900';
+  pop.innerHTML = `<div class="mb-2 flex flex-wrap items-center gap-2">
+      <span class="text-theme-xs font-medium text-gray-700 dark:text-gray-200">${range} · ${L('people.tlCount', { n: list.length })}</span>
+      ${key === 'undated' ? '' : `<button data-tl-unknown title="${L('people.tlUnknownHint')}" class="${BTN}">${L('people.tlUnknown')}</button>`}
+      <button data-tl-pop-close class="ml-auto rounded-full px-1.5 text-gray-400 hover:text-gray-700 dark:hover:text-white" aria-label="Close">✕</button>
+    </div>
+    <div class="grid max-h-72 grid-cols-4 gap-2 overflow-y-auto pr-1">${list.map(t => `
+      <div class="relative flex flex-col items-center">
+        <button data-face-seek="${t.id}" title="${esc(t.tape_id)} · ▶ ${mmss(t.first)}">${avatar(t.id, 'h-14 w-14 hover:ring-2 hover:ring-brand-500')}</button>
+        ${canRemove ? `<button data-face-out="${t.id}" title="${L('people.notThis')}" class="absolute right-0 top-0 grid h-5 w-5 place-items-center rounded-full bg-gray-800 text-[11px] text-white hover:bg-error-500">✕</button>` : ''}
+        <button data-face-date="${t.id}" title="${L('people.tlSetDate')}" class="absolute left-0 top-0 grid h-5 w-5 place-items-center rounded-full bg-white text-[11px] shadow-theme-xs hover:bg-brand-50 dark:bg-gray-800">📅</button>
+        <span class="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">${t.date ? fmtDay(t.date) : L('people.tlNoDate')}</span>
+      </div>`).join('')}</div>`;
+  host.appendChild(pop);
+  // under whatever was clicked, kept inside the timeline box
+  const hr = host.getBoundingClientRect(), br = btn.getBoundingClientRect();
+  const left = Math.min(Math.max(0, br.left - hr.left + br.width / 2 - pop.offsetWidth / 2), hr.width - pop.offsetWidth);
+  pop.style.left = `${left}px`;
+  pop.style.top = `${br.bottom - hr.top + 6}px`;
+}
+// value: "YYYY-MM-DD", "unknown" (off every timeline) or "" (back to the automatic date)
+async function setFaceDates(faces, value) {
+  const byTape = {};
+  faces.forEach(t => { (byTape[t.tape_id] = byTape[t.tape_id] || {})[t.scene_id] = value; });
+  try {
+    for (const [tape, dates] of Object.entries(byTape))
+      await postJSON(`/api/tapes/${encodeURIComponent(tape)}/scene-dates`, { dates });
+  } catch (e) { alert(e.message); }
+  closeTlSlot(); people.list = null; await loadPeople(true);
+}
+function closeTlSlot() {
+  people.tlOpenSlot = null;
+  $('#personTlPop')?.remove();
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#personTlPop')) closeTlSlot(); });
+let personTlFrame = 0;
+new ResizeObserver(() => { cancelAnimationFrame(personTlFrame); personTlFrame = requestAnimationFrame(renderPersonTimeline); })
+  .observe($('#peopleView'));
 
 async function personAction(fn) {
   try { await fn(); } catch (e) { alert(e.message); }
@@ -1039,6 +1199,36 @@ $('#peopleView').addEventListener('click', e => {
     });
     return;
   }
+  const zoom = e.target.closest('[data-tl-zoom]');
+  if (zoom) { people.tlRange = zoom.dataset.tlZoom.split(',').map(Number); closeTlSlot(); renderPersonTimeline(); return; }
+  if (e.target.closest('[data-tl-reset]')) { people.tlRange = null; closeTlSlot(); renderPersonTimeline(); return; }
+  if (e.target.closest('[data-tl-pop-close]')) { closeTlSlot(); return; }
+  if (e.target.closest('[data-tl-undated]')) {
+    people.tlOpenSlot && people.tlOpenSlot.slot === 'undated' ? closeTlSlot() : openTlSlot('undated');
+    return;
+  }
+  if (e.target.closest('[data-tl-unknown]')) {
+    const faces = tlBubbleFaces(people.tlOpenSlot.slot);
+    if (confirm(L('people.confirmUnknown', { n: faces.length }))) setFaceDates(faces, 'unknown');
+    return;
+  }
+  const fd = e.target.closest('[data-face-date]');
+  if (fd) {
+    const t = people.person.tracks.find(x => x.id === +fd.dataset.faceDate);
+    const v = prompt(L('people.datePrompt'), t && t.date ? t.date : '');
+    if (v === null) return;
+    const val = v.trim() === '?' ? 'unknown' : v.trim();
+    if (val && val !== 'unknown' && !/^\d{4}-\d{2}-\d{2}$/.test(val)) { alert(L('people.dateBad')); return; }
+    setFaceDates([t], val);
+    return;
+  }
+  const slotBtn = e.target.closest('[data-slot]');
+  if (slotBtn) {
+    const i = +slotBtn.dataset.slot;
+    if (people.tlOpenSlot && people.tlOpenSlot.slot === i) closeTlSlot(); else openTlSlot(i);
+    return;
+  }
+  if ($('#personTlPop') && !e.target.closest('#personTlPop')) closeTlSlot();   // click outside closes it
   const out = e.target.closest('[data-face-out]');
   if (out) {
     if (!confirm(L('people.confirmNotThis'))) return;
@@ -1273,7 +1463,7 @@ async function refresh() {
     $('#navTapes').hidden = !t.length;
 
     // timeline is derived from the tape set — refresh it when that changes and it's on screen
-    const tsig = JSON.stringify(t.map(x => [x.tape_id, x.scene_count, x.recording_date, x.label]));
+    const tsig = JSON.stringify(t.map(x => [x.tape_id, x.scene_count, x.recording_date, x.undated_date, x.label]));
     if (tapesSig && tsig !== tapesSig && currentRoute().section === 'timeline') { tl.data = null; loadTimeline(false); }
     tapesSig = tsig;
 

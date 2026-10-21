@@ -710,7 +710,7 @@ class JobStore:
             have = {r[0] for r in self._conn.execute("SELECT id FROM face_tracks")}
             n = 0
             for kind, a, b in pairs:
-                if kind in ("same", "diff") and a in have and b in have:
+                if kind in ("same", "diff", "confirm") and a in have and b in have:
                     self._feedback(kind, a, b)
                     n += 1
             for pid, track in anchors.items():

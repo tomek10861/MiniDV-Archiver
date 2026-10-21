@@ -18,22 +18,45 @@ _HASH16 = re.compile(r"^[0-9a-f]{16}$")
 
 # Bump when idx_scenes' fields change shape, to force every tape doc to be
 # rebuilt on the next periodic sweep even though its source files didn't change.
-_INDEX_SCHEMA = 2
+_INDEX_SCHEMA = 3
+
+
+def fix_century(date: str) -> str:
+    """DV VAUX stores a two-digit year; some readers put e.g. "26" in 1926. A
+    19xx before DV existed (< 1980) that lands in the past as 20xx is 20xx. Only
+    the derived index uses this — the archive's own .json is never rewritten."""
+    if len(date) >= 4 and date[:4].isdigit() and 1900 <= int(date[:4]) < 1980:
+        from .media import max_plausible_year
+        y = int(date[:4]) + 100
+        if y <= max_plausible_year():
+            return f"{y}{date[4:]}"
+    return date
 
 
 def _scene_date(tape: dict, scene: dict) -> str | None:
-    """Effective YYYY-MM-DD for a scene: tape override → valid VAUX date → the
-    date baked into the scene_id → nothing."""
+    """Effective YYYY-MM-DD for a scene: the operator's date for this scene
+    (tape.json ``scene_dates``; "unknown" = deliberately undated) → tape override →
+    VAUX date → the date baked into the scene_id (both with the century fix) → the
+    tape's date for undatable scenes (a camera with a dead clock battery records
+    e.g. 2067-02-15 for everything) → nothing."""
+    own = (tape.get("scene_dates") or {}).get(scene.get("scene_id"))
+    if own == "unknown":
+        return None
+    if own and _SANE_DATE.match(own):
+        return own
     override = tape.get("recording_date")
     if override and _SANE_DATE.match(override):
         return override
     rec = scene.get("recording") or {}
-    dt = (rec.get("datetime") or "")[:10]
-    if rec.get("datetime_valid") and _SANE_DATE.match(dt):
+    dt = fix_century((rec.get("datetime") or "")[:10])
+    if (rec.get("datetime_valid") or dt != (rec.get("datetime") or "")[:10]) and _SANE_DATE.match(dt):
         return dt
-    sid_date = (scene.get("scene_id") or "")[5:15]
+    sid_date = fix_century((scene.get("scene_id") or "")[5:15])
     if _SANE_DATE.match(sid_date):
         return sid_date
+    fallback = tape.get("undated_date")
+    if fallback and _SANE_DATE.match(fallback):
+        return fallback
     return None
 
 
@@ -96,6 +119,8 @@ def build_tape_doc(tape_dir: Path) -> dict:
         })
     dates.sort()
     doc = dict(tape)
+    # scenes no date could be read for (shown in the UI so the operator can set one)
+    doc["undated_scenes"] = sum(1 for s in scenes if not _scene_date({}, s))
     doc["_index"] = {"scenes": idx_scenes, "date_min": dates[0] if dates else None,
                      "date_max": dates[-1] if dates else None, "total_dv": total_dv}
     return doc

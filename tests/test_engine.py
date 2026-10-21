@@ -844,7 +844,7 @@ def test_set_tape_meta_label_and_date(tmp_path):
     eng = _engine(tmp_path)
     d = _make_tape(eng, "TAPE-1", ["0001_a"])
     r = eng.set_tape_meta("TAPE-1", label="Wesele u babci", recording_date="2004-04-10")
-    assert r == {"tape_id": "TAPE-1", "label": "Wesele u babci", "recording_date": "2004-04-10"}
+    assert r == {"tape_id": "TAPE-1", "label": "Wesele u babci", "recording_date": "2004-04-10", "undated_date": None}
     t = json.loads((d / "tape.json").read_text())
     assert t["label"] == "Wesele u babci" and t["recording_date"] == "2004-04-10"
     assert (d / "tape.sha256").read_text().rstrip().endswith("  tape.json")
@@ -970,3 +970,20 @@ def test_missing_camera_fails_and_cleans_working_dir(tmp_path):
     assert "reset prądowy" in job["error"]
     assert not (eng.config.working / "TAPE-0002").exists()
     assert eng.capture_tape is None  # slot released
+
+
+def test_set_scene_dates_validates_and_round_trips(tmp_path):
+    import pytest
+    eng = _engine(tmp_path)
+    d = eng.config.tapes / "TAPE-SD"
+    d.mkdir(parents=True)
+    (d / "tape.json").write_text(json.dumps({"tape_id": "TAPE-SD", "scenes": []}))
+    (d / "0001_2067-02-15_22-26-25.json").write_text(json.dumps({"scene_id": "0001_2067-02-15_22-26-25"}))
+    assert eng.set_scene_dates("TAPE-SD", {"0001_2067-02-15_22-26-25": "unknown"})["scene_dates"] == \
+        {"0001_2067-02-15_22-26-25": "unknown"}
+    with pytest.raises(ValueError):
+        eng.set_scene_dates("TAPE-SD", {"0001_2067-02-15_22-26-25": "wrzesień"})
+    with pytest.raises(FileNotFoundError):
+        eng.set_scene_dates("TAPE-SD", {"9999_x": "unknown"})
+    assert eng.set_scene_dates("TAPE-SD", {"0001_2067-02-15_22-26-25": ""})["scene_dates"] == {}
+    assert "scene_dates" not in json.loads((d / "tape.json").read_text())

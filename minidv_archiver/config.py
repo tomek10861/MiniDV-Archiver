@@ -118,6 +118,9 @@ class Config:
     faces_cluster_t: float = float(os.getenv("MINIDV_FACES_CLUSTER", "0.24"))
     faces_attach_t: float = float(os.getenv("MINIDV_FACES_ATTACH", "0.32"))
     faces_attach_margin: float = float(os.getenv("MINIDV_FACES_ATTACH_MARGIN", "0.05"))
+    # a frontal face the operator left in a person is still dropped from it when its
+    # average similarity to that person is below this ("doesn't fit")
+    faces_reject_t: float = float(os.getenv("MINIDV_FACES_REJECT", "0.10"))
 
     @property
     def tapes(self) -> Path:

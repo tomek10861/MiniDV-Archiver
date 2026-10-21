@@ -271,10 +271,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(ENGINE.start_delete_scenes(cparts[2], scenes), 202)
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "rename":
                 return self.json(ENGINE.rename_tape(cparts[2], self.body().get("new_id", "")))
+            if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "scene-dates":
+                dates = self.body().get("dates")
+                if not isinstance(dates, dict) or not dates:
+                    return self.json({"error": "brak dat scen"}, 400)
+                return self.json(ENGINE.set_scene_dates(cparts[2], dates))
             if len(cparts) == 4 and cparts[:2] == ["api", "tapes"] and cparts[3] == "meta":
                 b = self.body()
                 return self.json(ENGINE.set_tape_meta(cparts[2], label=b.get("label"),
-                                                      recording_date=b.get("recording_date")))
+                                                      recording_date=b.get("recording_date"),
+                                                      undated_date=b.get("undated_date")))
             return self.json({"error": "not found"}, 404)
         except (ValueError, FileExistsError, FileNotFoundError, RuntimeError) as exc:
             return self.json({"error": str(exc)}, 409)

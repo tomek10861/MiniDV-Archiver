@@ -315,9 +315,14 @@ class _UF:
 
 
 def plan_clusters(tracks: list[dict], feedback, touched: list[dict], *, core_frontal: float,
-                  cluster_t: float, attach_t: float, attach_margin: float) -> list[dict]:
+                  cluster_t: float, attach_t: float, attach_margin: float, reject_t: float = 0.10) -> list[dict]:
     """Pure function: tracks of one workspace (with ``arc`` bytes or None) ->
-    [{"person_id": id | None, "tracks": [...]}] covering every track."""
+    [{"person_id": id | None, "tracks": [...]}] covering every track.
+
+    feedback kinds: "same" / "diff" are hard rules; "confirm" (a = track, b = the
+    group's anchor) is soft — faces the operator saw in a person and left there:
+    they go back to that person unless they are frontal and clearly someone else
+    (average similarity to the person < reject_t)."""
     import numpy as np
     by_id = {t["id"]: t for t in tracks}
     emb = {t["id"]: np.frombuffer(t["arc"], np.float32) for t in tracks if t.get("arc")}
@@ -336,10 +341,13 @@ def plan_clusters(tracks: list[dict], feedback, touched: list[dict], *, core_fro
                 if set(ts[i]["times"]) & set(ts[j]["times"]):
                     diff.add(frozenset((ts[i]["id"], ts[j]["id"])))
     uf = _UF()
+    confirm = _UF()
     for kind, a, b in feedback:
         if a in by_id and b in by_id:
             if kind == "same":
                 uf.union(a, b)
+            elif kind == "confirm":
+                confirm.union(a, b)
             else:
                 diff.add(frozenset((a, b)))
     named = [p for p in touched if p["name"] and p["anchor"] in by_id]
@@ -420,6 +428,7 @@ def plan_clusters(tracks: list[dict], feedback, touched: list[dict], *, core_fro
             groups_out.append({"person_id": None, "tracks": ms})
     for pid, ms in keep_by_person.items():
         groups_out.append({"person_id": pid, "tracks": ms, "kept": True})
+    _apply_confirmed(groups_out, confirm, touched, emb, core_set, diff, reject_t)
 
     # names/hidden follow their anchor track; named persons win over hidden ones
     claimed = set()
@@ -464,6 +473,64 @@ def import_rules(config, store) -> int:
     return added
 
 
+def _apply_confirmed(groups: list[dict], confirm: "_UF", touched: list[dict], emb: dict, core_set: set,
+                     diff: set, reject_t: float) -> None:
+    """Soft operator confirmations, in place on ``groups``:
+    1. a group made up mostly (>= half, >= 2) of faces confirmed for one person
+       joins that person's home group — keeps the operator's merges (e.g. a child
+       and the same person grown up) even where the model splits them;
+    2. a confirmed face the clustering put elsewhere comes back home, unless it
+       is frontal and its average similarity to home is below reject_t (then it's
+       rejected — "doesn't fit"); profile / no-view faces can't be judged, so they
+       stay with the operator's choice. A hard "diff" always wins."""
+    import numpy as np
+    sets: dict[int, set] = {}
+    for x in list(confirm.p):
+        sets.setdefault(confirm.find(x), set()).add(x)
+    anchor_of = {p["anchor"] for p in touched}
+    where = {m: gi for gi, g in enumerate(groups) for m in g["tracks"]}
+
+    def blocked(ms, others):
+        return any(frozenset((m, o)) in diff for m in ms for o in others)
+
+    def core_vecs(g):
+        return [emb[m] for m in g["tracks"] if m in core_set]
+
+    for members in sets.values():
+        members = {m for m in members if m in where}
+        if len(members) < 2:
+            continue
+        anchors = [m for m in members if m in anchor_of]
+        counts: dict[int, int] = {}
+        for m in members:
+            counts[where[m]] = counts.get(where[m], 0) + 1
+        home = where[anchors[0]] if anchors else max(counts, key=counts.get)
+        # 1: pull in groups that are mostly this person's confirmed faces
+        for gi, n in counts.items():
+            g = groups[gi]
+            if gi == home or not g["tracks"] or n < 2 or n * 2 < len(g["tracks"]):
+                continue
+            if blocked(g["tracks"], groups[home]["tracks"]):
+                continue
+            groups[home]["tracks"].extend(g["tracks"])
+            for m in g["tracks"]:
+                where[m] = home
+            g["tracks"] = []
+        # 2: stray confirmed faces come home unless they clearly don't fit
+        hv = core_vecs(groups[home])
+        centre = np.mean(hv, axis=0) if hv else None
+        for m in members:
+            gi = where[m]
+            if gi == home or blocked([m], groups[home]["tracks"]):
+                continue
+            if m in core_set and centre is not None and float(emb[m] @ centre) / (np.linalg.norm(centre) or 1) < reject_t:
+                continue
+            groups[gi]["tracks"].remove(m)
+            groups[home]["tracks"].append(m)
+            where[m] = home
+    groups[:] = [g for g in groups if g["tracks"]]
+
+
 def recluster(config, store, workspace: str) -> dict:
     """Stage 3 for one workspace. Retries if the operator edits persons meanwhile."""
     for _attempt in range(3):
@@ -473,7 +540,8 @@ def recluster(config, store, workspace: str) -> dict:
             return {"persons": 0, "tracks": 0}
         groups = plan_clusters(tracks, store.face_feedback(), store.face_touched_persons(workspace),
                                core_frontal=config.faces_core_frontal, cluster_t=config.faces_cluster_t,
-                               attach_t=config.faces_attach_t, attach_margin=config.faces_attach_margin)
+                               attach_t=config.faces_attach_t, attach_margin=config.faces_attach_margin,
+                               reject_t=config.faces_reject_t)
         if store.face_apply_clusters(workspace, gen, groups):
             for g in groups:
                 recompute_person(store, g["person_id"])

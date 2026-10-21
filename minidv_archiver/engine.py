@@ -424,6 +424,7 @@ class Engine:
             except (OSError, ValueError):
                 continue
             dt = (meta.get("recording") or {}).get("datetime")
+            dt = dt and library_index.fix_century(dt)          # "1926" from a two-digit VAUX year
             valid = dt and dt[:4].isdigit() and 1990 <= int(dt[:4]) <= max_plausible_year()
             if valid and first_dt is None:
                 first_dt = dt
@@ -817,7 +818,9 @@ class Engine:
         self._reindex(new_id)
         return {"tape_id": new_id}
 
-    def set_tape_meta(self, tape_id: str, *, label=None, recording_date=None) -> dict:
+    def set_tape_meta(self, tape_id: str, *, label=None, recording_date=None, undated_date=None) -> dict:
+        """recording_date overrides every scene's date; undated_date only fills in
+        scenes whose own date can't be trusted (dead camera clock), keeping the rest."""
         d = self._tape_dir(tape_id)
         tp = d / "tape.json"
         tape = json.loads(tp.read_text())
@@ -827,18 +830,50 @@ class Engine:
                 tape["label"] = lbl
             else:
                 tape.pop("label", None)
-        if recording_date is not None:
-            rd = str(recording_date).strip()[:10]
+        for field, value in (("recording_date", recording_date), ("undated_date", undated_date)):
+            if value is None:
+                continue
+            rd = str(value).strip()[:10]
             if rd and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", rd):
                 raise ValueError("data w formacie RRRR-MM-DD")
             if rd:
-                tape["recording_date"] = rd
+                tape[field] = rd
             else:
-                tape.pop("recording_date", None)
+                tape.pop(field, None)
         tp.write_text(json.dumps(tape, indent=2) + "\n")
         self._refresh_sha_lines(d, {"tape.json": sha256(tp)})
         self._reindex(tape_id)
-        return {"tape_id": tape_id, "label": tape.get("label"), "recording_date": tape.get("recording_date")}
+        return {"tape_id": tape_id, "label": tape.get("label"), "recording_date": tape.get("recording_date"),
+                "undated_date": tape.get("undated_date")}
+
+    def set_scene_dates(self, tape_id: str, dates: dict) -> dict:
+        """Per-scene date fixes from the operator: {scene_id: "YYYY-MM-DD" | "unknown"
+        | ""} — "unknown" keeps a scene off every timeline (e.g. a dead camera clock
+        whose date is plainly wrong), "" goes back to the automatic date. Stored in
+        tape.json; the scenes' own files are never touched."""
+        d = self._tape_dir(tape_id)
+        tp = d / "tape.json"
+        tape = json.loads(tp.read_text())
+        known = {p.stem for p in d.glob("[0-9]*.json")}
+        own = dict(tape.get("scene_dates") or {})
+        for sid, value in (dates or {}).items():
+            if sid not in known:
+                raise FileNotFoundError(f"nie ma sceny {sid}")
+            v = str(value or "").strip()[:10]
+            if v and v != "unknown" and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+                raise ValueError("data w formacie RRRR-MM-DD albo 'unknown'")
+            if v:
+                own[sid] = v
+            else:
+                own.pop(sid, None)
+        if own:
+            tape["scene_dates"] = own
+        else:
+            tape.pop("scene_dates", None)
+        tp.write_text(json.dumps(tape, indent=2) + "\n")
+        self._refresh_sha_lines(d, {"tape.json": sha256(tp)})
+        self._reindex(tape_id)
+        return {"tape_id": tape_id, "scene_dates": own}
 
     # ---- id helpers ----------------------------------------------------
     def _next_tape_id(self) -> str:
