@@ -14,3 +14,13 @@ services:
   converter:
     devices:
       - /dev/dri:/dev/dri
+
+# Photos & videos from a NAS / disk ("Zdjęcia i filmy"), read-only, for the api
+# and the converter; then set MINIDV_MEDIA_DIRS=/media/zdjecia in .env.
+# rslave: an autofs/NFS mount under the source that appears later still shows up.
+#  api:
+#    volumes:
+#      - {type: bind, source: /mnt/zdjecia, target: /media/zdjecia, read_only: true, bind: {propagation: rslave}}
+#  converter:
+#    volumes:
+#      - {type: bind, source: /mnt/zdjecia, target: /media/zdjecia, read_only: true, bind: {propagation: rslave}}

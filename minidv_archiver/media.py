@@ -405,6 +405,75 @@ def concat_mp4(sources: list[Path], target: Path, meta: dict | None = None, log=
         NICE_PREFIX = []
 
 
+def montage_fps(items: list[dict], probes: dict) -> int:
+    """50 when any video in the montage really moves at ~50 frames a second (MiniDV
+    and DVD copies are 50p: one frame per field), else 25. Slower sources are only
+    repeated frame by frame to fit, never interpolated."""
+    from .media_library import stream_fps
+    for it in items:
+        v = next((s for s in probes.get(str(it["path"]), {}).get("streams", []) if s.get("codec_type") == "video"), None)
+        if it["kind"] != "photo" and v and (stream_fps(v) or 0) >= 47:
+            return 50
+    return 25
+
+
+def montage_mp4(items: list[dict], target: Path, *, width: int = 1280, height: int = 720, fps: int | None = None,
+                photo_s: float = 4.0, meta: dict | None = None, log=None, progress=None) -> None:
+    """One MP4 from mixed sources — MiniDV scene proxies, camera/phone videos and
+    photos ({"path", "kind": "dv" | "video" | "photo"}), in the given order. Unlike
+    concat_mp4 every piece is re-encoded to the same frame (width x height,
+    letter/pillar-boxed, never cropped), frame rate and audio layout first, since a
+    4:3 DV scene, a vertical phone clip and a photo can't be stream-copied together.
+    Anamorphic pixels (DV / DVD 720x576) are made square before fitting, so 4:3
+    stays 4:3. ``fps`` None = montage_fps. Every piece's sound is padded / cut to
+    its picture, so joining them can't pull sound and picture apart.
+    A photo is shown for ``photo_s`` seconds (upright per its EXIF), with silence."""
+    global NICE_PREFIX
+    NICE_PREFIX = ["nice", "-n", "8"] if shutil.which("nice") else []
+    work = target.with_suffix(".parts")
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    probes = {str(it["path"]): ffprobe(Path(it["path"])) for it in items if it["kind"] != "photo"}
+    fps = fps or montage_fps(items, probes)
+    vf = (f"scale='trunc(iw*sar/2)*2':ih:flags=lanczos,setsar=1,"
+          f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
+          f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p")
+    enc = ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-c:a", "aac", "-b:a", "160k",
+           "-ar", "48000", "-ac", "2"]
+    silence = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+    try:
+        parts = []
+        for i, it in enumerate(items):
+            src, part = Path(it["path"]), work / f"{i:05d}.mp4"
+            if it["kind"] == "photo":
+                from .media_library import load_image
+                still = work / f"{i:05d}.jpg"
+                load_image(src, max(width, height) * 2).save(still, "JPEG", quality=92)
+                cmd = ["ffmpeg", "-y", "-v", "error", "-loop", "1", "-framerate", str(fps), "-t", f"{photo_s}",
+                       "-i", str(still), *silence, "-vf", vf, *enc, "-shortest", str(part)]
+            else:
+                info = probes[str(src)]
+                has_audio = any(s.get("codec_type") == "audio" for s in info.get("streams", []))
+                v = next(s for s in info.get("streams", []) if s.get("codec_type") == "video")
+                length = float(v.get("duration") or info.get("format", {}).get("duration") or 0)
+                # sound padded with silence / cut to exactly the picture's length
+                cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(src), *([] if has_audio else silence),
+                       "-map", "0:v:0", "-map", "0:a:0" if has_audio else "1:a:0", "-vf", vf,
+                       "-af", "aresample=async=1,apad", *enc,
+                       *(["-t", f"{length:.3f}"] if length else ["-shortest"]), str(part)]
+            run(cmd, log=log)
+            parts.append(part)
+            if progress:
+                progress((i + 1) / (len(items) + 1))
+        listing = work / "list.txt"
+        listing.write_text("".join(f"file '{p.resolve()}'\n" for p in parts))
+        run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy",
+             "-movflags", "+faststart"] + _meta_args(meta) + [str(target)], log=log)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        NICE_PREFIX = []
+
+
 def build_archive(sources: list[Path], target: Path) -> None:
     """Zip several scene proxies as separate files (not merged into one video) —
     arcname is <tape_id>/<scene_file>, tape_id taken from each source's parent

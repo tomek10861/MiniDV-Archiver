@@ -179,12 +179,47 @@ def tapes_list(config, store, workspace: str | None = None) -> list[dict]:
             for doc in store.list_index() if _in_workspace(doc, workspace)]
 
 
-def timeline(config, store, workspace: str | None = None) -> dict:
-    """Year → month aggregates for the iPhone-style browser (no scene lists here)."""
+ALL_SOURCES = frozenset({"dv", "video", "photo"})
+
+
+def parse_sources(value: str | None) -> frozenset:
+    """'dv,photo' -> {'dv', 'photo'}: which sources the timeline shows — MiniDV
+    scenes, camera/phone videos, photos. Old values: 'all', 'dv', 'media'."""
+    v = (value or "all").strip().lower()
+    if v == "all":
+        return ALL_SOURCES
+    if v == "media":
+        return frozenset({"video", "photo"})
+    picked = frozenset(x for x in v.split(",") if x in ALL_SOURCES)
+    return picked or ALL_SOURCES
+
+
+def _media(store, workspace: str | None, sources=ALL_SOURCES) -> list[dict]:
+    rows = store.media_ready() if workspace is None else store.media_items(workspace)
+    return [r for r in rows if r["kind"] in sources]
+
+
+def timeline(config, store, workspace: str | None = None, source: str = "all") -> dict:
+    """Year → month aggregates for the iPhone-style browser (no scene lists here).
+    source: any of "dv", "video", "photo", comma-separated (see parse_sources)."""
+    sources = parse_sources(source)
+    from .media_library import effective_date
     _ensure(config, store)
     years: dict[int, dict] = {}
     undated = 0
-    for doc in store.list_index():
+
+    def add(dt, thumb):
+        y, m = int(dt[:4]), int(dt[5:7])
+        yr = years.setdefault(y, {"year": y, "count": 0, "months": {}, "thumb": None})
+        yr["count"] += 1
+        mo = yr["months"].setdefault(m, {"month": m, "count": 0, "thumb": None})
+        mo["count"] += 1
+        if not mo["thumb"]:
+            mo["thumb"] = thumb
+        if not yr["thumb"]:
+            yr["thumb"] = mo["thumb"]
+
+    for doc in store.list_index() if "dv" in sources else []:
         if not _in_workspace(doc, workspace):
             continue
         tid = doc.get("tape_id")
@@ -193,15 +228,13 @@ def timeline(config, store, workspace: str | None = None) -> dict:
             if not dt:
                 undated += 1
                 continue
-            y, m = int(dt[:4]), int(dt[5:7])
-            yr = years.setdefault(y, {"year": y, "count": 0, "months": {}, "thumb": None})
-            yr["count"] += 1
-            mo = yr["months"].setdefault(m, {"month": m, "count": 0, "thumb": None})
-            mo["count"] += 1
-            if not mo["thumb"] and s.get("scene_id"):
-                mo["thumb"] = {"tape_id": tid, "scene_id": s["scene_id"]}
-            if not yr["thumb"]:
-                yr["thumb"] = mo["thumb"]
+            add(dt, {"tape_id": tid, "scene_id": s["scene_id"]} if s.get("scene_id") else None)
+    for row in _media(store, workspace, sources):
+        dt, _ = effective_date(row)
+        if not dt:
+            undated += 1
+            continue
+        add(dt, {"media_id": row["id"]})
     out = []
     for y in sorted(years, reverse=True):
         yr = years[y]
@@ -315,10 +348,18 @@ def duplicates(config, store, workspace: str | None = None) -> dict:
     return {"groups": out, "unprobed": unprobed, "scenes_indexed": len(scenes)}
 
 
-def month_scenes(config, store, year: int, month: int, workspace: str | None = None) -> list[dict]:
+def month_scenes(config, store, year: int, month: int, workspace: str | None = None,
+                 source: str = "all") -> list[dict]:
+    from .media_library import MEDIA_TAPE, effective_date, public
     _ensure(config, store)
+    sources = parse_sources(source)
     res = []
-    for doc in store.list_index():
+    for row in _media(store, workspace, sources):
+        dt, tm = effective_date(row)
+        if dt and int(dt[:4]) == year and int(dt[5:7]) == month:
+            res.append({"tape_id": MEDIA_TAPE, "label": row["album"], "scene_id": str(row["id"]),
+                        "scene_index": None, "date": dt, "time": tm, "media": public(row)})
+    for doc in store.list_index() if "dv" in sources else []:
         if not _in_workspace(doc, workspace):
             continue
         tid, label = doc.get("tape_id"), doc.get("label")

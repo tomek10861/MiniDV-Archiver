@@ -341,3 +341,11 @@ def test_operator_scene_dates_win_and_unknown_hides_a_scene(tmp_path):
     (cfg.tapes / "T" / "tape.json").write_text(json.dumps(tape))
     doc = li.build_tape_doc(cfg.tapes / "T")
     assert [s["date"] for s in doc["_index"]["scenes"]] == ["2009-07-20", None]
+
+
+def test_timeline_sources_parse():
+    assert li.parse_sources(None) == li.ALL_SOURCES
+    assert li.parse_sources("dv") == {"dv"}
+    assert li.parse_sources("media") == {"video", "photo"}
+    assert li.parse_sources("video,photo,bogus") == {"video", "photo"}
+    assert li.parse_sources("bogus") == li.ALL_SOURCES          # nothing valid -> everything, never empty

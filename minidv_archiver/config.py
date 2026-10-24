@@ -121,6 +121,24 @@ class Config:
     # a frontal face the operator left in a person is still dropped from it when its
     # average similarity to that person is below this ("doesn't fit")
     faces_reject_t: float = float(os.getenv("MINIDV_FACES_REJECT", "0.10"))
+    # "is this <name>?" suggestions for unnamed people: the near-misses below the
+    # clustering threshold, offered for a one-click yes / no
+    faces_suggest_t: float = float(os.getenv("MINIDV_FACES_SUGGEST", "0.12"))
+    faces_suggest_margin: float = float(os.getenv("MINIDV_FACES_SUGGEST_MARGIN", "0.03"))
+    # Photos & videos from cameras/phones ("Zdjęcia i filmy"): comma-separated
+    # folders as the containers see them, read-only (nothing there is written).
+    # Empty = the tab stays empty. Indexed every MINIDV_MEDIA_INTERVAL seconds.
+    media_dirs: str = os.getenv("MINIDV_MEDIA_DIRS", "")
+    media_workspace: str = os.getenv("MINIDV_MEDIA_WORKSPACE", "default")
+    media_interval: int = int(os.getenv("MINIDV_MEDIA_INTERVAL", "300"))
+    # videos longer than this are cut into scene clips (~45 s – 5 min, on picture
+    # changes) so they open quickly; the original stays downloadable. 0 = never.
+    media_split_min_s: int = int(os.getenv("MINIDV_MEDIA_SPLIT_MIN", "600"))
+    # DVD (VHS transfers) copies: each field becomes a frame (50p, real motion, no
+    # invented frames), native 720x576 with its pixel aspect kept, near-transparent
+    # x264. Measured on the 1987 wedding disc: VMAF 97 vs 93 for the old 25p CRF 23.
+    media_dvd_crf: int = int(os.getenv("MINIDV_DVD_CRF", "17"))
+    media_dvd_preset: str = os.getenv("MINIDV_DVD_PRESET", "slow")
 
     @property
     def tapes(self) -> Path:

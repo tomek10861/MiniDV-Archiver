@@ -96,6 +96,51 @@ CREATE TABLE IF NOT EXISTS face_scanned (
     scanned_at TEXT,
     PRIMARY KEY (tape_id, scene_id)
 );
+-- photos & videos from read-only camera/phone folders (see media_library.py)
+CREATE TABLE IF NOT EXISTS media (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    path        TEXT NOT NULL UNIQUE,
+    album       TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    size        INTEGER,
+    mtime       REAL,
+    status      TEXT NOT NULL DEFAULT 'new',
+    error       TEXT,
+    taken       TEXT,
+    date_source TEXT,
+    date_fix    TEXT,
+    width       INTEGER,
+    height      INTEGER,
+    duration    REAL,
+    camera      TEXT,
+    playable    INTEGER,
+    proxy       INTEGER NOT NULL DEFAULT 0,
+    workspace   TEXT NOT NULL DEFAULT 'default',
+    added_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS media_album ON media(workspace, album);
+CREATE INDEX IF NOT EXISTS media_status ON media(status);
+-- films about one person ("Zmontuj film", see memories.py): params = what the
+-- operator chose, plan = the picked moments (kept so the music can be swapped)
+CREATE TABLE IF NOT EXISTS memories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace  TEXT NOT NULL DEFAULT 'default',
+    person_id  INTEGER NOT NULL,
+    created_at TEXT,
+    updated_at TEXT,
+    status     TEXT NOT NULL DEFAULT 'QUEUED',
+    progress   REAL,
+    title      TEXT,
+    params     TEXT,
+    plan       TEXT,
+    music      TEXT,
+    path       TEXT,
+    size       INTEGER,
+    duration   REAL,
+    error      TEXT
+);
+CREATE INDEX IF NOT EXISTS memories_person ON memories(person_id);
 -- operator corrections the re-clustering must honour: kind 'same' / 'diff' between two tracks
 CREATE TABLE IF NOT EXISTS face_feedback (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,8 +154,16 @@ CREATE TABLE IF NOT EXISTS face_feedback (
 # columns added after the first release of face recognition (ALTER TABLE on open)
 _MIGRATIONS = {
     "face_tracks": [("arc", "BLOB"), ("rq", "REAL"), ("frontal", "REAL"), ("refined", "TEXT")],
-    "face_persons": [("anchor", "INTEGER")],
+    "face_persons": [("anchor", "INTEGER"), ("grp", "TEXT")],
+    # long videos split into scene clips: clips point at their parent; split =
+    # NULL not looked at yet, 0 kept whole, 1 replaced by its clips
+    "media": [("parent_id", "INTEGER"), ("clip_start", "REAL"), ("clip_end", "REAL"), ("split", "INTEGER"),
+              # frame rate of what the browser plays (proxy / clip / original); reproxy =
+              # 1 when the operator asked for a DVD copy to be re-encoded with today's settings
+              ("fps", "REAL"), ("reproxy", "INTEGER")],
 }
+# a media row that stands for itself (not a long video replaced by its clips)
+_VISIBLE = "(split IS NULL OR split=0)"
 
 # the one face-scan build row (singleton: see JobStore.enqueue_face_scan)
 FACES_KEY = "_faces/SCAN"
@@ -124,6 +177,7 @@ class JobStore:
     def __init__(self, path: Path | str):
         self.path = str(path)
         self._lock = threading.RLock()
+        self._orphans: list = []          # clips of media files that changed (see media_seen)
         self._conn = sqlite3.connect(self.path, timeout=15, isolation_level=None,
                                      check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -560,17 +614,17 @@ class JobStore:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT p.id, p.name, p.hidden, COUNT(t.id), COUNT(DISTINCT t.tape_id || '/' || t.scene_id), "
-                "(SELECT id FROM face_tracks WHERE person_id=p.id ORDER BY COALESCE(rq, quality) DESC LIMIT 1) "
+                "(SELECT id FROM face_tracks WHERE person_id=p.id ORDER BY COALESCE(rq, quality) DESC LIMIT 1), p.grp "
                 "FROM face_persons p LEFT JOIN face_tracks t ON t.person_id=p.id "
                 "WHERE p.workspace=? GROUP BY p.id", (workspace,)).fetchall()
-        return [{"id": r[0], "name": r[1], "hidden": bool(r[2]), "tracks": r[3], "scenes": r[4], "cover": r[5]}
-                for r in rows]
+        return [{"id": r[0], "name": r[1], "hidden": bool(r[2]), "tracks": r[3], "scenes": r[4], "cover": r[5],
+                 "group": r[6]} for r in rows]
 
     def face_person(self, person_id: int) -> dict | None:
         with self._lock:
-            r = self._conn.execute("SELECT id, workspace, name, hidden FROM face_persons WHERE id=?",
+            r = self._conn.execute("SELECT id, workspace, name, hidden, grp FROM face_persons WHERE id=?",
                                    (person_id,)).fetchone()
-        return {"id": r[0], "workspace": r[1], "name": r[2], "hidden": bool(r[3])} if r else None
+        return {"id": r[0], "workspace": r[1], "name": r[2], "hidden": bool(r[3]), "group": r[4]} if r else None
 
     def face_tracks(self, person_id: int, with_embedding: bool = False) -> list[dict]:
         with self._lock:
@@ -591,11 +645,13 @@ class JobStore:
                                    (track_id,)).fetchone()
         return {"id": r[0], "person_id": r[1], "workspace": r[2], "tape_id": r[3], "scene_id": r[4]} if r else None
 
-    def face_person_update(self, person_id: int, *, name=None, hidden=None) -> None:
+    def face_person_update(self, person_id: int, *, name=None, hidden=None, group=None) -> None:
         with self._lock:
-            # naming / hiding = "this face is somebody": pin the face the operator was
-            # looking at, so re-clustering knows which new group the name belongs to
+            # naming / hiding / grouping = "this face is somebody": pin the face the
+            # operator was looking at, so re-clustering knows which new group it belongs to
             self._anchor(person_id)
+            if group is not None:
+                self._conn.execute("UPDATE face_persons SET grp=? WHERE id=?", (group or None, person_id))
             if name is not None:
                 self._conn.execute("UPDATE face_persons SET name=? WHERE id=?", (name or None, person_id))
             if hidden is not None:
@@ -612,8 +668,8 @@ class JobStore:
         """Fold person ``src`` into ``dst`` (same workspace only). ``dst`` keeps
         its name, or takes ``src``'s if it had none."""
         with self._lock, self._immediate():
-            a = self._conn.execute("SELECT workspace, name FROM face_persons WHERE id=?", (src,)).fetchone()
-            b = self._conn.execute("SELECT workspace, name FROM face_persons WHERE id=?", (dst,)).fetchone()
+            a = self._conn.execute("SELECT workspace, name, grp FROM face_persons WHERE id=?", (src,)).fetchone()
+            b = self._conn.execute("SELECT workspace, name, grp FROM face_persons WHERE id=?", (dst,)).fetchone()
             if not a or not b:
                 raise FileNotFoundError("nie ma takiej osoby")
             if a[0] != b[0]:
@@ -624,6 +680,8 @@ class JobStore:
             self._conn.execute("UPDATE face_tracks SET person_id=? WHERE person_id=?", (dst, src))
             if not b[1] and a[1]:
                 self._conn.execute("UPDATE face_persons SET name=? WHERE id=?", (a[1], dst))
+            if not b[2] and a[2]:
+                self._conn.execute("UPDATE face_persons SET grp=? WHERE id=?", (a[2], dst))
             self._conn.execute("DELETE FROM face_persons WHERE id=?", (src,))
             self._bump_faces_gen()
 
@@ -719,6 +777,25 @@ class JobStore:
             self._conn.execute("INSERT INTO meta (k, v) VALUES (?, ?)", (key, now()))
             return n
 
+    def face_signature(self, workspace: str) -> tuple:
+        """Cheap change token for anything that affects suggestions."""
+        with self._lock:
+            return (self._conn.execute("SELECT v FROM meta WHERE k='faces_gen'").fetchone(),
+                    self._conn.execute("SELECT count(*), sum(arc IS NOT NULL), sum(person_id) FROM face_tracks "
+                                       "WHERE workspace=?", (workspace,)).fetchone(),
+                    self._conn.execute("SELECT count(*), group_concat(COALESCE(name,'') || hidden) FROM face_persons "
+                                       "WHERE workspace=?", (workspace,)).fetchone(),
+                    self._conn.execute("SELECT count(*) FROM face_feedback").fetchone())
+
+    def face_reject_pair(self, person_id: int, other_id: int) -> None:
+        """Operator: these two persons are not the same — a hard "diff" between
+        their anchor faces (re-clustering and suggestions both honour it)."""
+        with self._lock, self._immediate():
+            a, b = self._anchor(person_id), self._anchor(other_id)
+            if not a or not b:
+                raise FileNotFoundError("nie ma takiej osoby")
+            self._feedback("diff", a, b)
+
     def face_feedback(self) -> list[tuple[str, int, int]]:
         with self._lock:
             return [tuple(r) for r in self._conn.execute("SELECT kind, a, b FROM face_feedback ORDER BY id")]
@@ -753,15 +830,16 @@ class JobStore:
                  "arc": r[5], "rq": r[6] or 0.0, "frontal": r[7] or 0.0} for r in rows]
 
     def face_touched_persons(self, workspace: str) -> list[dict]:
-        """Persons the operator acted on (named or hidden), with their anchor track."""
+        """Persons the operator acted on (named, hidden or put in a group), with their anchor track."""
         with self._lock:
             ids = [r[0] for r in self._conn.execute(
-                "SELECT id FROM face_persons WHERE workspace=? AND (name IS NOT NULL OR hidden=1)", (workspace,))]
+                "SELECT id FROM face_persons WHERE workspace=? AND (name IS NOT NULL OR hidden=1 OR grp IS NOT NULL)",
+                (workspace,))]
             out = []
             for pid in ids:
                 anchor = self._anchor(pid)
-                r = self._conn.execute("SELECT name, hidden FROM face_persons WHERE id=?", (pid,)).fetchone()
-                out.append({"id": pid, "name": r[0], "hidden": bool(r[1]), "anchor": anchor})
+                r = self._conn.execute("SELECT name, hidden, grp FROM face_persons WHERE id=?", (pid,)).fetchone()
+                out.append({"id": pid, "name": r[0], "hidden": bool(r[1]), "group": r[2], "anchor": anchor})
         return out
 
     def face_apply_clusters(self, workspace: str, gen: int, groups: list[dict]) -> bool:
@@ -780,9 +858,268 @@ class JobStore:
                 g["person_id"] = pid
                 self._conn.executemany("UPDATE face_tracks SET person_id=? WHERE id=?",
                                        [(pid, t) for t in g["tracks"]])
-            self._conn.execute("DELETE FROM face_persons WHERE workspace=? AND name IS NULL AND hidden=0 AND id NOT IN "
+            self._conn.execute("DELETE FROM face_persons WHERE workspace=? AND name IS NULL AND hidden=0 AND grp IS NULL "
+                               "AND id NOT IN "
                                "(SELECT DISTINCT person_id FROM face_tracks)", (workspace,))
             return True
+
+    # ---- media (photos / videos) ------------------------------------------------
+    _MEDIA_COLS = ("id", "path", "album", "name", "kind", "size", "mtime", "status", "error", "taken",
+                   "date_source", "date_fix", "width", "height", "duration", "camera", "playable", "proxy",
+                   "workspace", "added_at", "parent_id", "clip_start", "clip_end", "split", "fps", "reproxy")
+
+    def _media_rows(self, where: str = "", args=()) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(f"SELECT {', '.join(self._MEDIA_COLS)} FROM media {where}", args).fetchall()
+        return [dict(zip(self._MEDIA_COLS, r)) for r in rows]
+
+    def media_seen(self, path: str, *, album: str, name: str, kind: str, size: int, mtime: float,
+                   workspace: str) -> bool:
+        """Register a file; a new or changed one (size/mtime) goes back to 'new'.
+        True when it needs (re)processing."""
+        with self._lock, self._immediate():
+            r = self._conn.execute("SELECT id, size, mtime FROM media WHERE path=?", (path,)).fetchone()
+            if r and r[1] == size and abs((r[2] or 0) - mtime) < 1:
+                return False
+            if r:
+                # changed file: its old clips (if it was split) are stale
+                self._orphans += [tuple(c) for c in self._conn.execute(
+                    "SELECT id, path FROM media WHERE parent_id=?", (r[0],))]
+                self._conn.execute("DELETE FROM media WHERE parent_id=?", (r[0],))
+                self._conn.execute("UPDATE media SET size=?, mtime=?, status='new', error=NULL, proxy=0, split=NULL "
+                                   "WHERE id=?", (size, mtime, r[0]))
+            else:
+                self._conn.execute(
+                    "INSERT INTO media (path, album, name, kind, size, mtime, workspace, added_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)", (path, album, name, kind, size, mtime, workspace, now()))
+            return True
+
+    def media_take_orphans(self) -> list[tuple[int, str]]:
+        """(id, path) of clips dropped because their source file changed."""
+        out, self._orphans = self._orphans, []
+        return out
+
+    def media_paths(self) -> list[dict]:
+        with self._lock:
+            return [{"id": r[0], "path": r[1]} for r in
+                    self._conn.execute("SELECT id, path FROM media WHERE parent_id IS NULL")]
+
+    def media_delete(self, ids: list[int]) -> list[tuple[int, str]]:
+        """Delete rows and their clips; returns every (id, path) removed."""
+        if not ids:
+            return []
+        with self._lock, self._immediate():
+            marks = ",".join("?" * len(ids))
+            gone = [tuple(r) for r in self._conn.execute(
+                f"SELECT id, path FROM media WHERE id IN ({marks}) OR parent_id IN ({marks})", (*ids, *ids))]
+            self._conn.execute(f"DELETE FROM media WHERE id IN ({marks}) OR parent_id IN ({marks})", (*ids, *ids))
+        return gone
+
+    def media_pending(self, limit: int = 500) -> list[dict]:
+        return self._media_rows("WHERE status='new' ORDER BY id LIMIT ?", (limit,))
+
+    def media_needing_proxy(self, limit: int = 50) -> list[dict]:
+        return self._media_rows("WHERE status='ready' AND kind='video' AND playable=0 AND proxy=0 "
+                                "AND parent_id IS NULL ORDER BY id LIMIT ?", (limit,))
+
+    def media_needing_split(self, min_s: float, limit: int = 20) -> list[dict]:
+        """Long videos not looked at yet, whose playable form (original or proxy) exists."""
+        return self._media_rows("WHERE status='ready' AND kind='video' AND parent_id IS NULL AND split IS NULL "
+                                "AND duration >= ? AND (playable=1 OR proxy=1) ORDER BY id LIMIT ?", (min_s, limit))
+
+    def media_add_clip(self, parent: dict, *, path: str, start: float, end: float, name: str,
+                       taken: str | None) -> int:
+        with self._lock:
+            return int(self._conn.execute(
+                "INSERT INTO media (path, album, name, kind, size, mtime, status, taken, date_source, date_fix, "
+                "width, height, duration, camera, playable, proxy, workspace, added_at, parent_id, clip_start, "
+                "clip_end, fps) VALUES (?,?,?,'video',?,?,'ready',?,?,?,?,?,?,?,1,0,?,?,?,?,?,?)",
+                (path, parent["album"], name, Path(path).stat().st_size, parent["mtime"], taken,
+                 parent["date_source"], parent["date_fix"], parent["width"], parent["height"], end - start,
+                 parent["camera"], parent["workspace"], now(), parent["id"], start, end,
+                 parent.get("fps"))).lastrowid)
+
+    def media_update(self, media_id: int, **fields) -> None:
+        cols = [c for c in fields if c in self._MEDIA_COLS and c not in ("id", "path")]
+        if not cols:
+            return
+        with self._lock:
+            self._conn.execute(f"UPDATE media SET {', '.join(c + '=?' for c in cols)} WHERE id=?",
+                               (*[fields[c] for c in cols], media_id))
+
+    def media_undated(self) -> list[dict]:
+        """Ready originals no date could be read for and not looked at by
+        media_library.date_from_file_times yet (date_source NULL)."""
+        return self._media_rows("WHERE status='ready' AND parent_id IS NULL AND taken IS NULL "
+                                "AND date_fix IS NULL AND date_source IS NULL")
+
+    def media_rows_by_source(self, date_source: str) -> list[dict]:
+        return self._media_rows("WHERE status='ready' AND parent_id IS NULL AND date_fix IS NULL AND date_source=?",
+                                (date_source,))
+
+    def media_album_rows(self, album: str) -> list[dict]:
+        return self._media_rows("WHERE album=? AND parent_id IS NULL", (album,))
+
+    def media_children(self, parent_id: int) -> list[dict]:
+        return self._media_rows("WHERE parent_id=? ORDER BY clip_start", (parent_id,))
+
+    # ---- films about a person (memories.py) ------------------------------------
+    _MEM_COLS = ("id", "workspace", "person_id", "created_at", "updated_at", "status", "progress", "title",
+                 "params", "plan", "music", "path", "size", "duration", "error")
+    _MEM_JSON = ("params", "plan", "music")
+
+    def _mem(self, r) -> dict:
+        d = dict(zip(self._MEM_COLS, r))
+        for k in self._MEM_JSON:
+            d[k] = json.loads(d[k]) if d[k] else None
+        return d
+
+    def memory_add(self, workspace: str, person_id: int, title: str, params: dict) -> int:
+        with self._lock:
+            return int(self._conn.execute(
+                "INSERT INTO memories (workspace, person_id, created_at, updated_at, status, progress, title, params) "
+                "VALUES (?,?,?,?,'QUEUED',0,?,?)",
+                (workspace, person_id, now(), now(), title, json.dumps(params, ensure_ascii=False))).lastrowid)
+
+    def memory_update(self, memory_id: int, **fields) -> None:
+        cols = [c for c in fields if c in self._MEM_COLS and c not in ("id", "person_id", "workspace")]
+        if not cols:
+            return
+        vals = [json.dumps(fields[c], ensure_ascii=False) if c in self._MEM_JSON and fields[c] is not None
+                else fields[c] for c in cols]
+        with self._lock:
+            self._conn.execute(f"UPDATE memories SET {', '.join(c + '=?' for c in cols)}, updated_at=? WHERE id=?",
+                               (*vals, now(), memory_id))
+
+    def memory_get(self, memory_id: int) -> dict | None:
+        with self._lock:
+            r = self._conn.execute(f"SELECT {', '.join(self._MEM_COLS)} FROM memories WHERE id=?",
+                                   (memory_id,)).fetchone()
+        return self._mem(r) if r else None
+
+    def memories_of(self, person_id: int) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(f"SELECT {', '.join(self._MEM_COLS)} FROM memories WHERE person_id=? "
+                                      "ORDER BY id DESC", (person_id,)).fetchall()
+        return [self._mem(r) for r in rows]
+
+    def memories_move(self, src: int, dst: int) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE memories SET person_id=? WHERE person_id=?", (dst, src))
+
+    def memory_delete(self, memory_id: int) -> dict | None:
+        m = self.memory_get(memory_id)
+        if m:
+            with self._lock:
+                self._conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
+        return m
+
+    def media_ready_originals(self) -> list[dict]:
+        return self._media_rows("WHERE status='ready' AND parent_id IS NULL ORDER BY id")
+
+    def media_needing_fps(self, limit: int = 200) -> list[dict]:
+        """Playable videos whose frame rate isn't recorded yet (rows from before it was)."""
+        return self._media_rows("WHERE status='ready' AND kind='video' AND fps IS NULL "
+                                "AND (playable=1 OR proxy=1) ORDER BY id LIMIT ?", (limit,))
+
+    def media_reproxy_pending(self) -> list[dict]:
+        return self._media_rows("WHERE reproxy=1 AND status='ready' AND parent_id IS NULL ORDER BY id")
+
+    def face_shift_times(self, tape_id: str, scene_id: str, delta: float, duration: float | None) -> int:
+        """Move every face time of one scene by ``delta`` seconds (its video file now
+        starts that much later/earlier in the film); times stay whole seconds inside
+        the new file. Returns how many tracks changed."""
+        changed = 0
+        with self._lock, self._immediate():
+            for tid, times in self._conn.execute("SELECT id, times FROM face_tracks WHERE tape_id=? AND scene_id=?",
+                                                 (tape_id, scene_id)).fetchall():
+                old = json.loads(times)
+                top = int(duration) if duration else None
+                new = sorted({min(top, max(0, round(t + delta))) if top is not None else max(0, round(t + delta))
+                              for t in old})
+                if new != old:
+                    self._conn.execute("UPDATE face_tracks SET times=? WHERE id=?", (json.dumps(new), tid))
+                    changed += 1
+        return changed
+
+    def media_set_album_date(self, workspace: str, album: str, date_fix: str) -> int:
+        """Date every undated item of an album (and the parts of its split films);
+        anything that already has a date keeps it. Returns how many were set."""
+        with self._lock, self._immediate():
+            ids = [r[0] for r in self._conn.execute(
+                "SELECT id FROM media WHERE workspace=? AND album=? AND parent_id IS NULL AND taken IS NULL "
+                "AND date_fix IS NULL", (workspace, album))]
+            for i in ids:
+                self._conn.execute("UPDATE media SET date_fix=? WHERE id=? OR parent_id=?", (date_fix, i, i))
+        return len(ids)
+
+    def media_set_family_date(self, parent_id: int, date_fix: str | None) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE media SET date_fix=? WHERE id=? OR parent_id=?", (date_fix, parent_id, parent_id))
+
+    def media_get(self, media_id: int) -> dict | None:
+        rows = self._media_rows("WHERE id=?", (media_id,))
+        return rows[0] if rows else None
+
+    def media_ready(self) -> list[dict]:
+        return self._media_rows(f"WHERE status='ready' AND {_VISIBLE} ORDER BY id")
+
+    def media_items(self, workspace: str, album: str | None = None) -> list[dict]:
+        if album is None:
+            return self._media_rows(f"WHERE workspace=? AND status='ready' AND {_VISIBLE}", (workspace,))
+        return self._media_rows(f"WHERE workspace=? AND album=? AND status='ready' AND {_VISIBLE}", (workspace, album))
+
+    def media_counts(self) -> dict:
+        with self._lock:
+            rows = self._conn.execute(f"SELECT status, kind, count(*) FROM media WHERE {_VISIBLE} "
+                                      "GROUP BY status, kind").fetchall()
+            proxies = self._conn.execute("SELECT count(*) FROM media WHERE status='ready' AND kind='video' "
+                                         "AND playable=0 AND proxy=0").fetchone()[0]
+        out = {"total": 0, "ready": 0, "new": 0, "error": 0, "photos": 0, "videos": 0, "proxies_pending": proxies}
+        for status, kind, n in rows:
+            out["total"] += n
+            out[status] = out.get(status, 0) + n
+            if status == "ready":
+                out["photos" if kind == "photo" else "videos"] += n
+        return out
+
+    def face_dissolve(self, person_ids: list[int]) -> list[int]:
+        """Forget these groupings (a cluster of different people): every face becomes
+        its own unnamed person and the "same"/"confirm" rules that glued them are
+        dropped ("diff" rules stay). Re-clustering then decides afresh. Returns the
+        new person ids."""
+        new = []
+        with self._lock, self._immediate():
+            for pid in person_ids:
+                p = self._conn.execute("SELECT workspace FROM face_persons WHERE id=?", (pid,)).fetchone()
+                if not p:
+                    continue
+                tids = [r[0] for r in self._conn.execute("SELECT id FROM face_tracks WHERE person_id=?", (pid,))]
+                marks = ",".join("?" * len(tids))
+                if tids:
+                    self._conn.execute(f"DELETE FROM face_feedback WHERE kind IN ('same','confirm') AND "
+                                       f"(a IN ({marks}) OR b IN ({marks}))", (*tids, *tids))
+                for t in tids:
+                    np_id = int(self._conn.execute("INSERT INTO face_persons (workspace, created_at) VALUES (?,?)",
+                                                   (p[0], now())).lastrowid)
+                    self._conn.execute("UPDATE face_tracks SET person_id=? WHERE id=?", (np_id, t))
+                    new.append(np_id)
+                self._conn.execute("DELETE FROM face_persons WHERE id=?", (pid,))
+            self._bump_faces_gen()
+        return new
+
+    def face_delete_persons(self, person_ids: list[int]) -> list[int]:
+        """Not faces at all (statues, posters, blur): drop the persons and their
+        faces for good — the scenes stay marked scanned, so they don't come back.
+        Returns the deleted track ids (for their thumbnails)."""
+        gone = []
+        with self._lock, self._immediate():
+            for pid in person_ids:
+                gone += [r[0] for r in self._conn.execute("SELECT id FROM face_tracks WHERE person_id=?", (pid,))]
+                self._conn.execute("DELETE FROM face_tracks WHERE person_id=?", (pid,))
+                self._conn.execute("DELETE FROM face_persons WHERE id=?", (pid,))
+            self._bump_faces_gen()
+        return gone
 
     def face_prune_empty(self) -> None:
         """Unnamed persons that lost every track (split/merge leftovers) go away."""

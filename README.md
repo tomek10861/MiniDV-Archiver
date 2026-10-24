@@ -32,6 +32,10 @@ involved.
 - 🗓️ **Timeline** by recording date, across all tapes
 - 🧑‍🤝‍🧑 **People**: on-device face recognition, so naming a face finds every recording
   of that person
+- 🎬 **Films about a person**, like the iPhone's Memories: their best moments over the
+  years, cut to music, with dates
+- 📷 **Photos, videos and DVDs** from a NAS share, on the same timeline and in the same
+  face recognition
 - 🧹 **Restore**: deinterlace, denoise, deblock, plus optional stabilisation and upscaling
 - ⬇️ **Share**: a ~90 MB Messenger-ready MP4, a single video joined from many tapes, or a ZIP
 - 🐳 **One `docker compose up`**: four small services, bilingual web UI (EN / PL)
@@ -42,10 +46,25 @@ involved.
 
 ---
 
-**Contents:** [Features](#features) · [Quick start](#quick-start-docker) ·
+**Contents:** [What's new](#whats-new-october-2026) · [Features](#features) · [Quick start](#quick-start-docker) ·
 [Requirements](#requirements) · [Configuration](#configuration) · [Usage](#usage) ·
 [API](#api) · [FireWire notes](#camera-compatibility--firewire-notes) ·
 [Development](#development)
+
+## What's new (October 2026)
+
+- 🎬 **[Make a film](#-people-face-recognition-that-stays-on-your-machine) about a person**:
+  picked by face, cut to the beat, dates at the bottom, music that ducks when someone talks.
+  Free music by mood, a search of free music, or your own.
+- 📀 **DVDs of old VHS tapes in 50p**: every field becomes a frame, so motion is as smooth
+  as on the tape, at the native 720×576 with the right 4:3 shape (measured VMAF 97, was 93).
+  Existing copies are re-encoded only when you ask.
+- 🎞️ **Mixed films from the timeline stay 50p**, and MiniDV in them is no longer squeezed
+  (4:3 was coming out 6 % too narrow); sound stays in sync across every piece.
+- ⏯️ **Frame-by-frame stepping at the real frame rate** (1/50 s for MiniDV and DVD copies).
+- 🗓️ **Scans and tape transfers are dated from their name or folder**, not from the day they
+  were scanned; dates before 1990 in names count.
+- 🧑‍🤝‍🧑 The detailed face pass samples by time, so 50p copies don't cost it twice as much.
 
 ## Features
 
@@ -125,6 +144,37 @@ involved.
 - **Scoped by workspace.** Faces from different workspaces are never matched against each
   other.
 
+- **Organise people**:
+  - put people in groups (Family, Friends, Neighbours, Others, or your own), even without a name;
+  - filter the list by group;
+  - *To confirm* offers one-click "is this <name>? ✓ / ✕" suggestions for faces that look like someone you've named;
+  - *⤧ Dissolve* breaks up a group of different people, and *🗑 Delete faces* removes statues and posters for good, one person or many at once.
+- **A person's own timeline**: their faces on a date axis, scaled from the first to the last recording.
+  - Tap a cluster to review, play or remove each face.
+  - Fix a recording's date, or mark it *unknown* to keep it off every timeline.
+- **🎬 Make a film** about a person, in the spirit of the iPhone's Memories:
+  - it picks the moments where their face is seen best, spread over the whole period (or the years you choose), from MiniDV, videos and photos;
+  - the cuts and cross-fades follow the music's beat, dates appear at the bottom, a title opens it and the music is credited at the end;
+  - 4:3 tapes and vertical phone clips sit on a blurred copy of themselves instead of black bars; photos get a slow zoom;
+  - the recordings keep their own sound, and the music ducks while somebody talks;
+  - music: a built-in list of free tracks by mood (Kevin MacLeod, CC BY), a search of free music on Openverse (CC0 / CC BY), or your own files in `<storage>/music/own`;
+  - every film is a different pick; keep several, swap the music, download or delete them.
+  - Recordings open paused on the frame where the person appears, with ±1 / ±5 frame stepping (`,` / `.`).
+
+### 📷 Photos & videos from cameras and phones
+
+- **Point it at a read-only folder or NAS share** (`MINIDV_MEDIA_DIRS`), and a *Photos & videos* tab shows it as albums (one per folder).
+- **Dates** come from the EXIF date, or the video's own recording time (phone UTC is converted to local), or the file name (`IMG_20190704_123456`, `VID-20190704-WA0001`, Pixel names). The copy date is never used.
+  - Files with no date at all get one from trustworthy file times or from the numbered photos next to them, marked as approximate; *📅 Album date* fills in the rest of an album.
+  - **Scans and tape transfers** (a scanner in the EXIF, `Skanuj0001.jpg`, folders like *skany*, *VHS*, *negatives*) are dated from their name or folder, e.g. `Wedding 25.04.1987/`. Their own date is only when they were scanned, so without a date in the name they stay undated and say so. Dates before 1990 in names and folders count.
+- **DVDs** (a `VIDEO_TS` folder, or the VOBs copied as they are) show up as one film per title, dated from the folder name. The browser copy is **50p**: each field of the interlaced VHS picture becomes a frame, nothing invented. Native 720×576 with its 4:3 shape, x264 CRF 17. Disc menus aren't indexed.
+- **Long videos are split into scenes** (45 s – 5 min, cut where the picture changes) so they open at once; the whole original stays downloadable.
+- **Screenshots, icons and program folders stay out.**
+- **Viewing in the browser**: HEIC photos get a JPEG for display, and videos browsers can't play (MTS, AVI, HEVC…) get an H.264 copy, all under `<storage>/media`. The originals are never touched.
+- **On the timeline next to the tapes**, with a *MiniDV only* checkbox.
+- **Through the same face recognition**, so a person's page lists their tapes, photos and videos together.
+- **Indexed incrementally every few minutes.** Files still being copied are skipped, and a share that's briefly offline doesn't drop anything.
+
 ### 🧹 Restore & ⬇️ share
 
 - **🧹 Restore** builds a cleaned-up MP4 **decoded from the DV master**, not the proxy:
@@ -137,6 +187,9 @@ involved.
   for Messenger or Facebook.
 - **🎬 Build one video** from scenes picked across several tapes, straight from the
   timeline, either as a lossless join or restored from the masters.
+- **🎬 A mixed film** from the timeline joins MiniDV, phone videos and photos: 50p when any
+  of it is 50p, 4:3 pictures kept 4:3 (anamorphic pixels made square first), each piece's
+  sound padded or cut to its picture so nothing drifts.
 - **📦 ZIP** downloads a selection as separate files.
 - **The master and the proxies are never modified.** Builds are temporary and pruned
   automatically.
@@ -246,6 +299,8 @@ with defaults. The ones you're most likely to touch:
 | `MINIDV_FACES_SCAN_AT` | `03:00` | daily scan of new scenes (local time); empty = manual only |
 | `MINIDV_FACES_THREADS` | `1` | CPU threads for the face scan (`2` is about twice as fast) |
 | `MINIDV_FACES_CLUSTER` | `0.24` | how readily faces are grouped (lower = fewer split people, more mixed ones) |
+| `MINIDV_MEDIA_DIRS` | *(empty)* | read-only photo/video folders for the *Photos & videos* tab (as the containers see them) |
+| `MINIDV_DVD_CRF` / `MINIDV_DVD_PRESET` | `17` / `slow` | DVD (VHS transfer) copies: 50p — one frame per field, nothing interpolated — native 720×576 with its pixel aspect. Existing copies are re-encoded only on request: `POST /api/media/<id>/reencode` (parts and face times are kept) |
 | `MINIDV_INDEX_INTERVAL` | `300` | seconds between background refreshes of the tape/scene index |
 | `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | api HTTP listener (inside its container) |
 
@@ -310,7 +365,12 @@ call until they report `QUEUED` → `RUNNING` → `READY`.
 `/api/playlist/build/{token}.mp4|.zip` serves a cross-tape build ·
 `/api/faces/status` (scan progress, scanned/total scenes) · `/api/persons` ·
 `/api/persons/{id}` (faces + recordings with on-screen time ranges) ·
-`/api/faces/thumb/{face_id}.jpg`.
+`/api/faces/thumb/{face_id}.jpg` · `/api/faces/suggestions` ·
+`/api/media/status` · `/api/media/albums` · `/api/media/album?name=…` · `/api/media/{id}` ·
+`/api/media/{id}/thumb.jpg|view|video|original`. `/api/timeline*` also takes `?source=dv|media` ·
+`/api/persons/{id}/memories` (films about a person) · `/api/memories/{id}/file` (`?dl=1` downloads) ·
+`/api/memories/{id}/poster` · `/api/music` (built-in, own and fetched tracks, by mood) ·
+`/api/music/search?q=…` (free music on Openverse) · `/api/music/{id}/audio` (preview).
 
 **`POST`**
 `/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?, timezone?, workspace?}`:
@@ -333,10 +393,17 @@ joins scenes from several tapes, in order ·
 `/api/faces/scan` (409 if one is already running) · `/api/faces/scan/cancel` ·
 `/api/persons/{id}` `{name?, hidden?}` (a name that already exists merges) ·
 `/api/persons/{id}/merge` `{into}` ·
-`/api/faces/tracks/{face_id}/move` `{person_id | null}` (`null` = "not this person").
+`/api/faces/tracks/{face_id}/move` `{person_id | null}` (`null` = "not this person") ·
+`/api/persons/{id}` also takes `{group}` · `/api/persons/{id}/reject` `{other}` ("not <name>") ·
+`/api/persons/dissolve` / `/api/persons/delete` `{ids: […]}` ·
+`/api/tapes/{id}/scene-dates` `{dates: {scene_id: "YYYY-MM-DD" | "unknown" | ""}}` ·
+`/api/media/rescan` · `/api/media/{id}/date` `{date, whole?}` · `/api/media/album/date` `{album, date}` ·
+`/api/media/{id}/reencode` (a DVD copy again with the current settings; parts and face times are kept) ·
+`/api/persons/{id}/memories` `{length: short|medium|long, sources?, date_from?, date_to?, music?: <track id> | "auto:<mood>" | null, lang?}` ·
+`/api/memories/{id}/music` `{music}` (same moments, other music).
 
 **`DELETE`**
-`/api/tapes/{id}` · `/api/jobs/{tape_id}` (clears a finished or errored job row; refuses
+`/api/tapes/{id}` · `/api/memories/{id}` · `/api/jobs/{tape_id}` (clears a finished or errored job row; refuses
 a running or already-archived one).
 
 </details>

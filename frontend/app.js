@@ -9,8 +9,17 @@ const dvDuration = bytes => {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   return (h > 0 ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(sec).padStart(2, '0');
 };
-// "14.09 21:32" from an ISO datetime (UTC, matching every timestamp this app shows)
-const fmtDT = iso => iso && iso.length >= 16 ? `${iso.slice(8, 10)}.${iso.slice(5, 7)} ${iso.slice(11, 16)}` : '';
+// Server timestamps (job/task times, last scan…) are UTC ISO strings; show them in
+// the viewer's own time zone, not as raw UTC (which read as 1–2 h "behind" in Poland).
+// Recording dates are naive wall-clock strings and never go through these.
+const _localDate = iso => { const d = iso ? new Date(iso) : null; return d && !isNaN(d) ? d : null; };
+const _p2 = n => String(n).padStart(2, '0');
+// "14.09 21:32"
+const fmtDT = iso => { const d = _localDate(iso); return d ? `${_p2(d.getDate())}.${_p2(d.getMonth() + 1)} ${_p2(d.getHours())}:${_p2(d.getMinutes())}` : ''; };
+// "21:32:05"
+const fmtTime = iso => { const d = _localDate(iso); return d ? `${_p2(d.getHours())}:${_p2(d.getMinutes())}:${_p2(d.getSeconds())}` : ''; };
+// "2026-09-14 21:32:05"
+const fmtStamp = iso => { const d = _localDate(iso); return d ? `${d.getFullYear()}-${_p2(d.getMonth() + 1)}-${_p2(d.getDate())} ${fmtTime(iso)}` : ''; };
 // coarse "1h 30m" / "8m 20s" duration, for processing ETAs (long, low-precision estimates)
 const fmtDuration = totalSec => {
   const s = Math.max(0, Math.round(totalSec));
@@ -65,7 +74,7 @@ function setWorkspace(name) {
   currentWorkspace = name || 'default';
   try { localStorage.setItem('workspace', currentWorkspace); } catch (_) {}
   tl.data = null; tl.year = null; tl.month = null; dupCache = null; tapesSig = null;
-  people.list = null; people.person = null; people.merging = false;
+  people.list = null; people.person = null; people.merging = false; people.groupFilter = "";
   if (currentRoute().section === 'osoby') go('#osoby');
   refresh();
 }
@@ -142,10 +151,29 @@ function viewToggleHTML() {
     ${btn('list', '☰', L('view.list'))}${btn('grid', '▦', L('view.grid'))}
   </div>`;
 }
-function sceneGridHTML(items) {   // items: [{tapeId, s}] -- s is a full scene record
+// ---- photos & videos from cameras/phones: modal items are {tapeId: MEDIA, s: {scene_id, media}} ----
+const MEDIA = '@media';
+const mediaThumb = id => `/api/media/${id}/thumb.jpg`;
+const mediaItem = m => ({ tapeId: MEDIA, s: { scene_id: String(m.id), media: m } });
+const fmtDur = s => s ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}` : '';
+function mediaTile(m, i) {
+  return `<button data-mkey="${i}" class="${TLTILE}">
+    <div class="relative aspect-square overflow-hidden rounded-xl bg-black">
+      <img loading="lazy" src="${mediaThumb(m.id)}" alt="" class="h-full w-full object-cover">
+      ${m.kind === 'video' ? `<span class="absolute bottom-1 right-1 rounded bg-black/70 px-1.5 text-[11px] text-white">▶ ${fmtDur(m.duration)}</span>` : ''}
+    </div>
+    <div class="mt-1.5 px-0.5">
+      <div class="truncate text-theme-xs font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${esc(m.name)}</div>
+      <div class="truncate text-[11px] text-gray-500 dark:text-gray-400">${m.date ? m.date + (m.time ? ' ' + m.time.slice(0, 5) : '') : L('tl.noDate')}</div>
+    </div>
+  </button>`;
+}
+
+function sceneGridHTML(items) {   // items: [{tapeId, s}] -- s is a full scene record, or a media item
   if (!items.length) return `<p class="text-theme-sm text-gray-400">${L('scenes.empty')}</p>`;
   return `<div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">` +
     items.map((it, i) => {
+      if (it.s.media) return mediaTile(it.s.media, i);
       const s = it.s, tc = s.timecode || {}, rec = s.recording || {};
       return `<button data-mkey="${i}" class="${TLTILE}">
         <div class="aspect-square overflow-hidden rounded-xl bg-black">
@@ -163,28 +191,65 @@ function sceneGridHTML(items) {   // items: [{tapeId, s}] -- s is a full scene r
 let modalItems = [], modalIdx = -1, modalOpenTape = false, modalSeek = null;
 function openSceneModal(items, idx, openTapeLink, seekTo) {
   modalItems = items; modalIdx = idx; modalOpenTape = !!openTapeLink;
-  modalSeek = seekTo > 0 ? seekTo : null;          // People view: start where the person shows up
+  // People view: open paused on the frame where the person shows up, so a face caught
+  // mid-pan can be stepped through frame by frame (the bar under the video)
+  modalSeek = seekTo != null && seekTo >= 0 ? seekTo : null;
   $('#scModal').classList.remove('hidden'); $('#scModal').classList.add('flex');
   renderSceneModal();
 }
 function closeSceneModal() {
   $('#scModal').classList.add('hidden'); $('#scModal').classList.remove('flex');
   const v = $('#scModalVideo'); v.pause(); v.removeAttribute('src'); v.load();
+  $('#scModalImg').removeAttribute('src');
   modalItems = []; modalIdx = -1;
+}
+function renderMediaModal(m) {
+  const video = $('#scModalVideo'), img = $('#scModalImg'), photo = m.kind === 'photo';
+  video.pause();
+  video.classList.toggle('hidden', photo); img.classList.toggle('hidden', !photo); $('#scFrameBar').classList.toggle('hidden', photo);
+  if (photo) { video.removeAttribute('src'); video.load(); img.src = `/api/media/${m.id}/view`; }
+  else {
+    img.removeAttribute('src');
+    video.src = `/api/media/${m.id}/video`; video.load();
+    modalFrame = 1 / (m.fps || 30);              // the copy's real rate (DVD copies are 50p)
+    if (modalSeek != null) {
+      const at = modalSeek; modalSeek = null;
+      video.addEventListener('loadedmetadata', () => { try { video.currentTime = at; } catch (_) {} }, { once: true });
+    } else video.play().catch(() => {});
+  }
+  $('#scModalTitle').innerHTML = `<div class="truncate">${esc(m.name)}</div>
+    <div class="mt-0.5 truncate text-theme-xs font-normal text-gray-500 dark:text-gray-400">
+      ${m.date ? m.date + (m.time ? ' ' + m.time.slice(0, 5) : '') + (m.date_source === 'file' ? ' ' + L('media.fileDate') : m.date_source === 'neighbors' ? ' ' + L('media.neighborDate') : '') : L('tl.noDate') + (m.date_source === 'scan' ? ' ' + L('media.scanNoDate') : '')}${m.camera ? ' · ' + esc(m.camera) : ''} · ${esc(m.album || '')}
+      ${m.kind === 'video' && !m.playable ? ' · ' + L('media.notReady') : ''}
+    </div>`;
+  $('#scModalActions').innerHTML = `
+    <a class="${LINK}" href="/api/media/${m.id}/original?dl=1">${L(m.parent_id ? 'media.clipDl' : 'media.original')}</a>
+    ${m.parent_id ? `<a class="${LINK}" href="/api/media/${m.parent_id}/original?dl=1">${L('media.wholeFilm')}</a>` : ''}
+    <button data-media-date="${m.id}" class="${BTN}">${L('people.tlSetDate')}</button>
+    ${m.parent_id ? `<button data-media-date="${m.id}" data-whole="1" class="${BTN}">${L('media.wholeDate')}</button>` : ''}
+    ${m.album ? `<button data-open-album="${encodeURIComponent(m.album)}" class="${BTN}">${L('media.openAlbum')}</button>` : ''}`;
+  $('#scModalPrev').disabled = modalIdx <= 0;
+  $('#scModalNext').disabled = modalIdx >= modalItems.length - 1;
+  $('#scModalCount').textContent = `${modalIdx + 1} / ${modalItems.length}`;
 }
 function renderSceneModal() {
   if (modalIdx < 0 || modalIdx >= modalItems.length) return;
   const { tapeId, s } = modalItems[modalIdx];
+  if (s.media) return renderMediaModal(s.media);
+  $('#scModalVideo').classList.remove('hidden'); $('#scModalImg').classList.add('hidden'); $('#scFrameBar').classList.remove('hidden');
   const enc = encodeURIComponent(tapeId), sid = s.scene_id, f = s.files || {}, tc = s.timecode || {},
     rec = s.recording || {}, v = s.video || {}, arch = f.archive || {}, prox = f.proxy || {};
   const file = n => `/api/tapes/${enc}/files/${encodeURIComponent(sid)}.${n}`;
   const video = $('#scModalVideo');
   video.pause(); video.src = file('mp4'); video.load();
+  // proxies show every field as a frame (bwdif send_field: 50p / 59.94p) unless the scene wasn't interlaced
+  modalFrame = (v.standard === 'NTSC' ? 1001 / 30000 : 1 / 25) / (prox.deinterlace === 'none' ? 1 : 2);
   if (modalSeek != null) {
     const at = modalSeek; modalSeek = null;
     video.addEventListener('loadedmetadata', () => { try { video.currentTime = at; } catch (_) {} }, { once: true });
+  } else {
+    video.play().catch(() => {});
   }
-  video.play().catch(() => {});
   $('#scModalTitle').innerHTML = `<div class="truncate">${tapeId} · ${L('scene.n', { n: s.scene_index })}</div>
     <div class="mt-0.5 truncate font-mono text-theme-xs font-normal text-gray-500 dark:text-gray-400">
       ${tc.start || '?'} – ${tc.end || '?'} · ${durTxt(s.frame_count, v.standard)} ·
@@ -209,8 +274,26 @@ function scModalStep(delta) {
 $('#scModalClose').onclick = closeSceneModal;
 $('#scModalPrev').onclick = () => scModalStep(-1);
 $('#scModalNext').onclick = () => scModalStep(1);
-$('#scModal').addEventListener('click', e => {
+$('#scModal').addEventListener('click', async e => {
   if (e.target.id === 'scModal') { closeSceneModal(); return; }
+  const md = e.target.closest('[data-media-date]');
+  if (md) {
+    const m = modalItems[modalIdx].s.media;
+    const v = prompt(L('people.datePrompt'), m.date || '');
+    if (v === null) return;
+    const val = v.trim() === '?' ? 'unknown' : v.trim();
+    if (val && val !== 'unknown' && !/^\d{4}-\d{2}-\d{2}$/.test(val)) { alert(L('people.dateBad')); return; }
+    const whole = !!md.dataset.whole;
+    try {
+      modalItems[modalIdx].s.media = await postJSON(`/api/media/${m.id}/date`, { date: val, whole });
+      if (whole) modalItems.forEach(it => { const x = it.s && it.s.media; if (x && x.parent_id === m.parent_id) x.date = val === 'unknown' ? null : val || x.date; });
+      renderSceneModal(); tl.data = null; mediaState.sig = '';
+    }
+    catch (err) { alert(err.message); }
+    return;
+  }
+  const oa = e.target.closest('[data-open-album]');
+  if (oa) { closeSceneModal(); go('#media/' + oa.dataset.openAlbum); return; }
   const fb = e.target.closest('.fb'); if (fb) { fbCompress(fb); return; }
   const rp = e.target.closest('.repair'); if (rp) { repairCompress(rp); return; }
   const ot = e.target.closest('[data-open-tape]');
@@ -221,8 +304,29 @@ $('#scModal').addEventListener('click', e => {
     go('#kasety/' + ot.dataset.openTape + (sc ? '/' + sc : ''));
   }
 });
+// ---- frame stepping in the scene viewer ----
+let modalFrame = 1 / 25;
+function frameStep(n) {
+  const v = $('#scModalVideo');
+  v.pause();
+  const end = isFinite(v.duration) ? v.duration : Infinity;
+  v.currentTime = Math.min(end, Math.max(0, v.currentTime + n * modalFrame));
+}
+function showFrameTime() {
+  const t = $('#scModalVideo').currentTime || 0;
+  $('#scFrameTime').textContent = `${Math.floor(t / 60)}:${(t % 60).toFixed(2).padStart(5, '0')}`;
+}
+['timeupdate', 'seeked', 'loadedmetadata'].forEach(ev => $('#scModalVideo').addEventListener(ev, showFrameTime));
+$('#scFrameBar').addEventListener('click', e => {
+  const st = e.target.closest('[data-frame-step]');
+  if (st) { frameStep(+st.dataset.frameStep); return; }
+  if (e.target.closest('[data-frame-toggle]')) { const v = $('#scModalVideo'); v.paused ? v.play().catch(() => {}) : v.pause(); }
+});
+
 document.addEventListener('keydown', e => {
   if ($('#scModal').classList.contains('hidden')) return;
+  if (e.key === ',' || e.key === '<') { e.preventDefault(); frameStep(e.shiftKey || e.key === '<' ? -5 : -1); return; }
+  if (e.key === '.' || e.key === '>') { e.preventDefault(); frameStep(e.shiftKey || e.key === '>' ? 5 : 1); return; }
   if (e.key === 'Escape') closeSceneModal();
   else if (e.key === 'ArrowLeft') scModalStep(-1);
   else if (e.key === 'ArrowRight') scModalStep(1);
@@ -353,7 +457,7 @@ function renderTapeDetail(t, force) {
     <div class="flex flex-wrap items-center gap-3">
       <h3 class="text-lg font-semibold text-brand-500">${id}</h3>
       ${t.label ? `<span class="rounded bg-gray-100 px-2 py-0.5 text-theme-xs text-gray-700 dark:bg-gray-800 dark:text-gray-200">🏷️ ${t.label}</span>` : ''}
-      <span class="font-mono text-theme-xs text-gray-500 dark:text-gray-400">${nScen(t.scene_count ?? scenes.length)} · ${t.recording_date ? '📅 ' + t.recording_date : (t.capture_completed_at || '').slice(0, 19).replace('T', ' ')}</span>
+      <span class="font-mono text-theme-xs text-gray-500 dark:text-gray-400">${nScen(t.scene_count ?? scenes.length)} · ${t.recording_date ? '📅 ' + t.recording_date : fmtStamp(t.capture_completed_at)}</span>
       <span class="ml-auto">${viewToggleHTML()}</span>
     </div>
     <div class="mt-2 flex flex-wrap items-center gap-2 text-theme-xs">
@@ -587,7 +691,9 @@ const currentTape = () => (window.__tapes || []).find(x => x.tape_id === openTap
 
 // ============ timeline: years -> months -> scenes (iPhone-Photos style) ============
 const PL_MON_FULL = window.MON_LONG;
-const tlThumb = t => t && t.scene_id
+const tlThumb = t => t && t.media_id
+  ? `<img loading="lazy" class="h-full w-full object-cover" src="${mediaThumb(t.media_id)}" alt="">`
+  : t && t.scene_id
   ? `<img loading="lazy" class="h-full w-full object-cover" src="/api/tapes/${encodeURIComponent(t.tape_id)}/files/thumbnails/${encodeURIComponent(t.scene_id)}.jpg" alt="">`
   : '<div class="grid h-full w-full place-items-center bg-gray-100 text-gray-300 dark:bg-white/[0.04]">—</div>';
 const nScen = n => window.i18n.lang === 'pl'
@@ -600,11 +706,39 @@ let tlScenes = [];                    // cached scene list for the currently sho
 const tlSelected = new Map();
 const tlKey = (t, s) => t + '|' + s;
 
+// which sources the timeline shows: MiniDV scenes, camera/phone videos, photos (any mix)
+const TL_SOURCES = ['dv', 'video', 'photo'];
+let tlSources = (() => {
+  try { const v = JSON.parse(localStorage.getItem('tlSources')); if (Array.isArray(v) && v.length) return v.filter(x => TL_SOURCES.includes(x)); } catch (_) {}
+  return [...TL_SOURCES];
+})();
+const tlQS = () => {
+  const q = wsQS();
+  return tlSources.length === TL_SOURCES.length ? q : (q ? q + '&' : '?') + 'sources=' + tlSources.join(',');
+};
+function syncTlSources() {
+  $$('#tlSourcesMenu [data-src]').forEach(cb => { cb.checked = tlSources.includes(cb.dataset.src); });
+  $('#tlSourcesLabel').textContent = tlSources.length === TL_SOURCES.length ? L('tl.src.all')
+    : tlSources.map(s => L('tl.src.' + s)).join(', ');
+}
+syncTlSources();
+$('#tlSourcesBtn').addEventListener('click', e => { e.stopPropagation(); $('#tlSourcesMenu').classList.toggle('hidden'); });
+document.addEventListener('click', e => { if (!e.target.closest('#tlSourcesMenu, #tlSourcesBtn')) $('#tlSourcesMenu').classList.add('hidden'); });
+$('#tlSourcesMenu').addEventListener('change', e => {
+  const picked = $$('#tlSourcesMenu [data-src]').filter(cb => cb.checked).map(cb => cb.dataset.src);
+  if (!picked.length) { e.target.checked = true; return; }          // at least one source
+  tlSources = picked;
+  try { localStorage.setItem('tlSources', JSON.stringify(tlSources)); } catch (_) {}
+  syncTlSources();
+  tl.data = null;
+  if (tl.month) renderTimeline(); else loadTimeline(true);
+});
+
 async function loadTimeline(force) {
   if (tl.loading) return;
   tl.loading = true;
   if (force || !tl.data) {
-    try { tl.data = await api(`/api/timeline${wsQS()}`); }
+    try { tl.data = await api(`/api/timeline${tlQS()}`); }
     catch (e) { $('#tlView').innerHTML = `<p class="text-error-500">${e.message}</p>`; tl.loading = false; return; }
   }
   tl.loading = false;
@@ -645,9 +779,9 @@ async function renderTimeline() {
   // across tapes — reuses sceneCard() as-is for the thumbnail/preview/FB/repair/download row.
   view.className = 'p-5';
   view.innerHTML = `<p class="text-theme-sm text-gray-400">${L('loading')}</p>`;
-  try { tlScenes = await api(`/api/timeline/${tl.year}/${tl.month}${wsQS()}`); }
+  try { tlScenes = await api(`/api/timeline/${tl.year}/${tl.month}${tlQS()}`); }
   catch (e) { view.innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
-  const tapeIds = [...new Set(tlScenes.map(s => s.tape_id))];
+  const tapeIds = [...new Set(tlScenes.filter(s => !s.media).map(s => s.tape_id))];
   await Promise.all(tapeIds.filter(id => !scenesCache[id]).map(async id => {
     try { scenesCache[id] = await api(`/api/tapes/${encodeURIComponent(id)}/scenes`); } catch (_) { scenesCache[id] = []; }
   }));
@@ -658,13 +792,14 @@ let tlGridItems = [];                 // [{tapeId, s}] backing the month's grid 
 function renderTlScenes() {
   const view = $('#tlView');
   view.className = 'p-5';
-  const withFull = tlScenes.map(s => ({ s, full: (scenesCache[s.tape_id] || []).find(x => x.scene_id === s.scene_id) }))
-    .filter(x => x.full);
+  const withFull = tlScenes.map(s => ({ s, full: s.media ? { scene_id: s.scene_id, media: s.media }
+    : (scenesCache[s.tape_id] || []).find(x => x.scene_id === s.scene_id) })).filter(x => x.full);
+  tlGridItems = withFull.map(({ s, full }) => ({ tapeId: s.tape_id, s: full }));
   view.innerHTML = `
     ${repairOptsHTML()}
     <div class="mt-3 flex items-center justify-end">${viewToggleHTML()}</div>` +
     (sceneView === 'grid'
-      ? sceneGridHTML(tlGridItems = withFull.map(({ s, full }) => ({ tapeId: s.tape_id, s: full })))
+      ? sceneGridHTML(tlGridItems)
       : `<div id="tlSelBar" class="mb-4 hidden flex-wrap items-center gap-3 rounded-xl border border-brand-500/40 bg-brand-50/60 p-3 dark:bg-brand-500/[0.08]">
           <span class="text-sm">${L('sel.count')} <b id="tlSelCount">0</b></span>
           <button id="tlBuild" class="${BTN_PRIMARY}">${L('tl.build')}</button>
@@ -673,7 +808,24 @@ function renderTlScenes() {
           <button id="tlSelClear" class="${BTN}">${L('sel.clear')}</button>
           <span class="basis-full text-theme-xs text-gray-500 dark:text-gray-400 sm:basis-auto">${L('tl.buildHint')}</span>
         </div>
-        <div id="tlSceneList" class="playable grid gap-3">` + withFull.map(({ s, full }) => {
+        <div id="tlSceneList" class="playable grid gap-3">` + withFull.map(({ s, full }, i) => {
+          if (s.media) {
+            const key = tlKey(s.tape_id, s.scene_id), sel = tlSelected.has(key);
+            return `<div data-tl-key="${key}" class="rounded-xl ${sel ? 'ring-2 ring-brand-500' : ''}">
+            <div class="mb-1 flex items-center gap-2 text-theme-xs text-gray-400">
+              <input type="checkbox" class="tlsel h-3.5 w-3.5 accent-brand-500" data-tape="${s.tape_id}" data-scene="${s.scene_id}" ${sel ? 'checked' : ''}>
+              <span class="truncate">${s.media.kind === 'photo' ? L('tl.src.photo') : L('tl.src.video')} · ${s.date}${s.time ? ' ' + s.time.slice(0, 5) : ''}</span>
+            </div>
+            <div class="flex items-center gap-4 rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-white/[0.02]">
+            <button data-mkey="${i}" class="relative shrink-0"><img loading="lazy" src="${mediaThumb(s.media.id)}" alt="" class="h-24 w-32 rounded-lg bg-black object-cover">
+              ${s.media.kind === 'video' ? `<span class="absolute bottom-1 right-1 rounded bg-black/70 px-1.5 text-[11px] text-white">▶ ${fmtDur(s.media.duration)}</span>` : ''}</button>
+            <div class="min-w-0">
+              <div class="truncate font-semibold text-gray-800 dark:text-white/90">${s.media.kind === 'photo' ? '📷' : '🎬'} ${esc(s.media.name)}</div>
+              <div class="text-theme-xs text-gray-500 dark:text-gray-400">${s.date}${s.time ? ' ' + s.time.slice(0, 5) : ''} · ${esc(s.label || '')}</div>
+              <button data-open-album="${encodeURIComponent(s.label || '')}" class="mt-1 text-theme-xs text-brand-500 hover:underline">${L('media.openAlbum')}</button>
+            </div>
+          </div></div>`;
+          }
           const key = tlKey(s.tape_id, s.scene_id), sel = tlSelected.has(key);
           return `<div data-tl-key="${key}" class="rounded-xl ${sel ? 'ring-2 ring-brand-500' : ''}">
             <div class="mb-1 flex items-center gap-2 text-theme-xs text-gray-400">
@@ -713,6 +865,8 @@ $('#tlRefresh').onclick = () => loadTimeline(true);
 $('#tlView').addEventListener('click', e => {
   const nav = e.target.closest('[data-go]');
   if (nav) { go(nav.dataset.go); return; }
+  const oa = e.target.closest('[data-open-album]');
+  if (oa) { go('#media/' + oa.dataset.openAlbum); return; }
   const vt = e.target.closest('.viewToggle');
   if (vt) { setSceneView(vt.dataset.view); renderTlScenes(); return; }
   const gt = e.target.closest('[data-mkey]');
@@ -866,7 +1020,7 @@ $('#dupView').addEventListener('click', async e => {
 
 // ============ people: faces found in the footage, named like iPhone Photos ============
 // Scoped to the current workspace (the server never matches faces across workspaces).
-let people = { list: null, showAll: false, person: null, merging: false, scan: null };
+let people = { list: null, showAll: false, person: null, merging: false, scan: null, selecting: false, sel: new Set() };
 const faceThumb = id => id ? `/api/faces/thumb/${id}.jpg` : '';
 const avatar = (id, cls) => id
   ? `<img loading="lazy" src="${faceThumb(id)}" alt="" class="${cls} rounded-full bg-gray-100 object-cover dark:bg-gray-800">`
@@ -881,8 +1035,9 @@ const postJSON = (url, body) => api(url, { method: 'POST', headers: { 'Content-T
 async function loadPeople(force) {
   if (force || !people.list) {
     try {
-      const [list, st] = await Promise.all([api(`/api/persons${wsQS()}`), api(`/api/faces/status${wsQS()}`)]);
-      people.list = list; people.scan = st;
+      const [list, st, sug] = await Promise.all([api(`/api/persons${wsQS()}`), api(`/api/faces/status${wsQS()}`),
+        api(`/api/faces/suggestions${wsQS()}`).catch(() => [])]);
+      people.list = list; people.scan = st; people.suggest = sug;
     } catch (e) { $('#peopleView').innerHTML = `<p class="text-error-500">${e.message}</p>`; return; }
   }
   renderFaceBar();
@@ -907,16 +1062,54 @@ function renderFaceBar() {
     ${running ? `<div class="mt-2 h-1.5 max-w-md overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800"><div class="h-full rounded-full bg-brand-500" style="width:${pct ?? 0}%"></div></div>` : ''}`;
 }
 
+// ---- groups (family / friends / neighbours / anything): a label on a person, named or not ----
+const groupPresets = () => [L('people.grp.family'), L('people.grp.friends'), L('people.grp.acquaintances'),
+  L('people.grp.neighbours'), L('people.grp.others')];
+const groupChoices = () => [...new Set([...groupPresets(), ...(people.list || []).map(p => p.group).filter(Boolean)])];
+// groups kept out of the default "Everyone" view; their own chip still shows them
+const groupsOffByDefault = () => [L('people.grp.acquaintances')];
+const inGroupFilter = p => !people.groupFilter ? !groupsOffByDefault().includes(p.group)
+  : people.groupFilter === '__hidden' ? p.hidden
+  : people.groupFilter === '__none' ? !p.group : p.group === people.groupFilter;
+
 function personTile(p) {
-  return `<button data-go="#osoby/${p.id}" class="group flex flex-col items-center gap-1.5 rounded-xl p-2 text-center hover:bg-gray-50 dark:hover:bg-white/[0.04]">
-    ${avatar(p.cover, 'h-24 w-24 transition group-hover:ring-2 group-hover:ring-brand-500')}
-    <span class="max-w-full truncate text-theme-sm font-medium ${p.name ? 'text-gray-800 dark:text-white/90' : 'text-gray-400'}">${p.name ? esc(p.name) : L('people.addName')}</span>
-    <span class="text-[11px] text-gray-400">${nRec(p.scenes)}</span>
+  const label = p.name ? esc(p.name) : p.group ? esc(p.group) : L('people.addName');
+  const sub = [nRec(p.scenes), p.name && p.group ? esc(p.group) : '', !p.name && p.group ? L('people.noName') : ''].filter(Boolean).join(' · ');
+  // selection mode: tapping a tile ticks it instead of opening the person
+  const sel = people.selecting, on = sel && people.sel.has(p.id);
+  return `<button ${sel ? `data-sel-person="${p.id}"` : `data-go="#osoby/${p.id}"`} class="group relative flex flex-col items-center gap-1.5 rounded-xl p-2 text-center hover:bg-gray-50 dark:hover:bg-white/[0.04] ${on ? 'bg-brand-50 dark:bg-brand-500/[0.12]' : ''}">
+    ${sel ? `<span class="absolute left-2 top-2 z-10 grid h-6 w-6 place-items-center rounded-full border-2 ${on ? 'border-brand-500 bg-brand-500 text-white' : 'border-gray-300 bg-white dark:border-gray-600 dark:bg-gray-900'} text-[13px]">${on ? '✓' : ''}</span>` : ''}
+    ${avatar(p.cover, `h-24 w-24 transition group-hover:ring-2 group-hover:ring-brand-500 ${on ? 'ring-4 ring-brand-500' : ''}`)}
+    <span class="max-w-full truncate text-theme-sm font-medium ${p.name ? 'text-gray-800 dark:text-white/90' : 'text-gray-400'}">${label}</span>
+    <span class="text-[11px] text-gray-400">${sub}</span>
   </button>`;
+}
+function selectBar() {
+  if (!people.selecting)
+    return `<div class="mb-3"><button id="peopleSelect" class="${BTN}">${L('people.select')}</button></div>`;
+  const n = people.sel.size;
+  return `<div class="sticky top-16 z-20 mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-brand-500/40 bg-brand-50 p-2 dark:bg-gray-900">
+    <span class="text-theme-sm">${L('sel.count')} <b>${n}</b></span>
+    <button id="peopleSelDissolve" class="${BTN}" ${n ? '' : 'disabled'} title="${L('people.dissolveHint')}">${L('people.dissolve')}</button>
+    <button id="peopleSelDelete" class="${BTN_DANGER}" ${n ? '' : 'disabled'} title="${L('people.deleteHint')}">${L('people.deleteFaces')}</button>
+    <button id="peopleSelCancel" class="${BTN}">${L('sel.clear')}</button>
+  </div>`;
+}
+function groupChips() {
+  const all = (people.list || []).filter(p => !p.hidden), counts = {};
+  all.forEach(p => { if (p.group) counts[p.group] = (counts[p.group] || 0) + 1; });
+  const groups = Object.keys(counts), hiddenN = (people.list || []).filter(p => p.hidden).length;
+  if (!groups.length && !hiddenN) return '';
+  const chip = (value, label, n) => `<button data-group-filter="${esc(value)}" class="rounded-full border px-3 py-1 text-theme-xs font-medium ${
+    (people.groupFilter || '') === value ? 'border-brand-500 bg-brand-500 text-white' : 'border-gray-300 text-gray-600 hover:border-brand-500 dark:border-gray-600 dark:text-gray-300'}">${label}${n != null ? ` <span class="opacity-70">${n}</span>` : ''}</button>`;
+  return `<div class="mb-4 flex flex-wrap items-center gap-2">${chip('', L('people.grp.all'))}${
+    groups.sort((a, b) => counts[b] - counts[a]).map(g => chip(g, esc(g), counts[g])).join('')}${
+    groups.length ? chip('__none', L('people.grp.none'), all.filter(p => !p.group).length) : ''}${
+    hiddenN ? chip('__hidden', L('people.grp.hidden'), hiddenN) : ''}</div>`;
 }
 
 function renderPeople() {
-  const view = $('#peopleView'), list = people.list || [];
+  const view = $('#peopleView'), list = (people.list || []).filter(inGroupFilter);
   const named = list.filter(p => p.name && !p.hidden);
   const unnamed = list.filter(p => !p.name && !p.hidden).sort((a, b) => b.scenes - a.scenes || b.tracks - a.tracks);
   const often = unnamed.filter(p => p.scenes >= 2), rare = unnamed.filter(p => p.scenes < 2);
@@ -924,16 +1117,37 @@ function renderPeople() {
   const grid = ps => `<div class="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8">${ps.map(personTile).join('')}</div>`;
   const head = (t, extra) => `<div class="mb-2 mt-6 flex flex-wrap items-center gap-3 first:mt-0"><h3 class="text-theme-sm font-semibold text-gray-700 dark:text-gray-200">${t}</h3>${extra || ''}</div>`;
   if (!list.length) {
-    view.innerHTML = `<p class="text-theme-sm text-gray-400">${L('people.empty')}</p>`;
+    view.innerHTML = selectBar() + groupChips() + `<p class="text-theme-sm text-gray-400">${L(people.groupFilter ? 'people.grp.empty' : 'people.empty')}</p>`;
     return;
   }
-  view.innerHTML =
+  const sug = (people.suggest || []).filter(inGroupFilter), SUG_SHOWN = 12;
+  view.innerHTML = selectBar() + groupChips() +
     (named.length ? head(L('people.named', { n: named.length })) + grid(named) : '')
+    + (sug.length ? head(L('people.sugTitle', { n: sug.length }), `<span class="text-theme-xs text-gray-400">${L('people.sugHint')}</span>`)
+      + `<div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">${(people.sugAll ? sug : sug.slice(0, SUG_SHOWN)).map(suggestCard).join('')}</div>`
+      + (sug.length > SUG_SHOWN ? `<button id="peopleSugAll" class="${BTN} mt-2">${people.sugAll ? L('people.hideRare') : L('people.sugMore', { n: sug.length - SUG_SHOWN })}</button>` : '') : '')
     + (often.length || rare.length ? head(L('people.who'), rare.length
         ? `<button id="peopleShowAll" class="${BTN}">${people.showAll ? L('people.hideRare') : L('people.showRare', { n: rare.length })}</button>` : '')
       + grid(people.showAll ? [...often, ...rare] : often)
       + (!often.length && !people.showAll ? `<p class="text-theme-xs text-gray-400">${L('people.onlyRare')}</p>` : '') : '')
     + (hidden.length ? head(L('people.hidden', { n: hidden.length })) + grid(hidden) : '');
+}
+
+// "is this <name>?": an unnamed person next to the named one it most likely is
+function suggestCard(p) {
+  const s = p.suggest;
+  return `<div class="flex items-center gap-3 rounded-xl border border-gray-200 p-2 dark:border-gray-800">
+    <button data-go="#osoby/${p.id}" title="${L('people.sugOpen')}">${avatar(p.cover, 'h-14 w-14')}</button>
+    <div class="min-w-0 flex-1">
+      <div class="text-theme-xs text-gray-400">${L('people.sugIs')}</div>
+      <div class="flex items-center gap-1.5">${avatar(s.cover, 'h-7 w-7 shrink-0')}<b class="text-theme-sm leading-tight text-gray-800 dark:text-white/90">${esc(s.name)}?</b></div>
+      <div class="text-[11px] text-gray-400">${nRec(p.scenes)}</div>
+    </div>
+    <div class="flex shrink-0 flex-col gap-1">
+      <button data-sugg-yes="${p.id}:${s.id}" class="${BTN_PRIMARY}">${L('people.sugYes')}</button>
+      <button data-sugg-no="${p.id}:${s.id}" class="${BTN}">${L('people.sugNo')}</button>
+    </div>
+  </div>`;
 }
 
 async function openPerson(id) {
@@ -945,7 +1159,7 @@ async function openPerson(id) {
   if (currentRoute().person !== id) return;
   if (!people.person || people.person.id !== id) { people.tlRange = null; people.tlOpenSlot = null; }
   // full scene records for the modal player (same source as Kasety / timeline)
-  const tapeIds = [...new Set(p.scenes.map(s => s.tape_id))];
+  const tapeIds = [...new Set(p.scenes.filter(s => !s.media).map(s => s.tape_id))];
   await Promise.all(tapeIds.filter(t => !scenesCache[t]).map(async t => {
     try { scenesCache[t] = await api(`/api/tapes/${encodeURIComponent(t)}/scenes`); } catch (_) { scenesCache[t] = []; }
   }));
@@ -956,8 +1170,10 @@ async function openPerson(id) {
 let personItems = [];                 // [{tapeId, s}] for the modal's prev/next, one per scene of this person
 function renderPerson() {
   const p = people.person, view = $('#peopleView'), cover = p.tracks[0] && p.tracks[0].id;
-  personItems = p.scenes.map(sc => ({ tapeId: sc.tape_id,
-    s: (scenesCache[sc.tape_id] || []).find(x => x.scene_id === sc.scene_id) || { scene_id: sc.scene_id, scene_index: sc.scene_index } }));
+  personItems = p.scenes.map(sc => sc.media
+    ? mediaItem({ ...sc.media, album: sc.label, date: sc.date, time: sc.time, playable: true })
+    : ({ tapeId: sc.tape_id,
+      s: (scenesCache[sc.tape_id] || []).find(x => x.scene_id === sc.scene_id) || { scene_id: sc.scene_id, scene_index: sc.scene_index } }));
   const others = (people.list || []).filter(o => o.id !== p.id);
   view.innerHTML = `
     <div class="flex flex-wrap items-center gap-4">
@@ -965,10 +1181,25 @@ function renderPerson() {
       <div class="min-w-0">
         <h3 class="truncate text-xl font-semibold ${p.name ? 'text-gray-800 dark:text-white/90' : 'text-gray-400'}">${p.name ? esc(p.name) : L('people.unnamed')}</h3>
         <div class="text-theme-xs text-gray-500 dark:text-gray-400">${nRec(p.scenes.length)}</div>
-        <div class="mt-2 flex flex-wrap gap-2">
+        ${p.suggest ? `<div class="mt-2 inline-flex flex-wrap items-center gap-2 rounded-xl border border-brand-500/40 bg-brand-50/60 px-3 py-1.5 text-theme-sm dark:bg-brand-500/[0.08]">
+          ${L('people.sugIs')} ${avatar(p.suggest.cover, 'h-7 w-7')} <b class="text-gray-800 dark:text-white/90">${esc(p.suggest.name)}</b>?
+          <button data-sugg-yes="${p.id}:${p.suggest.id}" class="${BTN_PRIMARY}">${L('people.sugYes')}</button>
+          <button data-sugg-no="${p.id}:${p.suggest.id}" class="${BTN}">${L('people.sugNo')}</button>
+        </div>` : ''}
+        <div class="mt-2 flex flex-wrap items-center gap-2">
           <button id="personName" class="${p.name ? BTN : BTN_PRIMARY}">${p.name ? L('people.rename') : L('people.addName')}</button>
+          <label class="inline-flex items-center gap-1.5 text-theme-xs text-gray-500 dark:text-gray-400">${L('people.grp.label')}
+            <select id="personGroup" class="h-8 rounded-lg border border-gray-300 bg-white px-2 text-theme-xs text-gray-700 dark:border-gray-600 dark:bg-white/[0.06] dark:text-gray-200">
+              <option value="">${L('people.grp.unset')}</option>
+              ${[...new Set([...groupChoices(), ...(p.group ? [p.group] : [])])].map(g => `<option value="${esc(g)}" ${g === p.group ? 'selected' : ''}>${esc(g)}</option>`).join('')}
+              <option value="__new">${L('people.grp.new')}</option>
+            </select>
+          </label>
+          <button id="filmNew" class="${BTN_PRIMARY}">${L('film.make')}</button>
           <button id="personMerge" class="${BTN}">${L('people.merge')}</button>
           <button id="personHide" class="${BTN}">${p.hidden ? L('people.unhide') : L('people.hide')}</button>
+          <button id="personDissolve" class="${BTN}" title="${L('people.dissolveHint')}">${L('people.dissolve')}</button>
+          <button id="personDelete" class="${BTN_DANGER}" title="${L('people.deleteHint')}">${L('people.deleteFaces')}</button>
         </div>
       </div>
     </div>
@@ -980,32 +1211,209 @@ function renderPerson() {
             <span class="max-w-full truncate text-theme-xs ${o.name ? 'text-gray-800 dark:text-white/90' : 'text-gray-400'}">${o.name ? esc(o.name) : nRec(o.scenes)}</span>
           </button>`).join('') || `<p class="text-theme-xs text-gray-400">${L('people.noOthers')}</p>`}</div>
       </div>` : ''}
+    <div id="personFilms" class="mt-6"></div>
     <div id="personTl" class="mt-6"></div>
     <h4 class="mb-2 mt-6 text-theme-sm font-semibold text-gray-700 dark:text-gray-200">${L('people.faces', { n: p.tracks.length })}</h4>
     <p class="mb-2 text-theme-xs text-gray-400">${L('people.facesHint')}</p>
-    <div class="flex flex-wrap gap-2">${p.tracks.map(t => `
+    <div class="flex flex-wrap gap-2">${[...p.tracks].sort((a, b) =>          // oldest first; undated last
+      `${a.date || '9999'}${a.time || ''}${String(a.first).padStart(6, '0')}`.localeCompare(`${b.date || '9999'}${b.time || ''}${String(b.first).padStart(6, '0')}`)).map(t => `
       <div class="relative">
-        <button data-face-seek="${t.id}" title="${esc(t.tape_id)} · ${mmss(t.first)}">${avatar(t.id, 'h-16 w-16')}</button>
+        <button data-face-seek="${t.id}" title="${t.date ? fmtDay(t.date) + ' · ' : ''}${t.tape_id === MEDIA ? '' : esc(t.tape_id) + ' · ' + mmss(t.first)}">${avatar(t.id, 'h-16 w-16')}</button>
         ${p.tracks.length > 1 ? `<button data-face-out="${t.id}" title="${L('people.notThis')}" class="absolute -right-1 -top-1 grid h-5 w-5 place-items-center rounded-full bg-gray-800 text-[11px] text-white hover:bg-error-500">✕</button>` : ''}
       </div>`).join('')}</div>
     <h4 class="mb-2 mt-6 text-theme-sm font-semibold text-gray-700 dark:text-gray-200">${L('people.recordings')}</h4>
     <div class="grid gap-3">${p.scenes.map((sc, i) => `
       <div class="flex gap-4 rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-white/[0.02]">
         <button data-play="${i}" data-at="${sc.segments[0] ? sc.segments[0][0] : 0}" class="shrink-0">
-          <img loading="lazy" src="/api/tapes/${encodeURIComponent(sc.tape_id)}/files/thumbnails/${encodeURIComponent(sc.scene_id)}.jpg" alt="" class="h-24 w-32 rounded-lg bg-black object-cover">
+          <img loading="lazy" src="${sc.media ? mediaThumb(sc.media.id) : `/api/tapes/${encodeURIComponent(sc.tape_id)}/files/thumbnails/${encodeURIComponent(sc.scene_id)}.jpg`}" alt="" class="h-24 w-32 rounded-lg bg-black object-cover">
         </button>
         <div class="min-w-0 flex-1">
-          <div class="truncate font-semibold text-gray-800 dark:text-white/90">${esc(sc.label || sc.tape_id)} · ${L('tl.scene', { n: sc.scene_index ?? '?' })}</div>
-          <div class="text-theme-xs text-gray-500 dark:text-gray-400">${sc.date || L('tl.noDate')}${sc.time ? ' ' + sc.time.slice(0, 5) : ''}${sc.label ? ' · ' + esc(sc.tape_id) : ''}</div>
+          <div class="truncate font-semibold text-gray-800 dark:text-white/90">${sc.media
+            ? `${sc.media.kind === 'photo' ? '📷' : '🎬'} ${esc(sc.media.name || '')}`
+            : `${esc(sc.label || sc.tape_id)} · ${L('tl.scene', { n: sc.scene_index ?? '?' })}`}</div>
+          <div class="text-theme-xs text-gray-500 dark:text-gray-400">${sc.date || L('tl.noDate')}${sc.time ? ' ' + sc.time.slice(0, 5) : ''}${sc.media ? ' · ' + esc(sc.label || '') : sc.label ? ' · ' + esc(sc.tape_id) : ''}</div>
           <div class="mt-2 flex flex-wrap items-center gap-1.5 text-theme-xs">
-            <span class="text-gray-400">${L('people.seenAt')}</span>
-            ${sc.segments.map(([a, b]) => `<button data-play="${i}" data-at="${a}" class="${BTN} font-mono">▶ ${mmss(a)}${b > a ? '–' + mmss(b) : ''}</button>`).join('')}
-            <a class="${LINK} ml-2" href="#kasety/${encodeURIComponent(sc.tape_id)}/${encodeURIComponent(sc.scene_id)}">${L('tl.openInTapes')}</a>
+            ${sc.media && sc.media.kind === 'photo'
+              ? `<button data-play="${i}" data-at="0" class="${BTN}">${L('people.showPhoto')}</button>`
+              : `<span class="text-gray-400">${L('people.seenAt')}</span>
+                ${sc.segments.map(([a, b]) => `<button data-play="${i}" data-at="${a}" class="${BTN} font-mono">▶ ${mmss(a)}${b > a ? '–' + mmss(b) : ''}</button>`).join('')}`}
+            ${sc.media
+              ? `<a class="${LINK} ml-2" href="#media/${encodeURIComponent(sc.label || '')}">${L('media.openAlbum')}</a>`
+              : `<a class="${LINK} ml-2" href="#kasety/${encodeURIComponent(sc.tape_id)}/${encodeURIComponent(sc.scene_id)}">${L('tl.openInTapes')}</a>`}
           </div>
         </div>
       </div>`).join('')}</div>`;
   renderPersonTimeline();
+  if (films.pid !== p.id) { films.pid = p.id; films.list = []; films.open = false; films.changing = null; loadFilms(); }
+  else renderFilms();
 }
+
+// ---- films about a person ("Zmontuj film", like the iPhone's Memories) ----
+// The server picks the moments (best faces, spread over the years), cuts them to
+// the music's beat, adds dates, a title and the music's credits; each new film
+// is a different pick. Here: the options, the music picker, the list of films.
+const films = { pid: null, list: [], open: false, changing: null, music: null, mood: 'sentimental',
+  pick: 'auto:sentimental', results: null, opts: { length: 'medium', sources: ['dv', 'video', 'photo'], from: '', to: '' } };
+let filmPoll = 0, filmAudio = null;
+async function loadFilms() {
+  const pid = films.pid;
+  try { const list = await api(`/api/persons/${pid}/memories`); if (pid !== films.pid) return; films.list = list; }
+  catch (_) { return; }
+  const busy = films.list.some(f => f.status === 'QUEUED' || f.status === 'RUNNING');
+  const box = $('#personFilms'), sig = films.list.map(f => f.id + f.status + (f.updated_at || '')).join();
+  if (box && box.dataset.sig === sig && busy) {          // only progress moved: don't reset a playing video
+    films.list.forEach(f => { const bar = box.querySelector(`[data-film-bar="${f.id}"]`); if (bar) bar.style.width = `${Math.round((f.progress || 0) * 100)}%`; });
+  } else renderFilms();
+  clearTimeout(filmPoll);
+  if (busy) filmPoll = setTimeout(() => { if (currentRoute().person === pid) loadFilms(); }, 3000);
+}
+async function loadMusic() {
+  if (films.music) return;
+  try { films.music = await api('/api/music'); } catch (e) { films.music = { moods: [], tracks: [], error: e.message }; }
+  renderFilms();
+}
+const fmtLen = s => s ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}` : '';
+function musicRows(tracks) {
+  return tracks.map(t => `
+    <label class="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 hover:bg-gray-100 dark:hover:bg-white/[0.06]">
+      <input type="radio" name="filmMusic" value="${esc(t.id)}" ${films.pick === t.id ? 'checked' : ''}>
+      <button type="button" data-music-play="${esc(t.id)}" class="grid h-6 w-6 shrink-0 place-items-center rounded-full border border-gray-300 text-[10px] text-gray-700 hover:border-brand-500 hover:text-brand-500 dark:border-gray-600 dark:text-gray-200">${filmAudio && filmAudio.dataset.id === t.id && !filmAudio.paused ? '❚❚' : '▶'}</button>
+      <span class="min-w-0 flex-1 truncate text-theme-xs text-gray-500 dark:text-gray-400"><b class="text-gray-800 dark:text-white/90">${esc(t.title)}</b>${t.artist ? ' · ' + esc(t.artist) : ''}</span>
+      <span class="shrink-0 font-mono text-theme-xs text-gray-400">${fmtLen(t.duration)}</span>
+    </label>`).join('');
+}
+function musicPicker() {
+  const m = films.music;
+  if (!m) return `<p class="text-theme-xs text-gray-400">${L('loading')}</p>`;
+  const moods = [...m.moods, ...(m.tracks.some(t => t.mood === 'own') ? ['own'] : []), 'search'];
+  const tracks = films.mood === 'search' ? (films.results || []) : m.tracks.filter(t => t.mood === films.mood);
+  return `
+    <div class="flex flex-wrap gap-1.5">${moods.map(md => `<button type="button" data-film-mood="${md}" class="${md === films.mood ? BTN_PRIMARY : BTN}">${L('film.mood.' + md)}</button>`).join('')}</div>
+    <div class="mt-2 flex flex-wrap gap-3 text-theme-xs text-gray-700 dark:text-gray-300">
+      ${films.mood !== 'search' && films.mood !== 'own' ? `<label class="inline-flex items-center gap-1.5"><input type="radio" name="filmMusic" value="auto:${films.mood}" ${films.pick === 'auto:' + films.mood ? 'checked' : ''}> ${L('film.musicRandom')}</label>` : ''}
+      <label class="inline-flex items-center gap-1.5"><input type="radio" name="filmMusic" value="" ${films.pick === '' ? 'checked' : ''}> ${L('film.noMusic')}</label>
+    </div>
+    ${films.mood === 'search' ? `<div class="mt-2 flex gap-2"><input id="filmSearchQ" class="h-8 min-w-0 flex-1 rounded-lg border border-gray-300 bg-white px-2 text-theme-xs text-gray-700 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200" placeholder="${L('film.searchPh')}" value="${esc(films.query || '')}"><button type="button" id="filmSearchGo" class="${BTN}">${L('film.search')}</button></div>
+      <p class="mt-1 text-theme-xs text-gray-400">${L('film.searchHint')}</p>` : ''}
+    <div class="mt-2 max-h-56 overflow-y-auto">${musicRows(tracks) || (films.mood === 'search' && films.results ? `<p class="text-theme-xs text-gray-400">${L('film.noResults')}</p>` : '')}</div>`;
+}
+function filmYears() {
+  return [...new Set((people.person.scenes || []).map(s => (s.date || '').slice(0, 4)).filter(y => /^\d{4}$/.test(y)))].sort();
+}
+function renderFilms() {
+  const box = $('#personFilms');
+  if (!box || !people.person) return;
+  const o = films.opts, years = filmYears();
+  box.dataset.sig = films.list.map(f => f.id + f.status + (f.updated_at || '')).join();
+  const panel = films.open ? `
+    <div class="mb-3 rounded-xl border border-brand-500/40 bg-brand-50/40 p-4 text-gray-700 dark:bg-brand-500/[0.06] dark:text-gray-300">
+      <div class="grid gap-4 md:grid-cols-2">
+        <div class="space-y-3 text-theme-xs">
+          <div><div class="mb-1 font-semibold text-gray-700 dark:text-gray-200">${L('film.length')}</div>
+            ${['short', 'medium', 'long'].map(l => `<button type="button" data-film-len="${l}" class="${o.length === l ? BTN_PRIMARY : BTN} mr-1">${L('film.len.' + l)}</button>`).join('')}</div>
+          <div><div class="mb-1 font-semibold text-gray-700 dark:text-gray-200">${L('film.period')}</div>
+            <select id="filmFrom" class="h-8 rounded-lg border border-gray-300 bg-white px-2 text-gray-700 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200"><option value="">${L('film.fromStart')}</option>${years.map(y => `<option ${o.from === y ? 'selected' : ''}>${y}</option>`).join('')}</select>
+            –
+            <select id="filmTo" class="h-8 rounded-lg border border-gray-300 bg-white px-2 text-gray-700 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200"><option value="">${L('film.toEnd')}</option>${years.map(y => `<option ${o.to === y ? 'selected' : ''}>${y}</option>`).join('')}</select></div>
+          <div><div class="mb-1 font-semibold text-gray-700 dark:text-gray-200">${L('film.sources')}</div>
+            ${['dv', 'video', 'photo'].map(sx => `<label class="mr-3 inline-flex items-center gap-1.5"><input type="checkbox" data-film-src="${sx}" ${o.sources.includes(sx) ? 'checked' : ''}> ${L('film.src.' + sx)}</label>`).join('')}</div>
+          <p class="text-gray-400">${L('film.hint')}</p>
+        </div>
+        <div><div class="mb-1 text-theme-xs font-semibold text-gray-700 dark:text-gray-200">${L('film.music')}</div>${musicPicker()}</div>
+      </div>
+      <div class="mt-3 flex gap-2"><button id="filmGo" class="${BTN_PRIMARY}">${L('film.go')}</button><button id="filmCancel" class="${BTN}">${L('film.cancel')}</button></div>
+    </div>` : '';
+  box.innerHTML = `
+    <div class="mb-2 flex items-center gap-3">
+      <h4 class="text-theme-sm font-semibold text-gray-700 dark:text-gray-200">${L('film.title', { n: films.list.length })}</h4>
+      ${films.open ? '' : `<button id="filmNew2" class="${BTN}">${L('film.make')}</button>`}
+    </div>
+    ${panel}
+    ${films.list.length ? `<div class="grid gap-3 lg:grid-cols-2">${films.list.map(f => filmCard(f)).join('')}</div>`
+      : films.open ? '' : `<p class="text-theme-xs text-gray-400">${L('film.empty')}</p>`}`;
+}
+function filmCard(f) {
+  const live = f.status === 'QUEUED' || f.status === 'RUNNING', p = f.params || {};
+  const what = [L('film.len.' + (p.length || 'medium')), p.date_from || p.date_to ? `${p.date_from || '…'}–${p.date_to || '…'}` : '',
+    f.music ? '♪ ' + esc(f.music.title) : L('film.noMusic')].filter(Boolean).join(' · ');
+  return `
+    <div class="rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-white/[0.02]">
+      ${f.status === 'READY' ? `<video data-film-video="${f.id}" class="mb-2 aspect-video w-full rounded-lg bg-black" controls preload="none" poster="${f.poster}" src="${f.url}"></video>` : ''}
+      <div class="flex flex-wrap items-center gap-2 text-theme-xs">
+        <b class="text-gray-800 dark:text-white/90">${esc(f.title || '')}</b>
+        <span class="text-gray-500">${fmtStamp(f.created_at)}${f.duration ? ' · ' + fmtLen(f.duration) : ''}${f.pieces ? ' · ' + L('film.pieces', { n: f.pieces }) : ''}</span>
+      </div>
+      <div class="mt-0.5 truncate text-theme-xs text-gray-400">${what}</div>
+      ${live ? `<div class="mt-2 text-theme-xs text-gray-500">${L(f.status === 'QUEUED' ? 'film.queued' : 'film.running')}</div>
+        <div class="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"><div data-film-bar="${f.id}" class="h-full bg-brand-500 transition-all" style="width:${Math.round((f.progress || 0) * 100)}%"></div></div>` : ''}
+      ${f.status === 'ERROR' ? `<div class="mt-2 text-theme-xs text-error-500">${esc(f.error || '')}</div>` : ''}
+      <div class="mt-2 flex flex-wrap gap-1.5">
+        ${f.status === 'READY' ? `<a class="${BTN}" href="${f.url}&dl=1">${L('film.download')}</a>` : ''}
+        ${live ? '' : `<button data-film-music="${f.id}" class="${BTN}">${L('film.changeMusic')}</button>`}
+        ${f.status === 'RUNNING' ? '' : `<button data-film-del="${f.id}" class="${BTN_DANGER}">${L('film.delete')}</button>`}
+      </div>
+      ${films.changing === f.id ? `<div class="mt-3 rounded-lg border border-gray-200 p-3 text-gray-700 dark:border-gray-700 dark:text-gray-300">${musicPicker()}
+        <button data-film-music-go="${f.id}" class="${BTN_PRIMARY} mt-2">${L('film.remix')}</button></div>` : ''}
+    </div>`;
+}
+function filmPreview(id) {
+  if (filmAudio && filmAudio.dataset.id === id) { filmAudio.paused ? filmAudio.play() : filmAudio.pause(); return; }
+  if (filmAudio) filmAudio.pause();
+  filmAudio = new Audio(`/api/music/${encodeURIComponent(id)}/audio`);
+  filmAudio.dataset.id = id;
+  ['play', 'pause', 'ended'].forEach(ev => filmAudio.addEventListener(ev, renderFilms));
+  filmAudio.play().catch(e => alert(e.message));
+}
+$('#peopleView').addEventListener('change', e => {
+  if (e.target.name === 'filmMusic') films.pick = e.target.value;
+  else if (e.target.id === 'filmFrom') films.opts.from = e.target.value;
+  else if (e.target.id === 'filmTo') films.opts.to = e.target.value;
+  else if (e.target.dataset.filmSrc) {
+    const s = new Set(films.opts.sources); e.target.checked ? s.add(e.target.dataset.filmSrc) : s.delete(e.target.dataset.filmSrc);
+    films.opts.sources = [...s];
+  }
+});
+$('#peopleView').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'filmSearchQ') { e.preventDefault(); $('#filmSearchGo').click(); } });
+$('#peopleView').addEventListener('click', e => {
+  const t = e.target, pid = films.pid;
+  if (t.id === 'filmNew' || t.id === 'filmNew2') { films.open = true; films.changing = null; renderFilms(); loadMusic(); $('#personFilms').scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  if (t.id === 'filmCancel') { films.open = false; renderFilms(); return; }
+  const len = t.closest('[data-film-len]'); if (len) { films.opts.length = len.dataset.filmLen; renderFilms(); return; }
+  const md = t.closest('[data-film-mood]'); if (md) { films.mood = md.dataset.filmMood; renderFilms(); return; }
+  const pl = t.closest('[data-music-play]'); if (pl) { e.preventDefault(); filmPreview(pl.dataset.musicPlay); return; }
+  if (t.id === 'filmSearchGo') {
+    films.query = $('#filmSearchQ').value.trim(); if (!films.query) return;
+    t.disabled = true; t.textContent = L('film.searching');
+    personAction(async () => {
+      try { films.results = (await api(`/api/music/search?q=${encodeURIComponent(films.query)}`)).tracks; }
+      finally { renderFilms(); }
+    });
+    return;
+  }
+  if (t.id === 'filmGo') {
+    const o = films.opts;
+    if (!o.sources.length) { alert(L('film.needSource')); return; }
+    if (o.from && o.to && o.from > o.to) { alert(L('film.badPeriod')); return; }
+    t.disabled = true;
+    personAction(async () => {
+      await postJSON(`/api/persons/${pid}/memories`, { length: o.length, sources: o.sources, music: films.pick || null,
+        date_from: o.from || null, date_to: o.to || null, lang: window.i18n.lang });
+      films.open = false; if (filmAudio) filmAudio.pause(); await loadFilms(); refresh();
+    });
+    return;
+  }
+  const ch = t.closest('[data-film-music]');
+  if (ch) { films.changing = films.changing === +ch.dataset.filmMusic ? null : +ch.dataset.filmMusic; films.open = false; renderFilms(); loadMusic(); return; }
+  const go2 = t.closest('[data-film-music-go]');
+  if (go2) {
+    t.disabled = true;
+    personAction(async () => { await postJSON(`/api/memories/${go2.dataset.filmMusicGo}/music`, { music: films.pick || null });
+      films.changing = null; if (filmAudio) filmAudio.pause(); await loadFilms(); refresh(); });
+    return;
+  }
+  const del = t.closest('[data-film-del]');
+  if (del && confirm(L('film.confirmDelete'))) personAction(async () => { await api(`/api/memories/${del.dataset.filmDel}`, { method: 'DELETE' }); await loadFilms(); });
+});
 
 // ---- person timeline: faces on a date axis, scaled from the oldest to the newest ----
 // The axis is cut into slots ~half a thumbnail wide; each slot shows its best face
@@ -1077,8 +1485,16 @@ function renderPersonTimeline() {
       ? `<button data-tl-zoom="${k.zoom.join(',')}" title="${L('people.tlZoom')}" class="${cls} hover:text-brand-500" style="${pos}">${k.label}</button>`
       : `<span class="${cls}" style="${pos}">${k.label}</span>`;
   };
+  // the first / last recording's date pinned at the two ends of the axis; tick
+  // labels that would run into them are left out (the tick marks stay)
+  const sAts = shown.map(t => t.at), sFirst = Math.min(...sAts), sLast = Math.max(...sAts);
+  const endW = 78, xFirst = x(sFirst), xLast = x(sLast);
+  const ends = shown.length ? `
+    <span class="absolute z-10 whitespace-nowrap rounded bg-gray-50 px-1 text-[11px] font-semibold text-gray-700 dark:bg-gray-900 dark:text-gray-200" style="left:${Math.max(0, xFirst - 4)}px;top:${AXIS + 4}px">${fmtDay(new Date(sFirst).toISOString().slice(0, 10))}</span>
+    ${sLast - sFirst > DAY ? `<span class="absolute z-10 -translate-x-full whitespace-nowrap rounded bg-gray-50 px-1 text-[11px] font-semibold text-gray-700 dark:bg-gray-900 dark:text-gray-200" style="left:${Math.min(W, xLast + 4)}px;top:${AXIS + 4}px">${fmtDay(new Date(sLast).toISOString().slice(0, 10))}</span>` : ''}` : '';
+  const clear = t => x(t) > Math.max(0, xFirst - 4) + endW + 8 && x(t) < Math.min(W, xLast + 4) - endW - 8;
   const ticks = tickList.map((k, i) => `<div class="absolute w-px bg-gray-300 dark:bg-gray-600" style="left:${x(k.t)}px;top:${AXIS - 4}px;height:9px"></div>
-    ${i % every ? '' : tickLabel(k)}`).join('');
+    ${i % every || !clear(k.t) ? '' : tickLabel(k)}`).join('') + ends;
   const undated = p.tracks.length - dated.length;
   personTlSlots = slots;
   host.classList.add('relative');
@@ -1162,6 +1578,17 @@ let personTlFrame = 0;
 new ResizeObserver(() => { cancelAnimationFrame(personTlFrame); personTlFrame = requestAnimationFrame(renderPersonTimeline); })
   .observe($('#peopleView'));
 
+$('#peopleView').addEventListener('change', e => {
+  if (e.target.id !== 'personGroup') return;
+  const p = people.person;
+  let group = e.target.value;
+  if (group === '__new') {
+    group = (prompt(L('people.grp.prompt')) || '').trim();
+    if (!group) { e.target.value = p.group || ''; return; }
+  }
+  personAction(async () => { await postJSON(`/api/persons/${p.id}`, { group }); people.list = null; await loadPeople(true); });
+});
+
 async function personAction(fn) {
   try { await fn(); } catch (e) { alert(e.message); }
 }
@@ -1172,6 +1599,36 @@ $('#faceBar').addEventListener('click', e => {
 $('#peopleView').addEventListener('click', e => {
   const nav = e.target.closest('[data-go]'); if (nav) { go(nav.dataset.go); return; }
   if (e.target.id === 'peopleShowAll') { people.showAll = !people.showAll; renderPeople(); return; }
+  if (e.target.id === 'peopleSugAll') { people.sugAll = !people.sugAll; renderPeople(); return; }
+  if (e.target.id === 'peopleSelect') { people.selecting = true; people.sel = new Set(); renderPeople(); return; }
+  if (e.target.id === 'peopleSelCancel') { people.selecting = false; people.sel = new Set(); renderPeople(); return; }
+  const sp = e.target.closest('[data-sel-person]');
+  if (sp) { const id = +sp.dataset.selPerson; people.sel.has(id) ? people.sel.delete(id) : people.sel.add(id); renderPeople(); return; }
+  if (e.target.id === 'peopleSelDissolve' || e.target.id === 'peopleSelDelete') {
+    const dissolve = e.target.id === 'peopleSelDissolve', ids = [...people.sel];
+    const faces = (people.list || []).filter(p => people.sel.has(p.id)).reduce((n, p) => n + p.tracks, 0);
+    if (!ids.length || !confirm(L(dissolve ? 'people.confirmDissolve' : 'people.confirmDelete', { n: ids.length, faces }))) return;
+    personAction(async () => {
+      await postJSON(`/api/persons/${dissolve ? 'dissolve' : 'delete'}`, { ids });
+      people.selecting = false; people.sel = new Set(); await loadPeople(true);
+    });
+    return;
+  }
+  const gf = e.target.closest('[data-group-filter]');
+  if (gf) { people.groupFilter = gf.dataset.groupFilter; renderPeople(); return; }
+  const yes = e.target.closest('[data-sugg-yes]'), no = e.target.closest('[data-sugg-no]');
+  if (yes || no) {
+    const [pid, other] = (yes || no).dataset[yes ? 'suggYes' : 'suggNo'].split(':').map(Number);
+    (yes || no).disabled = true;
+    personAction(async () => {
+      if (yes) await postJSON(`/api/persons/${pid}/merge`, { into: other });
+      else await postJSON(`/api/persons/${pid}/reject`, { other });
+      people.list = null;
+      if (currentRoute().person === pid) go(yes ? '#osoby/' + other : '#osoby');   // the unnamed one is gone / done
+      else loadPeople(true);
+    });
+    return;
+  }
   const p = people.person;
   if (e.target.id === 'personName') {
     const name = prompt(L('people.namePrompt'), p.name || '');
@@ -1181,6 +1638,15 @@ $('#peopleView').addEventListener('click', e => {
     personAction(async () => {
       const r = await postJSON(`/api/persons/${p.id}`, { name: name.trim() });
       people.list = null; go('#osoby/' + r.id);     // r.id differs when the name merged two people
+    });
+    return;
+  }
+  if (e.target.id === 'personDissolve' || e.target.id === 'personDelete') {
+    const dissolve = e.target.id === 'personDissolve';
+    if (!confirm(L(dissolve ? 'people.confirmDissolve' : 'people.confirmDelete', { n: 1, faces: p.tracks.length }))) return;
+    personAction(async () => {
+      await postJSON(`/api/persons/${dissolve ? 'dissolve' : 'delete'}`, { ids: [p.id] });
+      people.list = null; people.person = null; go('#osoby');
     });
     return;
   }
@@ -1249,6 +1715,89 @@ $('#peopleView').addEventListener('click', e => {
   }
 });
 
+// ============ photos & videos: albums = source folders ============
+let mediaState = { albums: null, status: null, album: null, items: [], sig: '' };
+const plural = (n, one, few, many) => `${n} ${n === 1 ? one
+  : window.i18n.lang !== 'pl' || (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20)) ? few : many}`;
+const mediaCount = (p, v) => [
+  p ? (window.i18n.lang === 'pl' ? plural(p, 'zdjęcie', 'zdjęcia', 'zdjęć') : plural(p, 'photo', 'photos')) : '',
+  v ? (window.i18n.lang === 'pl' ? plural(v, 'film', 'filmy', 'filmów') : plural(v, 'video', 'videos')) : '',
+].filter(Boolean).join(' · ') || '0';
+function renderMediaBar() {
+  const st = mediaState.status; if (!st) return;
+  if (!st.enabled) { $('#mediaBar').innerHTML = `<p class="text-theme-xs text-gray-400">${L('media.disabled')}</p>`; return; }
+  const pending = (st.new || 0) + (st.proxies_pending || 0);
+  $('#mediaBar').innerHTML = `<div class="flex flex-wrap items-center gap-3 text-theme-xs text-gray-500 dark:text-gray-400">
+    <span>${mediaCount(st.photos || 0, st.videos || 0)}</span>
+    ${st.new ? `<span class="text-brand-500">${L('media.pending', { n: st.new })}</span>` : ''}
+    ${st.proxies_pending ? `<span>${L('media.proxies', { n: st.proxies_pending })}</span>` : ''}
+    ${st.error ? `<span class="text-orange-500">${L('media.errors', { n: st.error })}</span>` : ''}
+    ${st.scanned_at ? `<span>${L('media.scannedAt', { t: fmtDT(st.scanned_at) })}</span>` : ''}
+    <button id="mediaRescan" class="${BTN}" ${pending ? 'title="' + L('media.busy') + '"' : ''}>${L('media.rescan')}</button>
+  </div>`;
+}
+async function loadMedia(force) {
+  try {
+    const st = await api('/api/media/status');
+    const sig = [st.ready, st.new, st.proxies_pending].join('|');
+    if (force || sig !== mediaState.sig || !mediaState.albums) {
+      mediaState.sig = sig;
+      mediaState.albums = await api(`/api/media/albums${wsQS()}`);
+      const r = currentRoute();
+      if (r.album != null) mediaState.items = await api(`/api/media/album?name=${encodeURIComponent(r.album)}${wsQS().replace('?', '&')}`);
+      mediaState.status = st; renderMediaBar(); renderMedia();
+    } else { mediaState.status = st; renderMediaBar(); }
+  } catch (e) { $('#mediaView').innerHTML = `<p class="text-error-500">${e.message}</p>`; }
+}
+let mediaGridItems = [];
+function renderMedia() {
+  const view = $('#mediaView'), r = currentRoute();
+  if (r.album != null) {
+    mediaGridItems = mediaState.items.map(mediaItem);
+    const undated = mediaState.items.filter(m => !m.date).length;
+    view.innerHTML = (undated ? `<div class="mb-4 flex flex-wrap items-center gap-3 text-theme-xs text-gray-500 dark:text-gray-400">
+        <span>${L('media.albumUndated', { n: undated, total: mediaState.items.length })}</span>
+        <button id="mediaAlbumDate" class="${BTN}">${L('media.albumDate')}</button></div>` : '')
+      + (mediaGridItems.length ? sceneGridHTML(mediaGridItems) : `<p class="text-theme-sm text-gray-400">${L('scenes.empty')}</p>`);
+    return;
+  }
+  const albums = mediaState.albums || [];
+  if (!albums.length) { view.innerHTML = `<p class="text-theme-sm text-gray-400">${L(mediaState.status && mediaState.status.enabled ? 'media.empty' : 'media.disabled')}</p>`; return; }
+  const range = a => !a.date_min ? '' : a.date_min.slice(0, 4) === a.date_max.slice(0, 4) ? a.date_min.slice(0, 4) : `${a.date_min.slice(0, 4)} – ${a.date_max.slice(0, 4)}`;
+  view.innerHTML = `<div class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">${albums.map(a => {
+    const name = a.album.split('/').pop(), parent = a.album.split('/').slice(0, -1).join(' / ');
+    const cell = id => id ? `<img loading="lazy" class="h-full w-full object-cover" src="${mediaThumb(id)}" alt="">` : '<div class="h-full w-full bg-gray-100 dark:bg-white/[0.04]"></div>';
+    const mosaic = a.cover.length < 4 ? cell(a.cover[0])
+      : `<div class="grid h-full w-full grid-cols-2 grid-rows-2 gap-0.5">${[0, 1, 2, 3].map(i => cell(a.cover[i])).join('')}</div>`;
+    return `<button data-go="#media/${encodeURIComponent(a.album)}" class="${TLTILE}">
+      <div class="aspect-square overflow-hidden rounded-xl bg-black">${mosaic}</div>
+      <div class="mt-2 px-0.5">
+        <div class="truncate font-semibold text-gray-800 group-hover:text-brand-500 dark:text-white/90">${esc(name)}</div>
+        <div class="truncate text-theme-xs text-gray-500 dark:text-gray-400">${mediaCount(a.photos, a.videos)}${range(a) ? ' · ' + range(a) : ''}</div>
+        ${parent ? `<div class="truncate text-[11px] text-gray-400">${esc(parent)}</div>` : ''}
+      </div>
+    </button>`;
+  }).join('')}</div>`;
+}
+$('#mediaView').addEventListener('click', async e => {
+  const nav = e.target.closest('[data-go]'); if (nav) { go(nav.dataset.go); return; }
+  if (e.target.id === 'mediaAlbumDate') {
+    const v = (prompt(L('media.albumDatePrompt')) || '').trim();
+    if (!v) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) { alert(L('people.dateBad')); return; }
+    try {
+      await postJSON(`/api/media/album/date${wsQS()}`, { album: currentRoute().album, date: v });
+      tl.data = null; loadMedia(true);
+    } catch (err) { alert(err.message); }
+    return;
+  }
+  const gt = e.target.closest('[data-mkey]'); if (gt) openSceneModal(mediaGridItems, +gt.dataset.mkey);
+});
+$('#mediaBar').addEventListener('click', async e => {
+  if (e.target.id !== 'mediaRescan') return;
+  try { await postJSON('/api/media/rescan'); e.target.textContent = L('build.wait.queued'); } catch (err) { alert(err.message); }
+});
+
 // ============ jobs ============
 function jobBadge(j, queue) {
   if (j.stage === 'capture') return [L('job.badge.capture'), 'bg-brand-500 text-white'];
@@ -1263,10 +1812,11 @@ const buildSt = st => L('build.st.' + st) || st;
 const buildLabel = b => {
   const t = b.token || '';
   if (b.mode === 'faces') return L('build.facesLabel');
+  if (b.mode === 'media') return L('build.mediaLabel');
   if (t.startsWith('REPROBE') || t === 'METABACKFILL' || t.startsWith('SEL-') || t.startsWith('DEL-') || ['TAPE', 'tape'].includes(t)) return b.tape_id;
   return `${b.tape_id} · ${t.replace(/-RES$/, '')}`;
 };
-const BUILD_DOWNLOADABLE = new Set(['concat', 'restore', 'share', 'archive']);
+const BUILD_DOWNLOADABLE = new Set(['concat', 'restore', 'share', 'archive', 'montage']);
 function buildDownloadUrl(b) {
   if (!BUILD_DOWNLOADABLE.has(b.mode)) return null;    // reprobe/backfill_meta/delete produce no file
   const ext = b.mode === 'archive' ? 'zip' : 'mp4';
@@ -1295,7 +1845,7 @@ function renderJobs(list, queue, builds) {
         <strong class="text-gray-800 dark:text-white/90">${j.tape_id}</strong>
         <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${stPL(j.status)}${sceneInfo}${j.captured_bytes ? ` · ${dvDuration(j.captured_bytes)} · ${mb(j.captured_bytes)}` : ''}${j.dropped_frames ? ' · ' + L('job.drop', { n: j.dropped_frames }) : ''}</span>
         <span class="ml-auto font-mono text-[11px] text-gray-400" title="${L('job.created')}">${fmtDT(j.created_at)}</span>
-        <span class="font-mono text-[11px] text-gray-400">${(j.updated_at || '').slice(11, 19)}</span>
+        <span class="font-mono text-[11px] text-gray-400">${fmtTime(j.updated_at)}</span>
         ${run ? `<button class="jstop ${BTN}" data-tape="${j.tape_id}">${L('job.stop')}</button>` : ''}
         ${clearable ? `<button class="jclear ${BTN_DANGER}" data-tape="${j.tape_id}" data-status="${j.status}">${L('job.clear')}</button>` : ''}
       </div>
@@ -1315,14 +1865,16 @@ function renderJobs(list, queue, builds) {
       b.detail && esc(b.detail),
       live && b.total != null && (b.stage === 2 ? L('build.facesRefine', { done: b.done ?? 0, total: b.total })
         : L('build.facesCount', { done: b.done ?? 0, total: b.total, faces: b.faces ?? 0 })),
-      live && b.eta_s && L('job.eta', { t: fmtDuration(b.eta_s) })].filter(Boolean).join(' · ') : '';
+      live && b.eta_s && L('job.eta', { t: fmtDuration(b.eta_s) })].filter(Boolean).join(' · ')
+      : b.mode === 'media' ? [live && b.stage && L('media.stage.' + b.stage), b.detail && esc(b.detail),
+        live && b.total ? `${(b.done ?? 0) + 1}/${b.total}` : ''].filter(Boolean).join(' · ') : '';
     return `<div class="rounded-xl border border-gray-200 p-3 dark:border-gray-800">
       <div class="flex flex-wrap items-center gap-2">
         <span class="${BADGE} ${cls}">${buildMode(b.mode)}</span>
         <strong class="text-gray-800 dark:text-white/90">${buildLabel(b)}</strong>
         <span class="font-mono text-theme-xs text-gray-600 dark:text-gray-300">${buildSt(b.status)}${pct != null ? ` · ${pct}%` : ''}${b.size ? ` · ${mb(b.size)}` : ''}</span>
         ${dlUrl ? `<a class="${BTN_PRIMARY}" href="${dlUrl}" download>${L('build.download')}</a>` : ''}
-        <span class="ml-auto font-mono text-[11px] text-gray-400">${(b.updated_at || '').slice(11, 19)}</span>
+        <span class="ml-auto font-mono text-[11px] text-gray-400">${fmtTime(b.updated_at)}</span>
         ${b.mode === 'faces' && live ? `<button class="bcancel ${BTN}">${L('job.stop')}</button>` : ''}
       </div>
       ${extra ? `<div class="mt-1 font-mono text-theme-xs text-gray-500 dark:text-gray-400">${extra}</div>` : ''}
@@ -1461,6 +2013,7 @@ async function refresh() {
     $('#stTapes').textContent = t.length;
     $('#navTapes').textContent = t.length || '';
     $('#navTapes').hidden = !t.length;
+    if (currentRoute().section === 'media') loadMedia(false);   // live while files are being indexed
 
     // timeline is derived from the tape set — refresh it when that changes and it's on screen
     const tsig = JSON.stringify(t.map(x => [x.tape_id, x.scene_count, x.recording_date, x.undated_date, x.label]));
@@ -1548,12 +2101,13 @@ $('#workspaceAdd').onclick = async () => {
 };
 
 // ============ hash router: one section at a time, deep-linkable ============
-const SECTIONS = ['pulpit', 'zadania', 'kasety', 'duplikaty', 'timeline', 'osoby', 'logi', 'info'];
+const SECTIONS = ['pulpit', 'zadania', 'kasety', 'media', 'duplikaty', 'timeline', 'osoby', 'logi', 'info'];
 
 function currentRoute() {
   const parts = location.hash.replace(/^#/, '').split('/').map(decodeURIComponent);
   const section = SECTIONS.includes(parts[0]) ? parts[0] : 'pulpit';
-  const r = { section, tape: null, scene: null, year: null, month: null, person: null };
+  const r = { section, tape: null, scene: null, year: null, month: null, person: null, album: null };
+  if (section === 'media' && parts.length > 1 && parts[1]) r.album = parts.slice(1).join('/');
   if (section === 'osoby' && /^\d+$/.test(parts[1] || '')) r.person = +parts[1];
   if (section === 'kasety' && parts[1]) { r.tape = parts[1]; r.scene = parts[2] || null; }
   if (section === 'timeline' && /^\d{4}$/.test(parts[1] || '')) { r.year = +parts[1]; if (/^\d{1,2}$/.test(parts[2] || '')) r.month = +parts[2]; }
@@ -1569,6 +2123,9 @@ function renderSubbar() {
   if (r.section === 'kasety' && r.tape) {
     html = `<button data-go="#kasety" class="inline-flex items-center gap-1 text-gray-600 hover:text-brand-500 dark:text-gray-300">${L('tape.crumbAll')}</button>
       <span class="text-gray-300 dark:text-gray-600">/</span><span class="truncate text-gray-700 dark:text-gray-200">${r.tape}${r.scene ? ' ' + L('tape.crumbScene') : ''}</span>`;
+  } else if (r.section === 'media' && r.album != null) {
+    html = `<button data-go="#media" class="inline-flex items-center gap-1 text-gray-600 hover:text-brand-500 dark:text-gray-300">${L('media.crumbAll')}</button>
+      <span class="text-gray-300 dark:text-gray-600">/</span><span class="truncate text-gray-700 dark:text-gray-200">${esc(r.album)}</span>`;
   } else if (r.section === 'osoby' && r.person) {
     const p = (people.list || []).find(x => x.id === r.person);
     html = `<button data-go="#osoby" class="text-gray-600 hover:text-brand-500 dark:text-gray-300">${L('people.crumbAll')}</button>
@@ -1610,6 +2167,7 @@ function applyRoute() {
   } else {
     if (r.section === 'duplikaty') loadDuplicates(false);
     if (r.section === 'osoby') { if (!r.person) { people.person = null; people.merging = false; } loadPeople(false); }
+    if (r.section === 'media') { mediaState.items = []; $('#mediaView').innerHTML = `<p class="text-theme-sm text-gray-400">${L('loading')}</p>`; loadMedia(true); }
     scroller?.scrollTo({ top: 0 });
   }
   renderSubbar();

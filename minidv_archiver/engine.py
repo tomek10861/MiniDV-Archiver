@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 import shutil
 import signal
@@ -56,6 +57,12 @@ class _JobsView(MutableMapping):
         return len(self._store.all_job_ids())
 
 
+def _date_bound(v) -> str | None:
+    """'1998', '1998-07' or '1998-07-15' from the browser, else None."""
+    v = str(v or "").strip()
+    return v if re.fullmatch(r"\d{4}(-\d{2}(-\d{2})?)?", v) else None
+
+
 class Engine:
     """Capture is an exclusive FireWire slot; processing runs in a background queue,
     so a new tape can be captured while the previous one is still being archived.
@@ -92,6 +99,7 @@ class Engine:
             threading.Thread(target=self._compress_worker, daemon=True).start()
             threading.Thread(target=self._index_worker, daemon=True).start()
             threading.Thread(target=self._faces_worker, daemon=True).start()
+            threading.Thread(target=self._media_worker, daemon=True).start()
 
     # ---- storage -----------------------------------------------------------
     def storage(self) -> dict:
@@ -246,6 +254,283 @@ class Engine:
             raise RuntimeError("żadne skanowanie twarzy nie trwa")
         return b
 
+    # ---- photos & videos ("Zdjęcia i filmy") -------------------------------
+    def _media_reproxy(self, ml, busy) -> None:
+        """DVD copies the operator asked to re-encode (media_request_reproxy) — never
+        while a face scan runs, since re-encoding moves the face times of the parts."""
+        for row in self.store.media_reproxy_pending():
+            scan = self.store.get_build(FACES_KEY)
+            if busy() or (scan and scan.get("status") in ("QUEUED", "RUNNING")):
+                return
+            ml.reencode_dvd(self.config, self.store, row, report=self._media_report)
+
+    def media_request_reproxy(self, media_id: int) -> dict:
+        """Queue one DVD title for re-encoding with the current DVD settings."""
+        from . import media_library as ml
+        row = self.store.media_get(media_id)
+        if not row or row.get("parent_id") or not ml.is_dvd(row) or row.get("proxy") != 1:
+            raise ValueError("to nie jest gotowa płyta DVD")
+        self.store.media_update(media_id, reproxy=1)
+        self.store.set_meta("media_rescan", "1")
+        return {"id": media_id, "queued": True}
+
+    def _media_worker(self) -> None:
+        """Index the read-only media folders: find new files, then thumbnails and
+        dates, then (slowest) H.264 copies of videos browsers can't play. Yields to
+        captures/conversions; a manual "rescan" request (meta flag) wakes it early."""
+        from . import media_library as ml
+        busy = lambda: bool(self.store.capture_job() or self.store.processing_job())  # noqa: E731
+        while True:
+            try:
+                if ml.roots(self.config):
+                    res = ml.scan(self.config, self.store)
+                    if res["removed"]:
+                        self._drop_faces(ml.MEDIA_TAPE, [str(i) for i in res["removed"]])
+                    ml.process_pending(self.config, self.store, busy=busy, report=self._media_report)
+                    if self.store.get_meta("media_analog_dates") != "1":      # once: scans / tape transfers
+                        ml.redate_analog(self.store)
+                        self.store.set_meta("media_analog_dates", "1")
+                    ml.date_from_file_times(self.config, self.store)
+                    ml.date_from_neighbors(self.config, self.store)
+                    ml.build_proxies(self.config, self.store, busy=busy, report=self._media_report)
+                    ml.backfill_fps(self.config, self.store)
+                    self._media_reproxy(ml, busy)
+                    if self.config.media_split_min_s:
+                        for parent in ml.split_long_videos(self.config, self.store, busy=busy,
+                                                           report=self._media_report):
+                            self._drop_faces(ml.MEDIA_TAPE, [str(parent)])   # its clips get scanned instead
+                    self.store.set_meta("media_scanned_at", now())
+                    self._media_report_idle()
+            except Exception as exc:  # noqa: BLE001 - the indexer must never die
+                self._media_report_idle(error=str(exc))
+            backlog = self.store.media_counts()
+            pause = 5 if backlog["new"] or backlog["proxies_pending"] else max(30, self.config.media_interval)
+            for _ in range(pause // 5):
+                if self.store.get_meta("media_rescan") == "1":
+                    self.store.set_meta("media_rescan", "0")
+                    break
+                time.sleep(5)
+
+    # the indexer as a row in Tasks (not a queued build: it's always on) ------------
+    MEDIA_KEY = "_media/INDEX"
+    MEDIA_STAGES = {"scan": "przegląd folderów", "thumbs": "miniatury i daty", "convert": "konwersja do MP4",
+                    "split": "podział na sceny"}
+    _media_last_report = 0.0
+
+    def _media_report(self, stage: str, i: int, total: int, detail: str, frac: float = 0.0) -> None:
+        if stage != "scan" and time.monotonic() - self._media_last_report < 2 and frac not in (0.0, 1.0):
+            return
+        self._media_last_report = time.monotonic()
+        prog = (i + frac) / total if total else None
+        self.store.put_build({"key": self.MEDIA_KEY, "tape_id": "_media", "token": "INDEX", "mode": "media",
+                              "title": "Zdjęcia i filmy", "status": "RUNNING", "stage": stage,
+                              "stage_name": self.MEDIA_STAGES.get(stage, stage), "detail": detail,
+                              "done": i, "total": total, "progress": round(prog, 4) if prog is not None else None,
+                              "path": "", "size": None, "error": None})
+
+    def _media_report_idle(self, error: str | None = None) -> None:
+        """RUNNING -> READY (or ERROR) once per busy spell, so an idle indexer doesn't
+        keep refreshing its row (finished rows stay visible in Tasks for a while)."""
+        row = self.store.get_build(self.MEDIA_KEY)
+        if row and row["status"] == "RUNNING":
+            c = self.store.media_counts()
+            row.update(status="ERROR" if error else "READY", error=error, progress=1.0, stage=None,
+                       detail=f"{c['photos']} zdjęć · {c['videos']} filmów")
+            self.store.put_build(row)
+
+    def media_status(self) -> dict:
+        from . import media_library as ml
+        return {"enabled": bool(ml.roots(self.config)), **self.store.media_counts(),
+                "scanned_at": self.store.get_meta("media_scanned_at")}
+
+    # ---- films about a person ("Zmontuj film", memories.py) -----------------------
+    MEMORY_TAPE = "_memories"
+
+    @staticmethod
+    def _memory_public(m: dict) -> dict:
+        music = m.get("music") or {}
+        return {"id": m["id"], "person_id": m["person_id"], "status": m["status"], "progress": m.get("progress"),
+                "title": m.get("title"), "created_at": m.get("created_at"), "updated_at": m.get("updated_at"),
+                "duration": m.get("duration"), "size": m.get("size"), "error": m.get("error"),
+                "params": {k: v for k, v in (m.get("params") or {}).items() if k != "seed"},
+                "pieces": len(m.get("plan") or []),
+                "music": {k: music.get(k) for k in ("id", "title", "artist", "credit", "mood")} if music else None,
+                "url": f"/api/memories/{m['id']}/file?v={m.get('size') or 0}" if m["status"] == "READY" else None,
+                "poster": f"/api/memories/{m['id']}/poster?v={m.get('size') or 0}" if m["status"] == "READY" else None}
+
+    def memories_of(self, person_id: int) -> list[dict]:
+        return [self._memory_public(m) for m in self.store.memories_of(person_id)]
+
+    def create_memory(self, person_id: int, opts: dict) -> dict:
+        from . import memories as mem
+        p = self.store.face_person(person_id)
+        if not p:
+            raise ValueError("nie ma takiej osoby")
+        length = opts.get("length") if opts.get("length") in mem.LENGTHS else "medium"
+        sources = [x for x in (opts.get("sources") or ["dv", "video", "photo"]) if x in ("dv", "video", "photo")]
+        music = opts.get("music")
+        if music is not None and not isinstance(music, str):
+            raise ValueError("zły utwór")
+        params = {"length": length, "sources": sources or ["dv", "video", "photo"], "music": music or None,
+                  "date_from": _date_bound(opts.get("date_from")), "date_to": _date_bound(opts.get("date_to")),
+                  "lang": "en" if opts.get("lang") == "en" else "pl", "seed": random.randrange(1 << 30)}
+        mid = self.store.memory_add(p["workspace"], person_id, p["name"] or "", params)
+        self._enqueue_memory(mid)
+        return self._memory_public(self.store.memory_get(mid))
+
+    def memory_music(self, memory_id: int, music: str | None) -> dict:
+        """Same moments, other music (the cuts are re-timed to its beat)."""
+        m = self.store.memory_get(memory_id)
+        if not m:
+            raise ValueError("nie ma takiego filmu")
+        if m["status"] in ("QUEUED", "RUNNING"):
+            raise RuntimeError("film jest właśnie montowany")
+        if music is not None and not isinstance(music, str):
+            raise ValueError("zły utwór")
+        params = {**(m["params"] or {}), "music": music or None}
+        self.store.memory_update(memory_id, params=params, status="QUEUED", progress=0, error=None)
+        self._enqueue_memory(memory_id)
+        return self._memory_public(self.store.memory_get(memory_id))
+
+    def delete_memory(self, memory_id: int) -> dict:
+        m = self.store.memory_get(memory_id)
+        if not m:
+            raise ValueError("nie ma takiego filmu")
+        if m["status"] == "RUNNING":
+            raise RuntimeError("film jest właśnie montowany — usuń go po skończeniu")
+        self.store.memory_delete(memory_id)
+        if m.get("path"):
+            Path(m["path"]).unlink(missing_ok=True)
+            Path(m["path"]).with_suffix(".jpg").unlink(missing_ok=True)
+        return {"deleted": memory_id}
+
+    def memory_file(self, memory_id: int, poster: bool = False) -> Path | None:
+        m = self.store.memory_get(memory_id)
+        p = Path(m["path"]) if m and m.get("path") and m["status"] == "READY" else None
+        p = p.with_suffix(".jpg") if p and poster else p
+        return p if p and p.exists() else None
+
+    def _enqueue_memory(self, memory_id: int) -> None:
+        m = self.store.memory_get(memory_id)
+        token = f"{memory_id}-{int(time.time())}"
+        with self.proc_cv:
+            self.store.put_build({"key": f"{self.MEMORY_TAPE}/{token}", "token": token, "tape_id": self.MEMORY_TAPE,
+                                  "mode": "memory", "memory_id": memory_id,
+                                  "title": f"{m.get('title') or '?'} — film", "sources": [], "status": "QUEUED",
+                                  "path": "", "size": None, "error": None})
+            self.proc_cv.notify_all()
+
+    def _render_memory(self, build: dict, on_progress) -> None:
+        from . import faces
+        from . import memories as mem
+        mid = build["memory_id"]
+        m = self.store.memory_get(mid)
+        if not m:
+            return
+        self.store.memory_update(mid, status="RUNNING", progress=0, error=None)
+        try:
+            params = m["params"] or {}
+            rnd = random.Random(params.get("seed"))
+            music_id = params.get("music")
+            if music_id and music_id.startswith("auto"):
+                mood = music_id.partition(":")[2] or "sentimental"
+                pool = [t["id"] for t in mem.builtin_catalogue() if t["mood"] == mood] or \
+                    [t["id"] for t in mem.builtin_catalogue()]
+                music_id = rnd.choice(pool)
+            music, period, offset, music_s = None, 1.0, 0.0, None
+            if music_id:
+                track, path = mem.ensure_track(self.config, music_id)
+                period, offset = mem.beat_grid(path)
+                music_s = (mem._duration(path) or 0) - offset
+                music = (track, path)
+            plan = m.get("plan")
+            if not plan:
+                person = faces.person_detail(self.store, m["person_id"]) or {}
+                target = mem.LENGTHS[params.get("length", "medium")]
+                if music_s:
+                    target = min(target, music_s - mem.END_S - 1)
+                others = [x["plan"] for x in self.store.memories_of(m["person_id"]) if x["id"] != mid and x["plan"]]
+                plan = mem.pick(mem.candidates(self.config, self.store, person), target, seed=params.get("seed", 0),
+                                avoid=mem.used_keys(others), date_from=params.get("date_from"),
+                                date_to=params.get("date_to"), sources=tuple(params.get("sources") or ()))
+            items = mem.fit_to_beats(plan, period, offset, music_s)
+            if len(items) < 2:
+                raise RuntimeError("za mało nagrań i zdjęć z tą osobą w wybranym okresie")
+            years = sorted({c["date"][:4] for c in items if c.get("date")})
+            subtitle = (f"{years[0]}–{years[-1]}" if len(years) > 1 else years[0]) if years else ""
+            out_dir = self.config.storage / "memories"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out = out_dir / f"{mid}-{int(time.time())}.mp4"
+
+            def progress(f: float) -> None:
+                on_progress(f)
+                self.store.memory_update(mid, progress=round(f, 3))
+            dur = mem.render(self.config, items, out, title=m.get("title") or "", subtitle=subtitle, music=music,
+                             offset=offset, lang=params.get("lang", "pl"), progress=progress)
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", "2.2", "-i", str(out), "-frames:v", "1",
+                            "-vf", "scale=640:-2", str(out.with_suffix(".jpg"))])     # cover: the title over the start
+            old = m.get("path")
+            self.store.memory_update(mid, status="READY", progress=1, plan=plan, path=str(out),
+                                     size=out.stat().st_size, duration=dur,
+                                     music={k: v for k, v in music[0].items() if not k.startswith("_")}
+                                     if music else None)
+            if old and old != str(out):
+                Path(old).unlink(missing_ok=True)
+                Path(old).with_suffix(".jpg").unlink(missing_ok=True)
+        except Exception as exc:
+            self.store.memory_update(mid, status="ERROR", error=str(exc)[-300:])
+            raise
+
+    def media_rescan(self) -> dict:
+        self.store.set_meta("media_rescan", "1")
+        return {"queued": True}
+
+    def media_albums(self, workspace: str | None) -> list[dict]:
+        from . import media_library as ml
+        albums: dict[str, dict] = {}
+        for r in self.store.media_items(workspace or "default"):
+            a = albums.setdefault(r["album"], {"album": r["album"], "count": 0, "photos": 0, "videos": 0,
+                                               "date_min": None, "date_max": None, "cover": []})
+            a["count"] += 1
+            a["photos" if r["kind"] == "photo" else "videos"] += 1
+            d, _ = ml.effective_date(r)
+            if d:
+                a["date_min"] = min(a["date_min"] or d, d)
+                a["date_max"] = max(a["date_max"] or d, d)
+            if len(a["cover"]) < 4:
+                a["cover"].append(r["id"])
+        return sorted(albums.values(), key=lambda a: (a["date_max"] or "", a["album"]), reverse=True)
+
+    def media_album(self, workspace: str | None, album: str) -> list[dict]:
+        from . import media_library as ml
+        items = [ml.public(r) for r in self.store.media_items(workspace or "default", album)]
+        return sorted(items, key=lambda m: (m["date"] or "9999", m["time"] or "", m["name"]))
+
+    def media_item(self, media_id: int) -> dict:
+        row = self.store.media_get(media_id)
+        if not row:
+            raise FileNotFoundError("nie ma takiego pliku")
+        return row
+
+    def media_set_album_date(self, workspace: str | None, album: str, value) -> dict:
+        v = str(value or "").strip()[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            raise ValueError("data w formacie RRRR-MM-DD")
+        return {"album": album, "dated": self.store.media_set_album_date(workspace or "default", album, v)}
+
+    def media_set_date(self, media_id: int, value, whole: bool = False) -> dict:
+        """whole=True on a part of a split film dates the film and all its parts."""
+        from . import media_library as ml
+        row = self.media_item(media_id)
+        v = str(value or "").strip()[:10]
+        if v and v != "unknown" and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            raise ValueError("data w formacie RRRR-MM-DD albo 'unknown'")
+        if whole and row.get("parent_id"):
+            self.store.media_set_family_date(row["parent_id"], v or None)
+        else:
+            self.store.media_update(media_id, date_fix=v or None)
+        return ml.public(self.store.media_get(media_id))
+
     def _drop_faces(self, tape_id: str, scene_ids: list[str] | None = None) -> None:
         ids, persons = self.store.face_drop_tracks(tape_id, scene_ids)
         faces.drop_thumbs(self.config, ids)
@@ -263,9 +548,12 @@ class Engine:
         p = faces.person_detail(self.store, person_id)
         if not p:
             raise FileNotFoundError("nie ma takiej osoby")
+        if not p["name"] and not p["hidden"] and faces.available():
+            from . import face_refine
+            p["suggest"] = face_refine.suggestions(self.config, self.store, p["workspace"]).get(person_id)
         return p
 
-    def update_person(self, person_id: int, *, name=None, hidden=None) -> dict:
+    def update_person(self, person_id: int, *, name=None, hidden=None, group=None) -> dict:
         p = self.store.face_person(person_id)
         if not p:
             raise FileNotFoundError("nie ma takiej osoby")
@@ -275,13 +563,54 @@ class Engine:
             if other:
                 # same name as someone already in this workspace = the same person (iPhone-style)
                 return self.merge_persons(person_id, other)
-        self.store.face_person_update(person_id, name=name, hidden=hidden)
+        if group is not None:
+            group = str(group).strip()[:40]
+        self.store.face_person_update(person_id, name=name, hidden=hidden, group=group)
         return self.store.face_person(person_id)
+
+    def face_suggestions(self, workspace: str | None) -> list[dict]:
+        """Unnamed people with the named person they most likely are, best first."""
+        from . import face_refine
+        ws = workspace or "default"
+        sug = face_refine.suggestions(self.config, self.store, ws)
+        persons = {p["id"]: p for p in self.store.face_persons(ws)}
+        out = [{**persons[pid], "suggest": s} for pid, s in sug.items() if pid in persons]
+        return sorted(out, key=lambda p: (-p["suggest"]["score"], -p["scenes"]))
+
+    def _drop_memories(self, person_ids: list[int]) -> None:
+        """Films of people that no longer exist (dissolved / deleted) go with them."""
+        for pid in person_ids:
+            for m in self.store.memories_of(int(pid)):
+                if m["status"] != "RUNNING":
+                    self.delete_memory(m["id"])
+
+    def dissolve_persons(self, person_ids: list[int]) -> dict:
+        self._drop_memories(person_ids)
+        new = self.store.face_dissolve([int(p) for p in person_ids])
+        for pid in new:
+            faces.recompute_person(self.store, pid)
+        return {"dissolved": len(person_ids), "faces": len(new)}
+
+    def delete_persons(self, person_ids: list[int]) -> dict:
+        self._drop_memories(person_ids)
+        gone = self.store.face_delete_persons([int(p) for p in person_ids])
+        faces.drop_thumbs(self.config, gone)
+        return {"deleted": len(person_ids), "faces": len(gone)}
+
+    def reject_suggestion(self, person_id: int, other_id: int) -> dict:
+        a, b = self.store.face_person(person_id), self.store.face_person(other_id)
+        if not a or not b:
+            raise FileNotFoundError("nie ma takiej osoby")
+        if a["workspace"] != b["workspace"]:
+            raise ValueError("różne workspace")
+        self.store.face_reject_pair(person_id, other_id)
+        return {"person": person_id, "not": other_id}
 
     def merge_persons(self, src: int, dst: int) -> dict:
         if src == dst:
             raise ValueError("to ta sama osoba")
         self.store.face_merge(src, dst)
+        self.store.memories_move(src, dst)                 # its films now belong to the merged person
         faces.recompute_person(self.store, dst)
         return self.store.face_person(dst)
 
@@ -311,11 +640,11 @@ class Engine:
     def tapes(self, workspace: str | None = None) -> list[dict]:
         return library_index.tapes_list(self.config, self.store, workspace)
 
-    def timeline(self, workspace: str | None = None) -> dict:
-        return library_index.timeline(self.config, self.store, workspace)
+    def timeline(self, workspace: str | None = None, source: str = "all") -> dict:
+        return library_index.timeline(self.config, self.store, workspace, source)
 
-    def timeline_month(self, year: int, month: int, workspace: str | None = None) -> list[dict]:
-        return library_index.month_scenes(self.config, self.store, year, month, workspace)
+    def timeline_month(self, year: int, month: int, workspace: str | None = None, source: str = "all") -> list[dict]:
+        return library_index.month_scenes(self.config, self.store, year, month, workspace, source)
 
     def duplicates(self, workspace: str | None = None) -> dict:
         return library_index.duplicates(self.config, self.store, workspace)
@@ -472,7 +801,7 @@ class Engine:
                 pass
 
     def _enqueue_build(self, tape_id: str, token: str, sources: list[Path], mode: str, title: str,
-                       stabilize: bool = False, upscale: bool = False) -> dict:
+                       stabilize: bool = False, upscale: bool = False, kinds: list[str] | None = None) -> dict:
         key = f"{tape_id}/{token}"
         with self.proc_cv:
             existing = self.store.get_build(key)
@@ -483,7 +812,8 @@ class Engine:
             out = self.config.storage / "tmp" / "share" / f"{tape_id}_{token}{ext}"
             build = {"key": key, "token": token, "tape_id": tape_id, "mode": mode, "title": title,
                      "sources": [str(p) for p in sources], "status": "QUEUED", "path": str(out),
-                     "size": None, "error": None, "stabilize": stabilize, "upscale": upscale}
+                     "size": None, "error": None, "stabilize": stabilize, "upscale": upscale,
+                     "kinds": kinds}
             self.store.put_build(build)
             self.proc_cv.notify_all()
         return dict(self.store.get_build(key))
@@ -568,12 +898,14 @@ class Engine:
         does NOT sort scenes by id: order is the caller's (the timeline sends its
         already time-sorted scene order), since here scene_index carries no
         cross-tape meaning to sort by."""
+        from . import media_library as ml
         pairs, seen = [], set()
         for it in items or []:
             tid, sid = (it or {}).get("tape_id"), (it or {}).get("scene_id")
             if not (isinstance(tid, str) and isinstance(sid, str)):
                 continue
-            if not (re.fullmatch(r"[0-9A-Za-z._-]{1,80}", tid) and re.fullmatch(r"[0-9A-Za-z._-]{1,80}", sid)):
+            if not ((tid == ml.MEDIA_TAPE or re.fullmatch(r"[0-9A-Za-z._-]{1,80}", tid))
+                    and re.fullmatch(r"[0-9A-Za-z._-]{1,80}", sid)):
                 continue
             if (tid, sid) in seen:
                 continue
@@ -581,21 +913,38 @@ class Engine:
             pairs.append((tid, sid))
         if not pairs:
             raise FileNotFoundError("pusta lista scen")
+        # camera/phone photos & videos mixed in -> a re-encoded montage (MiniDV alone
+        # stays a lossless stream-copy join; "restore" works from DV masters only)
+        mixed = any(t == ml.MEDIA_TAPE for t, _ in pairs)
+        if mixed and restore and not archive:
+            raise ValueError("naprawa z masterów działa tylko dla samych scen MiniDV — odznacz zdjęcia i filmy "
+                             "albo zbuduj zwykły film")
         suffix = ".dv.zst" if (restore and not archive) else ".mp4"
-        srcs = []
+        srcs, kinds = [], []
         for tid, sid in pairs:
+            if tid == ml.MEDIA_TAPE:
+                row = self.store.media_get(int(sid)) if sid.isdigit() else None
+                if not row:
+                    raise FileNotFoundError(f"nie ma pliku {sid}")
+                p = Path(row["path"]) if archive or row["kind"] == "photo" else ml.video_path(self.config, row)
+                if p is None:
+                    raise FileNotFoundError(f"{row['name']}: film jeszcze się konwertuje — spróbuj za chwilę")
+                srcs.append(p)
+                kinds.append(row["kind"])
+                continue
             d = self._tape_dir(tid)
             p = d / f"{sid}{suffix}"
             if not p.exists():
                 raise FileNotFoundError(f"nie ma pliku {tid}/{sid}{suffix}")
             srcs.append(p)
-        tag = "-ZIP" if archive else (self._restore_tag(stabilize, upscale) if restore else "")
+            kinds.append("dv")
+        tag = "-ZIP" if archive else (self._restore_tag(stabilize, upscale) if restore else "-MIX" if mixed else "")
         token = "PL-" + hashlib.sha1("\n".join(f"{t}/{s}" for t, s in pairs).encode()).hexdigest()[:12] + tag
         ttl = title or f"Wybrane sceny ({len(pairs)})"
-        mode = "archive" if archive else "restore" if restore else "concat"
+        mode = "archive" if archive else "restore" if restore else "montage" if mixed else "concat"
         return self._enqueue_build(self.PLAYLIST_BUCKET, token, srcs, mode, ttl,
                                    stabilize=stabilize if (restore and not archive) else False,
-                                   upscale=upscale if (restore and not archive) else False)
+                                   upscale=upscale if (restore and not archive) else False, kinds=kinds)
 
     def playlist_status(self, token: str) -> dict:
         return self.compress_status(self.PLAYLIST_BUCKET, token)
@@ -634,6 +983,12 @@ class Engine:
                     self._backfill_metadata_tape(build["sources"][0], force=build["token"].endswith("-F"))
                 elif build["mode"] == "delete":
                     self.delete_scenes(build["tape_id"], build["sources"], _from_build=True)
+                elif build["mode"] == "memory":
+                    self._render_memory(build, on_progress)
+                elif build["mode"] == "montage":
+                    from .media import montage_mp4
+                    montage_mp4([{"path": p, "kind": k} for p, k in zip(srcs, build.get("kinds") or [])], out,
+                                meta={"title": build["title"]}, log=lambda m: None, progress=on_progress)
                 elif build["mode"] == "concat":
                     concat_mp4(srcs, out, meta={"title": build["title"]}, log=lambda m: None, progress=on_progress)
                 elif build["mode"] == "archive":
@@ -653,7 +1008,7 @@ class Engine:
                                    crf=self.config.share_crf, preset=self.config.share_preset,
                                    meta={"title": build["title"]}, log=lambda m: None, progress=on_progress)
                 build.update(status="READY",
-                             size=None if build["mode"] in ("reprobe", "backfill_meta", "delete")
+                             size=None if build["mode"] in ("reprobe", "backfill_meta", "delete", "memory")
                              else out.stat().st_size)
                 self.store.put_build(build)
             except Exception as exc:

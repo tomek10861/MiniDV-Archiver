@@ -121,7 +121,7 @@ def test_merge_and_move_record_feedback_and_anchors(tmp_path):
         {"person_id": b, "workspace": "default", "embedding": b"\0" * 4, "quality": 8, "times": [1]},
         {"person_id": b, "workspace": "default", "embedding": b"\0" * 4, "quality": 1, "times": [2]}])
     s.face_person_update(a, name="Ola")
-    assert s.face_touched_persons("default") == [{"id": a, "name": "Ola", "hidden": False, "anchor": ta}]
+    assert s.face_touched_persons("default") == [{"id": a, "name": "Ola", "hidden": False, "group": None, "anchor": ta}]
     s.face_merge(b, a)
     assert ("same", tb, ta) in s.face_feedback()
     s.face_move_track(tb2, None)
@@ -186,3 +186,91 @@ def test_a_person_split_by_the_model_is_rejoined_by_confirmations():
     touched = [{"id": 10, "name": "Ola", "hidden": False, "anchor": 1}]
     assert _groups(plan_clusters(tracks, fb, touched, **KW)) == [[1, 2, 3, 4, 5, 6]]
     assert _groups(plan_clusters(tracks, fb + [("diff", 4, 1)], touched, **KW)) == [[1, 2, 3], [4, 5, 6]]
+
+
+def test_suggestions_offer_the_clearly_closest_named_person_and_respect_no():
+    from minidv_archiver.face_refine import suggest_names
+    rng = np.random.default_rng(8)
+    ola, ewa, x = rng.normal(size=(3, 512))
+    tracks = [_track(1, _v(1, 0.3, ola), person=10), _track(2, _v(2, 0.3, ewa), person=20),
+              _track(3, _v(3, 2.2, ola), person=30),          # weakly Ola: below clustering, above a hint
+              _track(4, _v(4, 0.3, x), person=40)]             # nobody we know
+    persons = [{"id": 10, "name": "Ola", "hidden": False, "cover": 1}, {"id": 20, "name": "Ewa", "hidden": False},
+               {"id": 30, "name": None, "hidden": False}, {"id": 40, "name": None, "hidden": False},
+               {"id": 50, "name": None, "hidden": True}]
+    kw = dict(core_frontal=0.4, min_score=0.12, margin=0.03)
+    sug = suggest_names(tracks, persons, [], **kw)
+    assert set(sug) == {30} and sug[30]["id"] == 10 and sug[30]["name"] == "Ola"
+    assert suggest_names(tracks, persons, [("diff", 3, 1)], **kw) == {}     # "no" sticks
+
+
+def test_reject_pair_writes_a_diff_between_the_two_people(tmp_path):
+    s = JobStore(tmp_path / "jobs.db")
+    a, b = s.face_person_create("default"), s.face_person_create("default")
+    ta, = s.face_save_scene("T", "1", "m", [{"person_id": a, "workspace": "default", "embedding": b"\0" * 4,
+                                             "quality": 1, "times": [1]}])
+    tb, = s.face_save_scene("T", "2", "m", [{"person_id": b, "workspace": "default", "embedding": b"\0" * 4,
+                                             "quality": 1, "times": [1]}])
+    sig = s.face_signature("default")
+    s.face_reject_pair(a, b)
+    assert ("diff", ta, tb) in s.face_feedback()
+    assert s.face_signature("default") != sig            # suggestions cache sees the change
+
+
+def test_a_group_alone_keeps_an_unnamed_person_through_regrouping(tmp_path):
+    s = JobStore(tmp_path / "jobs.db")
+    a, b = s.face_person_create("default"), s.face_person_create("default")
+    ta, = s.face_save_scene("T", "1", "m", [{"person_id": a, "workspace": "default", "embedding": b"\0" * 4,
+                                             "quality": 1, "times": [1]}])
+    s.face_save_scene("T", "2", "m", [{"person_id": b, "workspace": "default", "embedding": b"\0" * 4,
+                                       "quality": 1, "times": [1]}])
+    s.face_person_update(a, group="Sąsiedzi")                   # "the neighbour", name unknown
+    touched = s.face_touched_persons("default")
+    assert touched == [{"id": a, "name": None, "hidden": False, "group": "Sąsiedzi", "anchor": ta}]
+    base = np.random.default_rng(9).normal(size=512)
+    tracks = [_track(ta, _v(1, 0.3, base), person=b)]           # the scan moved the face elsewhere
+    assert plan_clusters(tracks, [], touched, **KW)[0]["person_id"] == a
+    s.face_merge(a, b)                                          # merging hands the group over
+    assert s.face_person(b)["group"] == "Sąsiedzi"
+
+
+def test_dissolve_frees_every_face_and_forgets_the_glue_but_not_the_nos(tmp_path):
+    s = JobStore(tmp_path / "jobs.db")
+    p, other = s.face_person_create("default"), s.face_person_create("default")
+    a, b = s.face_save_scene("T", "1", "m", [
+        {"person_id": p, "workspace": "default", "embedding": b"\0" * 4, "quality": 1, "times": [1]},
+        {"person_id": p, "workspace": "default", "embedding": b"\0" * 4, "quality": 1, "times": [2]}])
+    c, = s.face_save_scene("T", "2", "m", [{"person_id": other, "workspace": "default", "embedding": b"\0" * 4,
+                                            "quality": 1, "times": [1]}])
+    s.face_person_update(p, name="Jacek Albiniak", group="Znajomi")
+    s.face_import_rules("x", [("confirm", b, a), ("same", a, c), ("diff", b, c)], {})
+    new = s.face_dissolve([p])
+    assert len(new) == 2 and s.face_person(p) is None
+    assert {s.face_track(a)["person_id"], s.face_track(b)["person_id"]} == set(new)
+    assert s.face_feedback() == [("diff", b, c)]
+    assert s.face_touched_persons("default") == []           # the name and group went with it
+
+
+def test_delete_persons_drops_their_faces_for_good(tmp_path):
+    s = JobStore(tmp_path / "jobs.db")
+    p = s.face_person_create("default")
+    t, = s.face_save_scene("T", "1", "m", [{"person_id": p, "workspace": "default", "embedding": b"\0" * 4,
+                                            "quality": 1, "times": [1]}])
+    assert s.face_delete_persons([p]) == [t]
+    assert s.face_track(t) is None and s.face_person(p) is None
+    assert ("T", "1") in s.face_scanned_keys("m")            # stays scanned: the statue won't come back
+
+
+@pytest.mark.parametrize("rate", [25, 50])
+def test_refine_samples_the_same_moments_whatever_the_frame_rate(tmp_path, rate):
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        pytest.skip("needs ffmpeg")
+    from minidv_archiver.face_refine import _frames
+    mp4 = tmp_path / "v.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"testsrc=size=64x48:rate={rate}", "-t", "3",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(mp4)], check=True)
+    secs = [s for s, _ in _frames(mp4, {0, 2}, float(rate), 64, 48, np)]
+    # ~6 frames a second (every 4th at 25 fps, every 8th at 50p) — not twice as many at 50p
+    assert secs.count(0) in (6, 7) and secs.count(2) in (6, 7) and set(secs) == {0, 2}

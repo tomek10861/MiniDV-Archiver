@@ -73,7 +73,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = unquote(urlparse(self.path).path)
-        workspace = (parse_qs(urlparse(self.path).query).get("workspace") or [None])[0]
+        query = parse_qs(urlparse(self.path).query)
+        workspace = (query.get("workspace") or [None])[0]
+        source = (query.get("sources") or query.get("source") or ["all"])[0]
         try:
             if path == "/api/capture/preview.mjpg":
                 return self.stream_preview()
@@ -98,13 +100,46 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/tapes":
                 return self.json(ENGINE.tapes(workspace))
             if path == "/api/timeline":
-                return self.json(ENGINE.timeline(workspace))
+                return self.json(ENGINE.timeline(workspace, source))
             if path == "/api/duplicates":
                 return self.json(ENGINE.duplicates(workspace))
             if path == "/api/faces/status":
                 return self.json(ENGINE.faces_status(workspace))
             if path == "/api/persons":
                 return self.json(ENGINE.persons(workspace))
+            if path == "/api/media/status":
+                return self.json(ENGINE.media_status())
+            if path == "/api/media/albums":
+                return self.json(ENGINE.media_albums(workspace))
+            if path == "/api/media/album":
+                return self.json(ENGINE.media_album(workspace, (query.get("name") or [""])[0]))
+            mparts = path.strip("/").split("/")
+            if len(mparts) >= 3 and mparts[:2] == ["api", "media"] and mparts[2].isdigit():
+                return self.media_file(int(mparts[2]), mparts[3] if len(mparts) == 4 else "")
+            if path == "/api/faces/suggestions":
+                return self.json(ENGINE.face_suggestions(workspace))
+            if path == "/api/music":
+                from . import memories as mem
+                return self.json({"moods": list(mem.MOODS),
+                                  "tracks": [{k: v for k, v in t.items() if not k.startswith("_") and k != "url"}
+                                             for t in mem.catalogue(CONFIG)]})
+            if path == "/api/music/search":
+                from . import memories as mem
+                q = (query.get("q") or [""])[0].strip()
+                return self.json({"tracks": [{k: v for k, v in t.items() if k != "url"} for t in mem.search(q)]
+                                  if q else []})
+            if len(mparts) == 4 and mparts[:2] == ["api", "music"] and mparts[3] == "audio":
+                from . import memories as mem
+                _, local = mem.ensure_track(CONFIG, mparts[2])
+                return self.send_file(local)
+            if len(mparts) == 4 and mparts[:2] == ["api", "persons"] and mparts[2].isdigit() and mparts[3] == "memories":
+                return self.json(ENGINE.memories_of(int(mparts[2])))
+            if len(mparts) == 4 and mparts[:2] == ["api", "memories"] and mparts[2].isdigit() and \
+                    mparts[3] in ("file", "poster"):
+                target = ENGINE.memory_file(int(mparts[2]), poster=mparts[3] == "poster")
+                if not target:
+                    return self.json({"error": "not found"}, 404)
+                return self.send_file(target, inline="dl" not in query)
             parts = path.strip("/").split("/")
             if len(parts) == 3 and parts[:2] == ["api", "persons"] and parts[2].isdigit():
                 try:
@@ -117,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
                 target = thumb_path(CONFIG, int(parts[3][:-4]))
                 return self.send_file(target) if target.is_file() else self.json({"error": "not found"}, 404)
             if len(parts) == 4 and parts[:2] == ["api", "timeline"] and parts[2].isdigit() and parts[3].isdigit():
-                return self.json(ENGINE.timeline_month(int(parts[2]), int(parts[3]), workspace))
+                return self.json(ENGINE.timeline_month(int(parts[2]), int(parts[3]), workspace, source))
             if len(parts) >= 5 and parts[:2] == ["api", "tapes"] and parts[3] == "files":
                 target = archive_file(parts[2], "/".join(parts[4:]))
                 if not target:
@@ -226,6 +261,27 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(members, list) or len(members) < 2:
                     return self.json({"error": "potrzeba co najmniej 2 scen"}, 400)
                 return self.json(ENGINE.dismiss_duplicate_group(members))
+            if path in ("/api/persons/dissolve", "/api/persons/delete"):
+                ids = self.body().get("ids")
+                if not isinstance(ids, list) or not ids or not all(isinstance(i, int) for i in ids):
+                    return self.json({"error": "brak listy osób"}, 400)
+                return self.json(ENGINE.dissolve_persons(ids) if path.endswith("dissolve") else ENGINE.delete_persons(ids))
+            if path == "/api/media/album/date":
+                b = self.body()
+                ws = (parse_qs(urlparse(self.path).query).get("workspace") or [None])[0]
+                return self.json(ENGINE.media_set_album_date(ws, str(b.get("album") or ""), b.get("date")))
+            if path == "/api/media/rescan":
+                return self.json(ENGINE.media_rescan(), 202)
+            mp = path.strip("/").split("/")
+            if len(mp) == 4 and mp[:2] == ["api", "media"] and mp[2].isdigit() and mp[3] == "date":
+                b = self.body()
+                return self.json(ENGINE.media_set_date(int(mp[2]), b.get("date"), whole=bool(b.get("whole"))))
+            if len(mp) == 4 and mp[:2] == ["api", "persons"] and mp[2].isdigit() and mp[3] == "memories":
+                return self.json(ENGINE.create_memory(int(mp[2]), self.body()), 202)
+            if len(mp) == 4 and mp[:2] == ["api", "memories"] and mp[2].isdigit() and mp[3] == "music":
+                return self.json(ENGINE.memory_music(int(mp[2]), self.body().get("music")), 202)
+            if len(mp) == 4 and mp[:2] == ["api", "media"] and mp[2].isdigit() and mp[3] == "reencode":
+                return self.json(ENGINE.media_request_reproxy(int(mp[2])), 202)
             if path == "/api/faces/scan":
                 return self.json(ENGINE.start_face_scan(), 202)
             if path == "/api/faces/scan/cancel":
@@ -233,7 +289,13 @@ class Handler(BaseHTTPRequestHandler):
             cparts = path.strip("/").split("/")
             if len(cparts) == 3 and cparts[:2] == ["api", "persons"] and cparts[2].isdigit():
                 b = self.body()
-                return self.json(ENGINE.update_person(int(cparts[2]), name=b.get("name"), hidden=b.get("hidden")))
+                return self.json(ENGINE.update_person(int(cparts[2]), name=b.get("name"), hidden=b.get("hidden"),
+                                                      group=b.get("group")))
+            if len(cparts) == 4 and cparts[:2] == ["api", "persons"] and cparts[2].isdigit() and cparts[3] == "reject":
+                other = self.body().get("other")
+                if not isinstance(other, int):
+                    return self.json({"error": "brak osoby"}, 400)
+                return self.json(ENGINE.reject_suggestion(int(cparts[2]), other))
             if len(cparts) == 4 and cparts[:2] == ["api", "persons"] and cparts[2].isdigit() and cparts[3] == "merge":
                 into = self.body().get("into")
                 if not isinstance(into, int):
@@ -292,11 +354,42 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(ENGINE.delete_tape(parts[2]))
             if parts[:2] == ["api", "jobs"] and len(parts) == 3:
                 return self.json(ENGINE.delete_job(parts[2]))
+            if parts[:2] == ["api", "memories"] and len(parts) == 3 and parts[2].isdigit():
+                return self.json(ENGINE.delete_memory(int(parts[2])))
             return self.json({"error": "not found"}, 404)
         except (ValueError, FileNotFoundError, RuntimeError) as exc:
             return self.json({"error": str(exc)}, 409)
         except Exception as exc:
             return self.json({"error": str(exc)}, 500)
+
+    def media_file(self, media_id: int, what: str):
+        """thumb.jpg | view (photo, browser-viewable) | video (playable) | original | "" (json)."""
+        from . import media_library as ml
+        try:
+            row = ENGINE.media_item(media_id)
+        except FileNotFoundError:
+            return self.json({"error": "not found"}, 404)
+        if not what:
+            return self.json(ml.public(row))
+        if what == "thumb.jpg":
+            target = ml.derived(CONFIG, "thumbs", media_id, ".jpg")
+        elif what == "view":
+            disp = ml.derived(CONFIG, "display", media_id, ".jpg")
+            target = disp if disp.exists() else Path(row["path"])
+        elif what == "video":
+            target = ml.video_path(CONFIG, row)
+        elif what == "original":
+            target = Path(row["path"])
+            if ml.is_dvd(row):                          # a DVD title is several VOBs: hand out its MP4
+                target = ml.video_path(CONFIG, row)
+        else:
+            return self.json({"error": "not found"}, 404)
+        # originals are only ever served from inside the configured media folders
+        inside = lambda p: any(str(p.resolve()).startswith(str(r.resolve()) + "/") for r in ml.roots(CONFIG))  # noqa: E731
+        if target is None or not target.is_file() or (
+                target.is_relative_to(CONFIG.storage) is False and not inside(target)):
+            return self.json({"error": "not found"}, 404)
+        return self.send_file(target, inline=what != "original" or "dl=1" not in self.path)
 
     def static(self, path):
         target = STATIC / (path.lstrip("/") or "index.html")

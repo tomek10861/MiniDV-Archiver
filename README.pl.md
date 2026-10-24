@@ -34,6 +34,10 @@ Wszystko działa na Twoim własnym Linuksie, bez chmury.
 - 🗓️ **Oś czasu** według daty nagrania, ze wszystkich kaset naraz
 - 🧑‍🤝‍🧑 **Osoby**: rozpoznawanie twarzy na Twoim komputerze. Podpisujesz twarz i
   widzisz każde nagranie z tą osobą
+- 🎬 **Filmy o osobie**, jak „Wspomnienia” w iPhonie: najlepsze chwile z lat, do muzyki,
+  z datami
+- 📷 **Zdjęcia, filmy i płyty DVD** z udziału NAS, na tej samej osi czasu i w tym samym
+  rozpoznawaniu twarzy
 - 🧹 **Naprawa**: usuwanie przeplotu, odszumianie, usuwanie bloków, opcjonalnie
   stabilizacja i wyższa rozdzielczość
 - ⬇️ **Udostępnianie**: MP4 ~90 MB na Messengera, jeden film z wielu kaset albo ZIP
@@ -45,10 +49,27 @@ Wszystko działa na Twoim własnym Linuksie, bez chmury.
 
 ---
 
-**Spis treści:** [Funkcje](#funkcje) · [Szybki start](#szybki-start-docker) ·
+**Spis treści:** [Nowości](#nowości-październik-2026) · [Funkcje](#funkcje) · [Szybki start](#szybki-start-docker) ·
 [Wymagania](#wymagania) · [Konfiguracja](#konfiguracja) · [Użycie](#użycie) ·
 [API](#api) · [FireWire](#kompatybilność-kamer-i-uwagi-o-firewire) ·
 [Rozwój](#rozwój)
+
+## Nowości (październik 2026)
+
+- 🎬 **[Zmontuj film](#-osoby-rozpoznawanie-twarzy-które-nie-opuszcza-twojego-komputera) o osobie**:
+  chwile wybrane po twarzy, cięcia do rytmu, daty na dole, muzyka, która cichnie, gdy ktoś
+  mówi. Darmowa muzyka według nastroju, wyszukiwarka darmowej muzyki albo własna.
+- 📀 **Płyty DVD ze starych kaset VHS w 50p**: każdy półobraz to osobna klatka, więc ruch
+  jest tak płynny jak na kasecie, w natywnym 720×576 z prawidłowym kształtem 4:3 (zmierzony
+  VMAF 97, było 93). Istniejące kopie są przekodowywane tylko na żądanie.
+- 🎞️ **Filmy składane z osi czasu zostają w 50p**, a MiniDV nie jest w nich już zwężane
+  (4:3 wychodziło o 6 % za wąskie); dźwięk nie rozjeżdża się między kawałkami.
+- ⏯️ **Przewijanie klatka po klatce według prawdziwej liczby klatek** (1/50 s dla kopii
+  MiniDV i DVD).
+- 🗓️ **Skany i zgrane kasety dostają datę z nazwy albo folderu**, a nie dzień skanowania;
+  daty sprzed 1990 w nazwach są przyjmowane.
+- 🧑‍🤝‍🧑 Dokładna analiza twarzy próbkuje według czasu, więc kopie 50p nie kosztują jej
+  dwa razy więcej.
 
 ## Funkcje
 
@@ -131,6 +152,37 @@ Wszystko działa na Twoim własnym Linuksie, bez chmury.
 - **Osobno dla każdego workspace'u.** Twarze z różnych workspace'ów nigdy nie są ze sobą
   porównywane.
 
+- **Porządkowanie osób**:
+  - grupy (Rodzina, Znajomi, Sąsiedzi, Pozostali albo własne), także dla osób bez imienia;
+  - filtr listy po grupie;
+  - sekcja *Do potwierdzenia* z podpowiedziami „to chyba <imię>? ✓ / ✕” jednym kliknięciem;
+  - *⤧ Rozwiąż* rozbija grupę różnych osób, a *🗑 Usuń twarze* kasuje posągi i plakaty na zawsze, dla jednej osoby albo wielu naraz.
+- **Własna oś czasu osoby**: jej twarze na osi dat, od pierwszego do ostatniego nagrania.
+  - Kliknięcie grupy pozwala przejrzeć, odtworzyć albo usunąć każdą twarz.
+- **🎬 Zmontuj film** o osobie, w duchu „Wspomnień” z iPhone'a:
+  - wybiera chwile, w których jej twarz widać najlepiej, z całego okresu (albo z wybranych lat), z MiniDV, filmów i zdjęć;
+  - cięcia i przenikania idą do rytmu muzyki, na dole pojawiają się daty, na początku tytuł, a na końcu podpis autora muzyki;
+  - kasety 4:3 i pionowe filmy z telefonu leżą na rozmytej kopii samych siebie zamiast czarnych pasów, zdjęcia powoli się przybliżają;
+  - nagrania zachowują swój dźwięk, a muzyka cichnie, gdy ktoś mówi;
+  - muzyka: wbudowana lista darmowych utworów według nastroju (Kevin MacLeod, CC BY), wyszukiwarka darmowej muzyki w Openverse (CC0 / CC BY) albo własne pliki w `<storage>/music/own`;
+  - każdy film to inny wybór; możesz trzymać kilka, zmienić muzykę, pobrać albo usunąć.
+  - Możesz poprawić datę nagrania albo oznaczyć ją jako *nieznaną*, żeby zniknęło z osi.
+  - Nagranie otwiera się zatrzymane na klatce z tą osobą, z przewijaniem o ±1 / ±5 klatek (`,` / `.`).
+
+### 📷 Zdjęcia i filmy z aparatów i telefonów
+
+- **Wskaż folder albo udział z NAS-a tylko do odczytu** (`MINIDV_MEDIA_DIRS`), a zakładka *Zdjęcia i filmy* pokaże go jako albumy, po jednym na katalog.
+- **Data** pochodzi z EXIF albo z czasu nagrania zapisanego w filmie (UTC z telefonu przeliczone na czas lokalny), albo z nazwy pliku (`IMG_20190704_123456`, `VID-20190704-WA0001`, nazwy z Pixela). Nigdy nie jest to data kopiowania.
+  - Pliki bez żadnej daty dostają ją z wiarygodnych czasów plików albo z ponumerowanych zdjęć obok, oznaczoną jako przybliżoną; *📅 Data albumu* uzupełnia resztę albumu.
+  - **Skany i zgrane kasety** (skaner w EXIF, `Skanuj0001.jpg`, foldery typu *skany*, *VHS*, *negatywy*) dostają datę z nazwy albo folderu, np. `Wesele 25.04.1987/`. Ich własna data to tylko dzień skanowania, więc bez daty w nazwie zostają bez daty, z adnotacją. Daty sprzed 1990 w nazwach i folderach są przyjmowane.
+- **Płyty DVD** (folder `VIDEO_TS` albo przegrane jak leci pliki VOB) to jeden film na tytuł, z datą z nazwy folderu. Kopia do przeglądarki jest w **50p**: każdy półobraz przeplecionego obrazu z VHS staje się klatką, nic nie jest dorabiane. Rozmiar natywny 720×576 z kształtem 4:3, x264 CRF 17. Menu płyty nie są indeksowane.
+- **Długie filmy są dzielone na sceny** (45 s – 5 min, cięte przy zmianie obrazu), żeby otwierały się od razu; cały oryginał można dalej pobrać.
+- **Zrzuty ekranu, ikony i foldery programów są pomijane.**
+- **Oglądanie w przeglądarce**: zdjęcia HEIC dostają kopię JPEG do wyświetlania, a filmy, których przeglądarka nie odtworzy (MTS, AVI, HEVC…), dostają kopię H.264. Wszystko trafia do `<storage>/media`, a oryginały pozostają nietknięte.
+- **Na osi czasu razem z kasetami**, z ptaszkiem *Tylko MiniDV*.
+- **To samo rozpoznawanie twarzy**, więc na stronie osoby są razem jej kasety, zdjęcia i filmy.
+- **Indeksowanie przyrostowe co kilka minut.** Pliki w trakcie kopiowania są pomijane, a chwilowo niedostępny udział niczego nie kasuje.
+
 ### 🧹 Naprawa i ⬇️ udostępnianie
 
 - **🧹 Napraw** buduje oczyszczone MP4 **dekodowane z mastera DV**, nie z proxy:
@@ -143,6 +195,9 @@ Wszystko działa na Twoim własnym Linuksie, bez chmury.
   rozdzielczości, na Messengera lub Facebooka.
 - **🎬 Zbuduj jeden film** ze scen wybranych z różnych kaset, prosto z osi czasu: jako
   bezstratne sklejenie albo naprawione z masterów.
+- **🎬 Film mieszany** z osi czasu łączy MiniDV, filmy z telefonu i zdjęcia: w 50p, jeśli
+  choć część jest w 50p, z obrazem 4:3 dalej w 4:3 (piksele anamorficzne najpierw
+  wyprostowane), z dźwiękiem każdego kawałka dociętym do obrazu, żeby nic się nie rozjechało.
 - **📦 ZIP** pobiera zaznaczone sceny jako osobne pliki.
 - **Master i proxy nigdy nie są modyfikowane.** Wyniki są tymczasowe i same się
   sprzątają.
@@ -252,6 +307,8 @@ Wszystko ustawiasz zmiennymi środowiskowymi: w `.env` przy Dockerze albo w
 | `MINIDV_FACES_SCAN_AT` | `03:00` | codzienny skan nowych scen (czas lokalny); puste = tylko ręcznie |
 | `MINIDV_FACES_THREADS` | `1` | wątki CPU dla skanu twarzy (`2` ≈ dwa razy szybciej) |
 | `MINIDV_FACES_CLUSTER` | `0.24` | jak chętnie łączyć twarze (niżej = mniej rozbitych osób, więcej pomieszanych) |
+| `MINIDV_MEDIA_DIRS` | *(puste)* | foldery ze zdjęciami i filmami (tylko do odczytu) dla zakładki *Zdjęcia i filmy*, tak jak widzą je kontenery |
+| `MINIDV_DVD_CRF` / `MINIDV_DVD_PRESET` | `17` / `slow` | kopie DVD (przegrane VHS): 50p — każdy półobraz to osobna klatka, nic nie jest dorabiane — natywne 720×576 z zachowanym kształtem piksela. Istniejące kopie są przekodowywane tylko na żądanie: `POST /api/media/<id>/reencode` (części i czasy twarzy zostają) |
 | `MINIDV_INDEX_INTERVAL` | `300` | co ile sekund odświeżać indeks kaset/scen w tle |
 | `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | nasłuch HTTP api (wewnątrz kontenera) |
 

@@ -34,10 +34,11 @@ import subprocess
 from pathlib import Path
 
 from . import face_models
+from . import media_library as ml
 from .faces import THUMB_PX, ScanCancelled, _probe, recompute_person, thumb_path
 
 REFINE_SECONDS = 8      # per track, spread over the seconds it was visible
-FRAME_STEP = 4          # every 4th frame of those seconds (~6 per second at 25 fps)
+SAMPLE_S = 0.16         # one frame per this many seconds of those seconds (~6 a second, whatever the fps)
 TOP_VIEWS = 3           # best views per track that get an ArcFace embedding
 MATCH_SFACE = 0.25      # re-detected face -> which track (SFace, same scene, same second)
 
@@ -121,9 +122,11 @@ def _sample(times: list[int], k: int) -> list[int]:
 
 
 def _frames(mp4: Path, seconds: set[int], fps: float, w: int, h: int, np):
-    """Yield (second, frame) for every FRAME_STEP-th frame inside the given
-    seconds. Frame numbers (not timestamps) drive ffmpeg's select, so which frame
-    is which second is exact; decoding still runs over the file but nothing else does."""
+    """Yield (second, frame) for frames ~SAMPLE_S apart inside the given seconds
+    (every 4th at 25 fps, every 8th at 50p). Frame numbers (not timestamps) drive
+    ffmpeg's select, so which frame is which second is exact; decoding still runs
+    over the file but nothing else does."""
+    step = max(1, round(fps * SAMPLE_S))
     ranges = []
     for s in sorted(seconds):
         a, b = int(s * fps), int((s + 1) * fps) - 1
@@ -138,9 +141,9 @@ def _frames(mp4: Path, seconds: set[int], fps: float, w: int, h: int, np):
     if prefix and shutil.which("ionice"):
         prefix += ["ionice", "-c", "3"]
     cmd = [*prefix, "ffmpeg", "-nostdin", "-v", "error", "-threads", "1", "-i", str(mp4), "-an",
-           "-vf", f"select='not(mod(n,{FRAME_STEP}))*({expr})',scale={w}:{h},setsar=1",
+           "-vf", f"select='not(mod(n,{step}))*({expr})',scale={w}:{h},setsar=1",
            "-vsync", "0", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
-    picked = [n for a, b in ranges for n in range(a, b + 1) if n % FRAME_STEP == 0]
+    picked = [n for a, b in ranges for n in range(a, b + 1) if n % step == 0]
     size = w * h * 3
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=size * 2)
     try:
@@ -226,6 +229,39 @@ def refine_from_thumb(config, track_id: int, an, arc) -> dict | None:
     return {"arc": arc.embed(aligned), "rq": q * 50, "frontal": fr, "jpg": None}
 
 
+def refine_photo(path: Path, tracks: list[dict], an, arc, max_side: int = 2560) -> dict[int, dict]:
+    """A photo has one view per face: re-detect at a higher resolution than the
+    fast scan used, pair each track with its face (SFace), embed with ArcFace."""
+    from .media_library import load_image
+    np = an.np
+    frame = np.ascontiguousarray(np.asarray(load_image(path, max_side))[:, :, ::-1])
+    h, w = frame.shape[:2]
+    an.det.setInputSize((w, h))
+    _, rows = an.det.detect(frame)
+    if rows is None:
+        return {}
+    sface = {t["id"]: np.frombuffer(t["embedding"], np.float32) for t in tracks}
+    pairs = []
+    for k, row in enumerate(rows):
+        if min(row[2], row[3]) < 24:
+            continue
+        e = an.rec.feature(an.rec.alignCrop(frame, row)).flatten().astype(np.float32)
+        e /= (np.linalg.norm(e) or 1.0)
+        pairs += [(float(e @ v), tid, k) for tid, v in sface.items()]
+    out, used = {}, set()
+    for sim, tid, k in sorted(pairs, reverse=True):          # greedy one-to-one matching
+        if sim < MATCH_SFACE or tid in out or k in used:
+            continue
+        row = rows[k]
+        aligned = arc.align(frame, row[4:14].reshape(5, 2))
+        if aligned is None:
+            continue
+        q, fr = _view_quality(an, frame, row)
+        out[tid] = {"arc": arc.embed(aligned), "rq": q * 100, "frontal": fr, "jpg": _thumb(an, frame, row)}
+        used.add(k)
+    return out
+
+
 def run_refine(config, store, an, save, check, wait_if_busy) -> int:
     """Stage 2: refine every track not yet refined with the current model."""
     paths = face_models.fetch(Path(config.faces_models) if config.faces_models else config.state / "models")
@@ -236,9 +272,16 @@ def run_refine(config, store, an, save, check, wait_if_busy) -> int:
         check()
         save(i, len(scenes), f"{tape_id} · {scene_id}")
         tracks = store.face_scene_tracks(tape_id, scene_id)
-        mp4 = config.tapes / tape_id / f"{scene_id}.mp4"
+        kind, mp4 = "video", config.tapes / tape_id / f"{scene_id}.mp4"
+        if tape_id == ml.MEDIA_TAPE:
+            kind, mp4 = ml.face_source(config, store, scene_id) or ("video", Path("/nonexistent"))
         try:
-            res = refine_scene(mp4, tracks, an, arc, check, config.faces_blur) if mp4.exists() else {}
+            if not mp4.exists():
+                res = {}
+            elif kind == "photo":
+                res = refine_photo(mp4, tracks, an, arc)
+            else:
+                res = refine_scene(mp4, tracks, an, arc, check, config.faces_blur)
         except ScanCancelled:
             raise
         except Exception:  # noqa: BLE001 - one unreadable file must not stop the pass
@@ -253,17 +296,25 @@ def run_refine(config, store, an, save, check, wait_if_busy) -> int:
 
 
 # ---- clustering -------------------------------------------------------------
-def avg_linkage(sim, threshold: float, sizes=None, cannot=None):
+def avg_linkage(sim, threshold: float, sizes=None, cannot=None, inplace: bool = False):
     """Average-linkage agglomerative clustering (nearest-neighbour chain, O(n^2)).
     sim: (n,n) similarity between units of ``sizes`` members each (already
     averaged per member pair); stops when no pair averages >= threshold.
-    cannot: (n,n) bool, pairs that may never end up together. Returns labels."""
+    cannot: pairs that may never end up together — an (n,n) bool matrix or a
+    list of (i, j) index pairs (much smaller at tens of thousands of faces).
+    Returns labels."""
     import numpy as np
     n = len(sim)
-    W = np.array(sim, np.float64)
+    W = np.asarray(sim, np.float32)            # float32: half the memory at tens of thousands of faces
+    if W is sim and not inplace:
+        W = W.copy()
     np.fill_diagonal(W, -np.inf)
     if cannot is not None:
-        W[cannot] = -np.inf
+        if isinstance(cannot, np.ndarray) and cannot.dtype == bool:
+            W[cannot] = -np.inf
+        else:
+            for i, j in cannot:
+                W[i, j] = W[j, i] = -np.inf
     size = np.ones(n) if sizes is None else np.asarray(sizes, np.float64).copy()
     alive = np.ones(n, bool)
     label = np.arange(n)
@@ -374,49 +425,68 @@ def plan_clusters(tracks: list[dict], feedback, touched: list[dict], *, core_fro
             if pool:
                 p["anchor"] = max(pool, key=lambda m: (by_id[m]["frontal"] >= 0.6, by_id[m]["rq"]))
     core_units = [u for u, ms in units.items() if any(m in core_set for m in ms)]
+    core_unit_set = set(core_units)
     clusters: list[list[int]] = []
     if core_units:
         order = [m for u in core_units for m in units[u] if m in core_set]
         A = np.stack([emb[m] for m in order])
-        S = A @ A.T
-        bounds = np.cumsum([0] + [sum(1 for m in units[u] if m in core_set) for u in core_units])[:-1]
-        sizes = np.array([sum(1 for m in units[u] if m in core_set) for u in core_units], np.float64)
-        U = np.add.reduceat(np.add.reduceat(S, bounds, axis=0), bounds, axis=1) / np.outer(sizes, sizes)
-        cannot = np.zeros((len(core_units), len(core_units)), bool)
+        U = A @ A.T                                    # float32; tens of thousands of faces -> GBs, so in place
+        sizes = np.array([sum(1 for m in units[u] if m in core_set) for u in core_units], np.float32)
+        if (sizes > 1).any():                          # operator "same" units: average their member pairs
+            bounds = np.cumsum([0] + list(sizes[:-1].astype(int)))
+            U = np.add.reduceat(np.add.reduceat(U, bounds, axis=0), bounds, axis=1)
+            U /= sizes[:, None]
+            U /= sizes[None, :]
         pos = {m: k for k, u in enumerate(core_units) for m in units[u]}
-        for pair in diff:
-            a, b = tuple(pair)
-            if a in pos and b in pos and pos[a] != pos[b]:
-                cannot[pos[a], pos[b]] = cannot[pos[b], pos[a]] = True
-        labels = avg_linkage(U, cluster_t, sizes, cannot)
+        cannot = {(pos[a], pos[b]) for a, b in (tuple(p) for p in diff)
+                  if a in pos and b in pos and pos[a] != pos[b]}
+        labels = avg_linkage(U, cluster_t, sizes, list(cannot), inplace=True)
+        del U
         groups: dict[int, list[int]] = {}
         for k, lab in enumerate(labels):
             groups.setdefault(int(lab), []).extend(units[core_units[k]])
         clusters = list(groups.values())
 
-    # weak units (profile/blur/tiny): join the clearly-closest group, or stay alone
-    cl_core = [[m for m in c if m in core_set] for c in clusters]
-    cl_mat = [np.stack([emb[m] for m in c]) for c in cl_core]
+    # weak units (profile/blur/tiny): join the clearly-closest group, or stay alone.
+    # mean_k(cluster_k @ v) == mean(cluster_k) @ v, so one matrix product per batch
+    # scores every weak face against every group at once.
     member_of = {m: k for k, c in enumerate(clusters) for m in c}
+    partners: dict[int, set] = {}
+    for pair in diff:
+        a, b = tuple(pair)
+        partners.setdefault(a, set()).add(b)
+        partners.setdefault(b, set()).add(a)
     keep_alone: list[list[int]] = []
+    weak = []
     for u, ms in units.items():
-        if u in core_units:
+        if u in core_unit_set:
             continue
         vecs = [emb[m] for m in ms if m in emb]
         if not vecs or not clusters:
             keep_alone.append(ms)
-            continue
-        scores = sorted(((float(np.mean(cl_mat[k] @ np.mean(vecs, axis=0))), k) for k in range(len(clusters))),
-                        reverse=True)
-        best, k = scores[0]
-        second = scores[1][0] if len(scores) > 1 else -1.0
-        blocked = any(frozenset((m, o)) in diff for m in ms for o in clusters[k])
-        if best >= attach_t and best - second >= attach_margin and not blocked:
-            clusters[k].extend(ms)
-            for m in ms:
-                member_of[m] = k
         else:
-            keep_alone.append(ms)
+            weak.append((ms, np.mean(vecs, axis=0)))
+    if weak:
+        C = np.stack([np.mean([emb[m] for m in c if m in core_set], axis=0) for c in clusters]).astype(np.float32)
+        for start in range(0, len(weak), 2048):
+            batch = weak[start:start + 2048]
+            S = np.stack([v for _, v in batch]).astype(np.float32) @ C.T
+            if S.shape[1] > 1:
+                top2 = np.argpartition(-S, 1, axis=1)[:, :2]
+            else:
+                top2 = np.zeros((len(batch), 1), int)
+            for row, (ms, _) in enumerate(batch):
+                cand = sorted(top2[row], key=lambda k: -S[row, k])
+                k = int(cand[0])
+                best = float(S[row, k])
+                second = float(S[row, cand[1]]) if len(cand) > 1 else -1.0
+                blocked = any(member_of.get(o) == k for m in ms for o in partners.get(m, ()))
+                if best >= attach_t and best - second >= attach_margin and not blocked:
+                    clusters[k].extend(ms)
+                    for m in ms:
+                        member_of[m] = k
+                else:
+                    keep_alone.append(ms)
 
     # tracks without any ArcFace view keep their current person (nothing better to go on)
     groups_out = [{"person_id": None, "tracks": c} for c in clusters]
@@ -529,6 +599,63 @@ def _apply_confirmed(groups: list[dict], confirm: "_UF", touched: list[dict], em
             groups[home]["tracks"].append(m)
             where[m] = home
     groups[:] = [g for g in groups if g["tracks"]]
+
+
+def suggest_names(tracks: list[dict], persons: list[dict], feedback, *, core_frontal: float,
+                  min_score: float, margin: float) -> dict[int, dict]:
+    """Pure function: for every unnamed, visible person, the named person it most
+    likely is — {unnamed_id: {"id", "name", "cover", "score"}}. Score = average
+    ArcFace similarity between the two groups' faces (frontal ones where there are
+    any), the same measure re-clustering merges on, so these are the near-misses
+    the clustering was too careful to merge. Offered only above ``min_score`` and
+    ``margin`` ahead of the runner-up; pairs the operator already said "no" to
+    (any "diff" between their faces) are never offered again."""
+    import numpy as np
+    by_person: dict[int, list[dict]] = {}
+    for t in tracks:
+        if t.get("arc"):
+            by_person.setdefault(t["person_id"], []).append(t)
+
+    def centre(ts):
+        core = [t for t in ts if t["frontal"] >= core_frontal] or ts
+        return np.mean([np.frombuffer(t["arc"], np.float32) for t in core], axis=0)
+
+    named = [p for p in persons if p["name"] and not p["hidden"] and p["id"] in by_person]
+    if not named:
+        return {}
+    N = np.stack([centre(by_person[p["id"]]) for p in named])
+    owner = {t["id"]: t["person_id"] for t in tracks}
+    said_no = {frozenset((owner[a], owner[b])) for kind, a, b in feedback
+               if kind == "diff" and a in owner and b in owner}
+    out = {}
+    for p in persons:
+        if p["name"] or p["hidden"] or p["id"] not in by_person:
+            continue
+        sims = N @ centre(by_person[p["id"]])
+        allowed = [j for j in np.argsort(-sims) if frozenset((p["id"], named[j]["id"])) not in said_no]
+        if not allowed:
+            continue
+        best = float(sims[allowed[0]])
+        second = float(sims[allowed[1]]) if len(allowed) > 1 else -1.0
+        if best >= min_score and best - second >= margin:
+            n = named[allowed[0]]
+            out[p["id"]] = {"id": n["id"], "name": n["name"], "cover": n.get("cover"), "score": round(best, 3)}
+    return out
+
+
+_suggest_cache: dict = {}
+
+
+def suggestions(config, store, workspace: str) -> dict[int, dict]:
+    """suggest_names for a workspace, cached until faces or persons change."""
+    key = (workspace, store.face_signature(workspace))
+    if key not in _suggest_cache:
+        _suggest_cache.clear()
+        _suggest_cache[key] = suggest_names(
+            store.face_workspace_tracks(workspace), store.face_persons(workspace), store.face_feedback(),
+            core_frontal=config.faces_core_frontal, min_score=config.faces_suggest_t,
+            margin=config.faces_suggest_margin)
+    return _suggest_cache[key]
 
 
 def recluster(config, store, workspace: str) -> dict:

@@ -160,16 +160,24 @@ def _probe(mp4: Path) -> tuple[int, int, float, float]:
     return max(2, int(round(w * sar / 2)) * 2), h, fps, dur
 
 
-def sharp_frames(mp4: Path, analyzer: FaceAnalyzer, blur: float, nice: bool = True):
+def sharp_frames(mp4: Path, analyzer: FaceAnalyzer, blur: float, nice: bool = True,
+                 max_w: int | None = None, sample_fps: float | None = None):
     """Yield (second, frame, duration): per second of video the first frame whose
-    sharpness reaches ``blur``."""
+    sharpness reaches ``blur``. For big camera/phone videos (1080p, 4K, 50-60 fps)
+    ``max_w`` / ``sample_fps`` shrink and thin the frames inside ffmpeg — piping
+    every full-size frame out would be hundreds of GB for a long film."""
     np = analyzer.np
     w, h, fps, dur = _probe(mp4)
+    if max_w and w > max_w:
+        w, h = max_w, max(2, int(round(h * max_w / w / 2)) * 2)
+    vf = f"scale={w}:{h},setsar=1"
+    if sample_fps and fps > sample_fps:
+        vf, fps = f"fps={sample_fps},{vf}", sample_fps
     prefix = []
     if nice and shutil.which("nice"):
         prefix = ["nice", "-n", "19"] + (["ionice", "-c", "3"] if shutil.which("ionice") else [])
     cmd = [*prefix, "ffmpeg", "-nostdin", "-v", "error", "-threads", "1", "-i", str(mp4), "-an",
-           "-vf", f"scale={w}:{h},setsar=1", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
+           "-vf", vf, "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
     size = w * h * 3
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=size * 2)
     try:
@@ -194,11 +202,11 @@ def sharp_frames(mp4: Path, analyzer: FaceAnalyzer, blur: float, nice: bool = Tr
 
 
 def scan_scene(mp4: Path, analyzer: FaceAnalyzer, blur: float, on_frac=lambda f: None,
-               check=lambda: None) -> list[dict]:
+               check=lambda: None, max_w: int | None = None, sample_fps: float | None = None) -> list[dict]:
     """Tracks for one scene: [{emb, times, quality, jpg}]."""
     np = analyzer.np
     tracks: list[dict] = []
-    for sec, frame, dur in sharp_frames(mp4, analyzer, blur):
+    for sec, frame, dur in sharp_frames(mp4, analyzer, blur, max_w=max_w, sample_fps=sample_fps):
         check()
         if dur:
             on_frac(min(1.0, sec / dur))
@@ -275,8 +283,25 @@ def pending_scenes(config, store) -> list[dict]:
                 continue
             mp4 = config.tapes / tid / f"{sid}.mp4"
             if mp4.exists():
-                out.append({"tape_id": tid, "scene_id": sid, "workspace": ws, "mp4": mp4})
+                out.append({"tape_id": tid, "scene_id": sid, "workspace": ws, "mp4": mp4, "kind": "video"})
+    # photos & videos from the media folders: each item is a "scene" of MEDIA_TAPE
+    from . import media_library as ml
+    for row in store.media_ready():
+        sid = str(row["id"])
+        if (ml.MEDIA_TAPE, sid) in done:
+            continue
+        src = ml.face_source(config, store, sid)       # None: a video whose H.264 copy isn't built yet
+        if src:
+            out.append({"tape_id": ml.MEDIA_TAPE, "scene_id": sid, "workspace": row["workspace"],
+                        "mp4": src[1], "kind": src[0]})
     return out
+
+
+def scan_image(path: Path, analyzer: "FaceAnalyzer", max_side: int = 1920) -> list[dict]:
+    """Tracks for one photo: every face is its own track, seen at "second" 0."""
+    from .media_library import load_image
+    frame = analyzer.np.ascontiguousarray(analyzer.np.asarray(load_image(path, max_side))[:, :, ::-1])
+    return [{"emb": f["emb"], "times": [0], "quality": f["quality"], "jpg": f["jpg"]} for f in analyzer.faces(frame)]
 
 
 def _lower_thread_priority() -> None:
@@ -290,6 +315,7 @@ def _lower_thread_priority() -> None:
 
 
 STAGES = {1: "szybki skan", 2: "dokładna analiza", 3: "grupowanie"}
+MEDIA_TAPE_ID = "@media"          # media_library.MEDIA_TAPE (not imported at module level: no cycle)
 
 
 def run_scan(config, store, build: dict, log=lambda m: None) -> dict:
@@ -353,8 +379,13 @@ def run_scan(config, store, build: dict, log=lambda m: None) -> dict:
         detail = f"{sc['tape_id']} · {sc['scene_id']}"
         save(1, i, total, detail, force=True)
         try:
-            tracks = scan_scene(sc["mp4"], analyzer, config.faces_blur,
-                                on_frac=lambda f, i=i, d=detail: save(1, i, total, d, f), check=check)
+            if sc.get("kind") == "photo":
+                tracks = scan_image(sc["mp4"], analyzer)
+            else:
+                big = sc["tape_id"] != MEDIA_TAPE_ID      # DV is 720x576 already; camera/phone video isn't
+                tracks = scan_scene(sc["mp4"], analyzer, config.faces_blur,
+                                    on_frac=lambda f, i=i, d=detail: save(1, i, total, d, f), check=check,
+                                    max_w=None if big else 1280, sample_fps=None if big else 6)
         except ScanCancelled:
             raise
         except Exception as exc:  # noqa: BLE001 - one bad file must not stop a days-long scan
@@ -442,11 +473,24 @@ def person_detail(store, person_id: int) -> dict | None:
     p = store.face_person(person_id)
     if not p:
         return None
+    from . import media_library as ml
     tracks = store.face_tracks(person_id)
     docs = {}
     scenes: dict[tuple[str, str], dict] = {}
     for t in tracks:
         key = (t["tape_id"], t["scene_id"])
+        if t["tape_id"] == ml.MEDIA_TAPE:
+            if key not in scenes:
+                row = store.media_get(int(t["scene_id"])) or {"id": int(t["scene_id"]), "kind": "photo",
+                                                               "album": "", "name": "", "status": "gone"}
+                date, tm = ml.effective_date(row)
+                scenes[key] = {"tape_id": ml.MEDIA_TAPE, "scene_id": t["scene_id"], "label": row.get("album"),
+                               "scene_index": None, "date": date, "time": tm, "times": [], "tracks": [],
+                               "media": {"id": row["id"], "kind": row["kind"], "name": row.get("name"),
+                                         "fps": row.get("fps") or None}}
+            scenes[key]["times"] += t["times"]
+            scenes[key]["tracks"].append(t["id"])
+            continue
         if t["tape_id"] not in docs:
             docs[t["tape_id"]] = store.get_index(t["tape_id"]) or {}
         doc = docs[t["tape_id"]]
@@ -476,6 +520,10 @@ def status(config, store, workspace: str) -> dict:
                 if (d.get("workspace") or "default") == workspace}
     total = sum(len((d.get("_index") or {}).get("scenes", [])) for d in store.list_index()
                 if d.get("tape_id") in tape_ids)
+    from .media_library import MEDIA_TAPE
+    media = store.media_items(workspace)
+    total += len(media)
+    tape_ids.add(MEDIA_TAPE)
     return {"available": available(), "enabled": config.faces_enabled, "scan_at": config.faces_scan_at,
             "scanned": store.face_scanned_count(tape_ids), "scenes": total,
             "scan": store.get_build(FACES_KEY)}
