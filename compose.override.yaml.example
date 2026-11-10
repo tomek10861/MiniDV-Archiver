@@ -24,3 +24,6 @@ services:
 #  converter:
 #    volumes:
 #      - {type: bind, source: /mnt/zdjecia, target: /media/zdjecia, read_only: true, bind: {propagation: rslave}}
+#  vision:
+#    volumes:
+#      - {type: bind, source: /mnt/zdjecia, target: /media/zdjecia, read_only: true, bind: {propagation: rslave}}

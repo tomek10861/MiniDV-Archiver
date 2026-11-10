@@ -38,8 +38,22 @@ services:
   api:
     <<: *app
     command: python -m minidv_archiver.api
+    environment:
+      MINIDV_VISION_URL: ${MINIDV_VISION_URL:-http://vision:8091}
     expose:
       - "8080"
+
+  # "Szukaj": an image-text model looks through every recording and photo in the
+  # background. Its own container so its CPU can be capped hard: it never takes
+  # more than MINIDV_VISION_CPUS cores (and runs at idle priority inside them),
+  # so the machine stays responsive while it works through the archive.
+  vision:
+    <<: *app
+    command: python -m minidv_archiver.vision
+    expose:
+      - "8091"
+    cpus: ${MINIDV_VISION_CPUS:-1.5}
+    mem_limit: ${MINIDV_VISION_MEM:-4g}
 
   ui-proxy:
     image: nginx:1.29-alpine

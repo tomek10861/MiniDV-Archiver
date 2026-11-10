@@ -17,6 +17,7 @@ def main():
     sub.add_parser("api", help="HTTP/JSON only (split deployment; put nginx in front)")
     sub.add_parser("grabber", help="FireWire capture only (split deployment)")
     sub.add_parser("converter", help="background processing / re-encode queue (split deployment)")
+    sub.add_parser("vision", help="what's in the pictures: indexing + search for \"Szukaj\" (split deployment)")
     control = sub.add_parser("camera")
     control.add_argument("action", choices=["status", "play", "stop", "pause", "rewind", "ff"])
     process = sub.add_parser("process")
@@ -35,6 +36,9 @@ def main():
     elif args.command == "converter":
         from .converter import main as run_converter
         run_converter()
+    elif args.command == "vision":
+        from .vision import main as run_vision
+        run_vision()
     elif args.command == "camera":
         camera = Camera(config.camera_guid)
         print(json.dumps(camera.status() if args.action == "status" else camera.command(args.action), indent=2))

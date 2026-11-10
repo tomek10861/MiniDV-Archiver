@@ -142,7 +142,7 @@ def _frames(mp4: Path, seconds: set[int], fps: float, w: int, h: int, np):
         prefix += ["ionice", "-c", "3"]
     cmd = [*prefix, "ffmpeg", "-nostdin", "-v", "error", "-threads", "1", "-i", str(mp4), "-an",
            "-vf", f"select='not(mod(n,{step}))*({expr})',scale={w}:{h},setsar=1",
-           "-vsync", "0", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
+           "-fps_mode", "passthrough", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
     picked = [n for a, b in ranges for n in range(a, b + 1) if n % step == 0]
     size = w * h * 3
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=size * 2)

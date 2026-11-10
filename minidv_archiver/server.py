@@ -8,7 +8,7 @@ import subprocess
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .config import Config
 from .engine import Engine
@@ -36,6 +36,36 @@ def content_type(name: str) -> str:
         if name.endswith(suffix):
             return ctype
     return mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+
+_VISION = None
+
+
+def workspace_q(raw_path: str) -> str:
+    return (parse_qs(urlparse(raw_path).query).get("workspace") or [None])[0] or "default"
+
+
+def vision_call(path: str, body: dict | None = None):
+    """Ask the vision service (MINIDV_VISION_URL) — or, without one, answer from
+    the index in this process."""
+    if CONFIG.vision_url:
+        import urllib.request
+        req = urllib.request.Request(CONFIG.vision_url.rstrip("/") + path,
+                                     data=None if body is None else json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(r.read())
+    global _VISION
+    from . import vision
+    if _VISION is None:
+        _VISION = vision.VisionService(CONFIG, ENGINE.store)
+    u = urlparse(path)
+    ws = (parse_qs(u.query).get("workspace") or ["default"])[0]
+    if u.path == "/status":
+        return _VISION.status()
+    if u.path == "/tags":
+        return _VISION.tags(ws)
+    return _VISION.search(body or {})
 
 
 def archive_file(tape: str, rel: str) -> Path | None:
@@ -118,6 +148,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self.media_file(int(mparts[2]), mparts[3] if len(mparts) == 4 else "")
             if path == "/api/faces/suggestions":
                 return self.json(ENGINE.face_suggestions(workspace))
+            if path == "/api/basket":
+                return self.json(ENGINE.basket(workspace))
+            if len(mparts) == 4 and mparts[:3] == ["api", "basket", "export"]:
+                token = mparts[3].removesuffix(".zip")
+                job = ENGINE.basket_export_status(token)
+                if job.get("status") == "READY" and job.get("path") and Path(job["path"]).exists():
+                    return self.send_file(Path(job["path"]), inline=False)
+                return self.json({"error": "paczka jeszcze się przygotowuje (albo wygasła — wyeksportuj ponownie)",
+                                  "state": job.get("status")}, 409)
+            if path == "/api/vision/status":
+                from .vision import VISION_KEY
+                try:
+                    st = vision_call("/status")
+                except Exception as exc:  # noqa: BLE001 - the service may be down / still loading
+                    st = {"error": str(exc), "progress": ENGINE.store.get_build(VISION_KEY)}
+                return self.json(st)
+            if path == "/api/vision/tags":
+                return self.json(vision_call(f"/tags?workspace={quote(workspace or 'default')}"))
+            if len(mparts) == 6 and mparts[:3] == ["api", "vision", "frame"] and mparts[5].endswith(".jpg"):
+                from .vision import frame_jpg
+                try:
+                    t = float(mparts[5][:-4])
+                except ValueError:
+                    return self.json({"error": "bad time"}, 400)
+                target = frame_jpg(CONFIG, ENGINE.store, mparts[3], mparts[4], round(t, 1))
+                return self.send_file(target) if target else self.json({"error": "not found"}, 404)
             if path == "/api/music":
                 from . import memories as mem
                 return self.json({"moods": list(mem.MOODS),
@@ -276,6 +332,21 @@ class Handler(BaseHTTPRequestHandler):
             if len(mp) == 4 and mp[:2] == ["api", "media"] and mp[2].isdigit() and mp[3] == "date":
                 b = self.body()
                 return self.json(ENGINE.media_set_date(int(mp[2]), b.get("date"), whole=bool(b.get("whole"))))
+            if path == "/api/basket":
+                return self.json(ENGINE.basket_add(workspace_q(self.path), self.body().get("items") or []))
+            if path == "/api/basket/remove":
+                ids = self.body().get("ids")
+                return self.json(ENGINE.basket_remove(workspace_q(self.path), None if ids == "all" else
+                                                      [int(i) for i in ids or []]))
+            if path == "/api/basket/export":
+                return self.json(ENGINE.basket_export(workspace_q(self.path)), 202)
+            if path == "/api/vision/search":
+                b = self.body()
+                b["workspace"] = (parse_qs(urlparse(self.path).query).get("workspace") or [None])[0] or "default"
+                return self.json(vision_call("/search", b))
+            if path == "/api/vision/pause":
+                ENGINE.store.set_meta("vision_paused", "1" if self.body().get("paused") else "0")
+                return self.json({"paused": ENGINE.store.get_meta("vision_paused") == "1"})
             if len(mp) == 4 and mp[:2] == ["api", "persons"] and mp[2].isdigit() and mp[3] == "memories":
                 return self.json(ENGINE.create_memory(int(mp[2]), self.body()), 202)
             if len(mp) == 4 and mp[:2] == ["api", "memories"] and mp[2].isdigit() and mp[3] == "music":

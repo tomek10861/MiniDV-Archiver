@@ -139,6 +139,22 @@ class Config:
     # x264. Measured on the 1987 wedding disc: VMAF 97 vs 93 for the old 25p CRF 23.
     media_dvd_crf: int = int(os.getenv("MINIDV_DVD_CRF", "17"))
     media_dvd_preset: str = os.getenv("MINIDV_DVD_PRESET", "slow")
+    # "Szukaj": what's in the pictures (vision.py), indexed by its own service. The
+    # api asks it at MINIDV_VISION_URL (empty = answer in-process from the index).
+    # The service's CPU is capped by compose (MINIDV_VISION_CPUS); threads = onnx
+    # threads per frame. Model files (~1.5 GB) go to <storage>/state/models/vision
+    # unless MINIDV_VISION_MODELS says otherwise.
+    vision_url: str = os.getenv("MINIDV_VISION_URL", "")
+    vision_port: int = int(os.getenv("MINIDV_VISION_PORT", "8091"))
+    vision_threads: int = int(os.getenv("MINIDV_VISION_THREADS", "2"))
+    vision_models: str = os.getenv("MINIDV_VISION_MODELS", "")
+    # one frame looked at every this many seconds; analysed only when the picture
+    # changed (or every vision_max_gap s)
+    vision_step: float = float(os.getenv("MINIDV_VISION_STEP", "2"))
+    vision_max_gap: float = float(os.getenv("MINIDV_VISION_MAX_GAP", "10"))
+    # a tag applies to a frame from this similarity up (SigLIP2 cosine; tuned on
+    # the archive: hits ~0.10–0.16, unrelated pictures ~0.02–0.05)
+    vision_tag_t: float = float(os.getenv("MINIDV_VISION_TAG", "0.105"))
 
     @property
     def tapes(self) -> Path:

@@ -154,7 +154,7 @@ def scene_probe_quality(path: Path, frame_count: int) -> tuple[int, list[str]]:
     try:
         cp = subprocess.run(
             ["ffmpeg", "-nostdin", "-v", "warning", "-i", str(path),
-             "-vf", f"select='{sel}',scale=16:16,format=gray", "-vsync", "0", "-f", "rawvideo", "-"],
+             "-vf", f"select='{sel}',scale=16:16,format=gray", "-fps_mode", "passthrough", "-f", "rawvideo", "-"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
     except (subprocess.TimeoutExpired, OSError):
         return 0, []

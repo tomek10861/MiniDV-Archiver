@@ -1813,12 +1813,14 @@ const buildLabel = b => {
   const t = b.token || '';
   if (b.mode === 'faces') return L('build.facesLabel');
   if (b.mode === 'media') return L('build.mediaLabel');
+  if (b.mode === 'vision') return L('build.visionLabel');
   if (t.startsWith('REPROBE') || t === 'METABACKFILL' || t.startsWith('SEL-') || t.startsWith('DEL-') || ['TAPE', 'tape'].includes(t)) return b.tape_id;
   return `${b.tape_id} · ${t.replace(/-RES$/, '')}`;
 };
-const BUILD_DOWNLOADABLE = new Set(['concat', 'restore', 'share', 'archive', 'montage']);
+const BUILD_DOWNLOADABLE = new Set(['concat', 'restore', 'share', 'archive', 'montage', 'basket']);
 function buildDownloadUrl(b) {
   if (!BUILD_DOWNLOADABLE.has(b.mode)) return null;    // reprobe/backfill_meta/delete produce no file
+  if (b.mode === 'basket') return `/api/basket/export/${encodeURIComponent(b.token)}.zip`;
   const ext = b.mode === 'archive' ? 'zip' : 'mp4';
   const base = b.tape_id === '_playlist' ? '/api/playlist/build'
     : `/api/tapes/${encodeURIComponent(b.tape_id)}/compressed`;
@@ -1867,7 +1869,9 @@ function renderJobs(list, queue, builds) {
         : L('build.facesCount', { done: b.done ?? 0, total: b.total, faces: b.faces ?? 0 })),
       live && b.eta_s && L('job.eta', { t: fmtDuration(b.eta_s) })].filter(Boolean).join(' · ')
       : b.mode === 'media' ? [live && b.stage && L('media.stage.' + b.stage), b.detail && esc(b.detail),
-        live && b.total ? `${(b.done ?? 0) + 1}/${b.total}` : ''].filter(Boolean).join(' · ') : '';
+        live && b.total ? `${(b.done ?? 0) + 1}/${b.total}` : ''].filter(Boolean).join(' · ')
+      : b.mode === 'vision' ? [b.detail && esc(b.detail), live && b.total ? `${b.done ?? 0}/${b.total}` : '',
+        b.scenes != null && L('search.indexed', { scenes: b.scenes, frames: b.frames ?? 0 })].filter(Boolean).join(' · ') : '';
     return `<div class="rounded-xl border border-gray-200 p-3 dark:border-gray-800">
       <div class="flex flex-wrap items-center gap-2">
         <span class="${BADGE} ${cls}">${buildMode(b.mode)}</span>
@@ -1984,6 +1988,8 @@ async function refresh() {
   try {
     const [s, d, t] = await Promise.all([api('/api/status'), api('/api/storage'), api(`/api/tapes${wsQS()}`)]);
     window.__tapes = t;
+    lastBuilds = s.compress || [];
+    if (srch.exportTok && currentRoute().section === 'szukaj') renderBasket();
     api('/api/sysload').then(renderSysload).catch(() => {});  // best-effort footer widget, never blocks the dashboard
     $('#captureTzDefault').textContent = L('capture.tzDefault', { tz: s.default_recording_tz || 'Europe/Warsaw' });
     if (!$('#workspacePick').options.length) loadWorkspaces();
@@ -2101,7 +2107,7 @@ $('#workspaceAdd').onclick = async () => {
 };
 
 // ============ hash router: one section at a time, deep-linkable ============
-const SECTIONS = ['pulpit', 'zadania', 'kasety', 'media', 'duplikaty', 'timeline', 'osoby', 'logi', 'info'];
+const SECTIONS = ['pulpit', 'zadania', 'kasety', 'media', 'duplikaty', 'timeline', 'osoby', 'szukaj', 'logi', 'info'];
 
 function currentRoute() {
   const parts = location.hash.replace(/^#/, '').split('/').map(decodeURIComponent);
@@ -2168,6 +2174,7 @@ function applyRoute() {
     if (r.section === 'duplikaty') loadDuplicates(false);
     if (r.section === 'osoby') { if (!r.person) { people.person = null; people.merging = false; } loadPeople(false); }
     if (r.section === 'media') { mediaState.items = []; $('#mediaView').innerHTML = `<p class="text-theme-sm text-gray-400">${L('loading')}</p>`; loadMedia(true); }
+    if (r.section === 'szukaj') openSearch();
     scroller?.scrollTo({ top: 0 });
   }
   renderSubbar();
@@ -2178,5 +2185,223 @@ $('#subbar').addEventListener('click', e => {
 addEventListener('hashchange', applyRoute);
 
 const _lp = $('#langPick'); if (_lp) { _lp.value = window.i18n.lang; _lp.addEventListener('change', () => window.i18n.setLang(_lp.value)); }
+
+
+// ============ Szukaj: what's in the pictures (vision service) + the editing basket ============
+// The vision service indexes every scene / photo / video in the background; here
+// you ask it (free text and/or tags, kind, dates, who must / mustn't be there) and
+// collect the moments you want into the basket, exported as a ZIP of clips + a list.
+const srch = { tags: null, cats: {}, q: '', inc: new Set(), exc: new Set(), kinds: new Set(['dv', 'dvd', 'video', 'photo']),
+  from: '', to: '', with: new Set(), without: new Set(), sort: 'score', res: null, busy: false, allTags: false,
+  basket: [], exportTok: null, people: null };
+const KIND_ICON = { dv: '📼', dvd: '📀', video: '🎬', photo: '📷' };
+let visionPoll = 0, lastBuilds = [];
+async function openSearch() {
+  renderSearchForm(); renderBasket(); loadVisionStatus();
+  try {
+    const [tags, people] = await Promise.all([api('/api/vision/tags' + wsQS()), api('/api/persons' + wsQS())]);
+    srch.tags = tags; srch.people = people.filter(p => p.name).sort((a, b) => a.name.localeCompare(b.name));
+  } catch (e) { srch.tags = []; srch.tagsError = e.message; }
+  renderSearchForm();
+  loadBasket();
+}
+async function loadVisionStatus() {
+  clearTimeout(visionPoll);
+  const bar = $('#visionBar');
+  let st;
+  try { st = await api('/api/vision/status'); } catch (e) { st = { error: e.message }; }
+  srch.cats = st.categories || srch.cats;
+  const pr = st.progress || {}, live = pr.status === 'RUNNING';
+  const share = pr.total ? ` · ${L('search.queue', { done: pr.done || 0, total: pr.total })}` : '';
+  bar.innerHTML = `<div class="flex flex-wrap items-center gap-2 text-theme-xs text-gray-500 dark:text-gray-400">
+      <span class="${BADGE} ${st.error && !pr.status ? 'bg-error-50 text-error-600 dark:bg-error-500/15 dark:text-error-400' : live ? 'bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-400' : 'bg-gray-100 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300'}">${
+        st.error && !pr.status ? L('search.down') : st.paused ? L('search.paused') : live ? L('search.indexing') : L('search.ready')}</span>
+      <span>${L('search.indexed', { scenes: st.scenes ?? '?', frames: st.frames ?? '?' })}${share}</span>
+      ${live && pr.detail ? `<span class="truncate text-gray-400">${esc(pr.detail)}</span>` : ''}
+      <button id="visionPause" class="${BTN}">${st.paused ? L('search.resume') : L('search.pause')}</button>
+    </div>
+    ${live && pr.total ? `<div class="mt-2 h-1.5 max-w-md overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"><div class="h-full bg-brand-500" style="width:${Math.round(100 * (pr.done || 0) / pr.total)}%"></div></div>` : ''}`;
+  if (currentRoute().section === 'szukaj') visionPoll = setTimeout(loadVisionStatus, 10000);
+}
+function tagChip(t) {
+  const on = srch.inc.has(t.id), off = srch.exc.has(t.id);
+  const cls = on ? 'border-brand-500 bg-brand-500 text-white' : off ? 'border-error-500 bg-error-50 text-error-600 line-through dark:bg-error-500/10'
+    : 'border-gray-300 bg-white text-gray-700 hover:border-brand-500 dark:border-gray-600 dark:bg-white/[0.04] dark:text-gray-200';
+  return `<button type="button" data-tag="${t.id}" title="${L('search.tagHint')}" class="rounded-full border px-2.5 py-0.5 text-theme-xs ${cls}">${esc(t[window.i18n.lang === 'pl' ? 'pl' : 'en'])}${t.count ? ` <span class="opacity-60">${t.count}</span>` : ''}</button>`;
+}
+function personChips(set, attr) {
+  return [...set].map(id => { const p = (srch.people || []).find(x => x.id === id);
+    return `<span class="inline-flex items-center gap-1 rounded-full bg-gray-100 py-0.5 pl-0.5 pr-2 text-theme-xs dark:bg-white/[0.06]">${avatar(p && p.cover, 'h-5 w-5')}${esc(p ? p.name : '#' + id)}<button type="button" data-${attr}-del="${id}" class="text-gray-400 hover:text-error-500">✕</button></span>`; }).join('');
+}
+function renderSearchForm() {
+  const box = $('#searchForm'), lang = window.i18n.lang === 'pl' ? 'pl' : 'en';
+  const tags = srch.tags || [];
+  const byCat = {};
+  tags.filter(t => srch.allTags || t.count || srch.inc.has(t.id) || srch.exc.has(t.id)).forEach(t => (byCat[t.cat] = byCat[t.cat] || []).push(t));
+  const sel = cls => `h-8 rounded-lg border border-gray-300 bg-white px-2 text-theme-xs text-gray-700 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-200 ${cls || ''}`;
+  const pick = (id, set) => `<select id="${id}" class="${sel()}"><option value="">${L('search.addPerson')}</option>${(srch.people || []).filter(p => !set.has(p.id)).map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>`;
+  box.innerHTML = `
+    <form id="searchGo" class="flex gap-2">
+      <input id="searchQ" value="${esc(srch.q)}" placeholder="${L('search.ph')}" class="h-10 min-w-0 flex-1 rounded-lg border border-gray-300 bg-white px-3 text-theme-sm text-gray-800 dark:border-gray-600 dark:bg-gray-900 dark:text-white/90">
+      <button class="${BTN_PRIMARY}">${L('search.go')}</button>
+    </form>
+    <p class="mt-1 text-theme-xs text-gray-400">${L('search.hint')}</p>
+    <div class="mt-4 grid gap-3 text-theme-xs text-gray-700 dark:text-gray-300 md:grid-cols-2">
+      <div><div class="mb-1 font-semibold">${L('search.kinds')}</div>
+        ${['dv', 'dvd', 'video', 'photo'].map(k => `<label class="mr-3 inline-flex items-center gap-1.5"><input type="checkbox" data-kind="${k}" ${srch.kinds.has(k) ? 'checked' : ''}> ${KIND_ICON[k]} ${L('search.kind.' + k)}</label>`).join('')}</div>
+      <div><div class="mb-1 font-semibold">${L('search.period')}</div>
+        <input id="searchFrom" value="${esc(srch.from)}" placeholder="${L('search.fromPh')}" class="${sel('w-28')}"> – <input id="searchTo" value="${esc(srch.to)}" placeholder="${L('search.toPh')}" class="${sel('w-28')}">
+        <select id="searchSort" class="${sel('ml-2')}"><option value="score" ${srch.sort === 'score' ? 'selected' : ''}>${L('search.sortScore')}</option><option value="date" ${srch.sort === 'date' ? 'selected' : ''}>${L('search.sortDate')}</option></select></div>
+      <div><div class="mb-1 font-semibold">${L('search.with')}</div><div class="flex flex-wrap items-center gap-1.5">${personChips(srch.with, 'with')} ${pick('searchWith', srch.with)}</div></div>
+      <div><div class="mb-1 font-semibold">${L('search.without')}</div><div class="flex flex-wrap items-center gap-1.5">${personChips(srch.without, 'without')} ${pick('searchWithout', srch.without)}</div></div>
+    </div>
+    <div class="mt-4">
+      <div class="mb-1 flex items-center gap-3 text-theme-xs"><b class="text-gray-700 dark:text-gray-200">${L('search.tags')}</b>
+        <label class="inline-flex items-center gap-1 text-gray-500"><input type="checkbox" id="searchAllTags" ${srch.allTags ? 'checked' : ''}> ${L('search.allTags')}</label>
+        ${srch.inc.size || srch.exc.size ? `<button type="button" id="searchTagsClear" class="${LINK}">${L('search.clearTags')}</button>` : ''}</div>
+      ${srch.tagsError ? `<p class="text-theme-xs text-error-500">${esc(srch.tagsError)}</p>` : !tags.length ? `<p class="text-theme-xs text-gray-400">${srch.tags ? L('search.noTags') : L('loading')}</p>` : ''}
+      ${Object.keys(srch.cats).filter(c => byCat[c]).map(c => `<div class="mt-2"><div class="mb-1 text-theme-xs text-gray-400">${esc(srch.cats[c][lang])}</div><div class="flex flex-wrap gap-1.5">${byCat[c].map(tagChip).join('')}</div></div>`).join('')}
+    </div>`;
+}
+function searchParams() {
+  return { q: srch.q, tags: [...srch.inc], not_tags: [...srch.exc], kinds: [...srch.kinds], date_from: srch.from || null,
+    date_to: srch.to || null, with: [...srch.with], without: [...srch.without], sort: srch.sort };
+}
+async function runSearch() {
+  const view = $('#searchView');
+  if (!srch.q && !srch.inc.size && !srch.with.size && !srch.from && !srch.to && srch.kinds.size === 4) {
+    view.innerHTML = `<p class="text-theme-sm text-gray-400">${L('search.askSomething')}</p>`; return;
+  }
+  srch.busy = true; view.innerHTML = `<p class="text-theme-sm text-gray-400">${L('search.searching')}</p>`;
+  try { srch.res = await postJSON('/api/vision/search' + wsQS(), searchParams()); }
+  catch (e) { view.innerHTML = `<p class="text-error-500">${esc(e.message)}</p>`; return; }
+  finally { srch.busy = false; }
+  renderResults();
+}
+const frameUrl = (r, t) => `/api/vision/frame/${encodeURIComponent(r.tape_id)}/${encodeURIComponent(r.scene_id)}/${(+t).toFixed(1)}.jpg`;
+function resultTitle(r) {
+  return r.tape_id === MEDIA ? esc(r.name || r.label || '') : `${esc(r.label || r.tape_id)} · ${L('tl.scene', { n: r.scene_index ?? '?' })}`;
+}
+function renderResults() {
+  const view = $('#searchView'), res = srch.res;
+  if (!res) return;
+  if (!res.results.length) { view.innerHTML = `<p class="text-theme-sm text-gray-400">${L('search.none')}</p>`; return; }
+  const peopleName = id => ((srch.people || []).find(p => p.id === id) || {}).name;
+  view.innerHTML = `
+    <div class="mb-3 flex flex-wrap items-center gap-3 text-theme-xs text-gray-500">
+      <span>${L('search.found', { n: res.total })}${res.total > res.results.length ? ' · ' + L('search.shown', { n: res.results.length }) : ''}</span>
+      <button id="searchAddAll" class="${BTN}">${L('search.addAll')}</button>
+    </div>
+    <div class="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">${res.results.map((r, i) => {
+      const m0 = r.moments[0] || [0, 0];
+      return `<div class="overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-white/[0.02]">
+        <button data-res-play="${i}" data-at="${m0[0]}" class="relative block aspect-video w-full bg-black">
+          <img loading="lazy" src="${frameUrl(r, r.kind === 'photo' ? 0 : m0[0] + Math.min(1, (m0[1] - m0[0]) / 2))}" alt="" class="h-full w-full object-contain">
+          <span class="absolute left-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[11px] text-white">${KIND_ICON[r.kind]} ${L('search.kind.' + r.kind)}</span>
+        </button>
+        <div class="p-3">
+          <div class="truncate text-theme-sm font-semibold text-gray-800 dark:text-white/90">${resultTitle(r)}</div>
+          <div class="text-theme-xs text-gray-500 dark:text-gray-400">${r.date ? fmtDay(r.date) : L('tl.noDate')}${r.time ? ' ' + r.time.slice(0, 5) : ''}${r.tape_id === MEDIA && r.label ? ' · ' + esc(r.label) : ''}</div>
+          ${r.people.length ? `<div class="mt-1.5 flex flex-wrap gap-1 text-[11px] text-gray-500">${r.people.filter(peopleName).map(id => `<span class="rounded bg-gray-100 px-1.5 dark:bg-white/[0.06]">${esc(peopleName(id))}</span>`).join('')}</div>` : ''}
+          <div class="mt-2 flex flex-wrap gap-1.5">${r.kind === 'photo'
+            ? `<button data-res-play="${i}" data-at="0" class="${BTN}">${L('people.showPhoto')}</button><button data-res-add="${i}:0" class="${BTN}" title="${L('search.toBasket')}">＋</button>`
+            : r.moments.map(([a, b], j) => `<span class="inline-flex"><button data-res-play="${i}" data-at="${a}" class="${BTN} rounded-r-none font-mono">▶ ${mmss(Math.floor(a))}–${mmss(Math.ceil(b))}</button><button data-res-add="${i}:${j}" class="${BTN} rounded-l-none border-l-0" title="${L('search.toBasket')}">＋</button></span>`).join('')}</div>
+          ${r.tags.length ? `<div class="mt-2 truncate text-[11px] text-gray-400">${r.tags.map(id => esc(((srch.tags || []).find(t => t.id === id) || {})[window.i18n.lang === 'pl' ? 'pl' : 'en'] || id)).join(' · ')}</div>` : ''}
+        </div>
+      </div>`; }).join('')}</div>`;
+}
+async function playResult(r, at) {
+  let item;
+  if (r.tape_id === MEDIA) item = mediaItem({ id: r.media_id, kind: r.media_kind, name: r.name, album: r.label, date: r.date, time: r.time, playable: true });
+  else {
+    if (!scenesCache[r.tape_id]) { try { scenesCache[r.tape_id] = await api(`/api/tapes/${encodeURIComponent(r.tape_id)}/scenes`); } catch (_) { scenesCache[r.tape_id] = []; } }
+    item = { tapeId: r.tape_id, s: scenesCache[r.tape_id].find(x => x.scene_id === r.scene_id) || { scene_id: r.scene_id, scene_index: r.scene_index } };
+  }
+  openSceneModal([item], 0, true, at);
+}
+async function loadBasket() {
+  try { srch.basket = await api('/api/basket' + wsQS()); } catch (_) { srch.basket = []; }
+  renderBasket();
+}
+function renderBasket() {
+  const box = $('#basketView'), b = srch.basket || [];
+  const nb = $('#navBasket'); if (nb) nb.textContent = b.length || '';
+  if (!box) return;
+  const exp = srch.exportTok && (lastBuilds || []).find(x => x.key === '_basket/' + srch.exportTok);
+  box.innerHTML = `<div class="rounded-xl border border-gray-200 p-4 dark:border-gray-800 xl:sticky xl:top-24">
+    <div class="mb-1 flex items-center gap-2"><h3 class="text-theme-sm font-semibold text-gray-800 dark:text-white/90">${L('basket.title', { n: b.length })}</h3></div>
+    <p class="mb-3 text-theme-xs text-gray-400">${L('basket.hint')}</p>
+    ${b.length ? `<div class="max-h-[55vh] space-y-2 overflow-y-auto pr-1">${b.map(it => `
+      <div class="flex items-center gap-2 text-theme-xs">
+        <img loading="lazy" src="${frameUrl(it, it.kind === 'photo' ? 0 : it.start)}" alt="" class="h-10 w-16 shrink-0 rounded bg-black object-cover">
+        <div class="min-w-0 flex-1"><div class="truncate font-medium text-gray-700 dark:text-gray-200">${it.missing ? L('basket.missing') : esc(it.name || it.label || it.tape_id)}</div>
+          <div class="text-gray-400">${it.date ? fmtDay(it.date) : L('tl.noDate')}${it.kind === 'photo' ? '' : ` · ${mmss(Math.floor(it.start))}–${mmss(Math.ceil(it.end))}`}</div></div>
+        <button data-basket-del="${it.id}" class="text-gray-400 hover:text-error-500" title="${L('basket.remove')}">✕</button>
+      </div>`).join('')}</div>
+      <div class="mt-3 flex flex-wrap gap-2">
+        <button id="basketExport" class="${BTN_PRIMARY}" ${exp && (exp.status === 'QUEUED' || exp.status === 'RUNNING') ? 'disabled' : ''}>${L('basket.export')}</button>
+        <button id="basketClear" class="${BTN}">${L('basket.clear')}</button>
+      </div>
+      ${exp ? `<div class="mt-2 text-theme-xs ${exp.status === 'ERROR' ? 'text-error-500' : 'text-gray-500'}">${
+        exp.status === 'READY' ? `<a class="${LINK}" href="/api/basket/export/${encodeURIComponent(srch.exportTok)}.zip">${L('basket.download')}</a>`
+        : exp.status === 'ERROR' ? esc(exp.error || '') : L('basket.preparing', { p: Math.round((exp.progress || 0) * 100) })}</div>` : ''}`
+    : `<p class="text-theme-xs text-gray-400">${L('basket.empty')}</p>`}
+  </div>`;
+}
+async function addToBasket(items) {
+  try { await postJSON('/api/basket' + wsQS(), { items }); await loadBasket(); } catch (e) { alert(e.message); }
+}
+$('#searchForm').addEventListener('submit', e => { e.preventDefault(); srch.q = $('#searchQ').value.trim(); runSearch(); });
+$('#searchForm').addEventListener('change', e => {
+  const t = e.target;
+  if (t.dataset.kind) { t.checked ? srch.kinds.add(t.dataset.kind) : srch.kinds.delete(t.dataset.kind); if (!srch.kinds.size) srch.kinds.add(t.dataset.kind); }
+  else if (t.id === 'searchFrom') srch.from = t.value.trim();
+  else if (t.id === 'searchTo') srch.to = t.value.trim();
+  else if (t.id === 'searchSort') srch.sort = t.value;
+  else if (t.id === 'searchAllTags') { srch.allTags = t.checked; renderSearchForm(); return; }
+  else if ((t.id === 'searchWith' || t.id === 'searchWithout') && t.value) {
+    const id = +t.value; (t.id === 'searchWith' ? srch.with : srch.without).add(id);
+    (t.id === 'searchWith' ? srch.without : srch.with).delete(id);
+  } else return;
+  srch.q = $('#searchQ').value.trim(); renderSearchForm(); runSearch();
+});
+$('#searchForm').addEventListener('click', e => {
+  const tg = e.target.closest('[data-tag]');
+  if (tg) {                                   // none -> must have -> must not have -> none
+    const id = tg.dataset.tag;
+    if (srch.inc.has(id)) { srch.inc.delete(id); srch.exc.add(id); } else if (srch.exc.has(id)) srch.exc.delete(id); else srch.inc.add(id);
+  } else if (e.target.id === 'searchTagsClear') { srch.inc.clear(); srch.exc.clear(); }
+  else {
+    const w = e.target.closest('[data-with-del]'), wo = e.target.closest('[data-without-del]');
+    if (w) srch.with.delete(+w.dataset.withDel); else if (wo) srch.without.delete(+wo.dataset.withoutDel); else return;
+  }
+  srch.q = $('#searchQ').value.trim(); renderSearchForm(); runSearch();
+});
+$('#searchView').addEventListener('click', e => {
+  const pl = e.target.closest('[data-res-play]');
+  if (pl) { playResult(srch.res.results[+pl.dataset.resPlay], +pl.dataset.at); return; }
+  const ad = e.target.closest('[data-res-add]');
+  if (ad) {
+    const [i, j] = ad.dataset.resAdd.split(':').map(Number), r = srch.res.results[i], m = r.moments[j] || [0, 0];
+    ad.textContent = '✓'; addToBasket([{ tape_id: r.tape_id, scene_id: r.scene_id, start: m[0], end: m[1] }]); return;
+  }
+  if (e.target.id === 'searchAddAll') {
+    addToBasket(srch.res.results.flatMap(r => (r.kind === 'photo' ? [[0, 0]] : r.moments).map(([a, b]) => ({ tape_id: r.tape_id, scene_id: r.scene_id, start: a, end: b }))));
+  }
+});
+$('#basketView').addEventListener('click', e => {
+  const d = e.target.closest('[data-basket-del]');
+  if (d) { personAction(async () => { await postJSON('/api/basket/remove' + wsQS(), { ids: [+d.dataset.basketDel] }); await loadBasket(); }); return; }
+  if (e.target.id === 'basketClear' && confirm(L('basket.confirmClear'))) personAction(async () => { await postJSON('/api/basket/remove' + wsQS(), { ids: 'all' }); await loadBasket(); });
+  if (e.target.id === 'basketExport') personAction(async () => { const b = await postJSON('/api/basket/export' + wsQS(), {}); srch.exportTok = b.token; await refresh(); renderBasket(); });
+});
+$('#visionBar').addEventListener('click', e => {
+  if (e.target.id === 'visionPause') personAction(async () => {
+    const st = await api('/api/vision/status').catch(() => ({}));
+    await postJSON('/api/vision/pause', { paused: !st.paused }); loadVisionStatus();
+  });
+});
+
+// ---- start (last, so every section above is defined) ----
 refresh().then(() => { if (!location.hash) location.hash = '#pulpit'; applyRoute(); });
 setInterval(refresh, 3000);

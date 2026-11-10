@@ -141,6 +141,18 @@ CREATE TABLE IF NOT EXISTS memories (
     error      TEXT
 );
 CREATE INDEX IF NOT EXISTS memories_person ON memories(person_id);
+-- "Kosz montażowy": moments picked from search results for editing elsewhere
+CREATE TABLE IF NOT EXISTS basket (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace TEXT NOT NULL DEFAULT 'default',
+    tape_id   TEXT NOT NULL,
+    scene_id  TEXT NOT NULL,
+    start     REAL NOT NULL DEFAULT 0,
+    "end"     REAL NOT NULL DEFAULT 0,
+    note      TEXT,
+    added_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS basket_ws ON basket(workspace);
 -- operator corrections the re-clustering must honour: kind 'same' / 'diff' between two tracks
 CREATE TABLE IF NOT EXISTS face_feedback (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -620,6 +632,16 @@ class JobStore:
         return [{"id": r[0], "name": r[1], "hidden": bool(r[2]), "tracks": r[3], "scenes": r[4], "cover": r[5],
                  "group": r[6]} for r in rows]
 
+    def face_scene_people(self) -> dict[tuple[str, str], dict[int, list[int]]]:
+        """{(tape_id, scene_id): {person_id: [seconds on screen]}} for every scene
+        with faces (the search's "with / without" filter)."""
+        out: dict[tuple[str, str], dict[int, list[int]]] = {}
+        with self._lock:
+            rows = self._conn.execute("SELECT tape_id, scene_id, person_id, times FROM face_tracks").fetchall()
+        for tape, scene, pid, times in rows:
+            out.setdefault((tape, scene), {}).setdefault(pid, []).extend(json.loads(times))
+        return out
+
     def face_person(self, person_id: int) -> dict | None:
         with self._lock:
             r = self._conn.execute("SELECT id, workspace, name, hidden, grp FROM face_persons WHERE id=?",
@@ -1002,6 +1024,34 @@ class JobStore:
             rows = self._conn.execute(f"SELECT {', '.join(self._MEM_COLS)} FROM memories WHERE person_id=? "
                                       "ORDER BY id DESC", (person_id,)).fetchall()
         return [self._mem(r) for r in rows]
+
+    # ---- the editing basket ------------------------------------------------------
+    def basket(self, workspace: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute('SELECT id, tape_id, scene_id, start, "end", note, added_at FROM basket '
+                                      "WHERE workspace=? ORDER BY id", (workspace,)).fetchall()
+        return [{"id": r[0], "tape_id": r[1], "scene_id": r[2], "start": r[3], "end": r[4], "note": r[5],
+                 "added_at": r[6]} for r in rows]
+
+    def basket_add(self, workspace: str, tape_id: str, scene_id: str, start: float, end: float) -> int:
+        """Add a moment; one overlapping a moment of the same scene already in the
+        basket widens that one instead. Returns the row id."""
+        with self._lock, self._immediate():
+            for rid, a, b in self._conn.execute('SELECT id, start, "end" FROM basket WHERE workspace=? AND tape_id=? '
+                                                "AND scene_id=?", (workspace, tape_id, scene_id)).fetchall():
+                if start <= b and end >= a:
+                    self._conn.execute('UPDATE basket SET start=?, "end"=? WHERE id=?', (min(a, start), max(b, end), rid))
+                    return rid
+            return int(self._conn.execute('INSERT INTO basket (workspace, tape_id, scene_id, start, "end", added_at) '
+                                          "VALUES (?,?,?,?,?,?)", (workspace, tape_id, scene_id, start, end,
+                                                                   now())).lastrowid)
+
+    def basket_remove(self, workspace: str, ids: list[int] | None) -> int:
+        with self._lock:
+            if ids is None:
+                return self._conn.execute("DELETE FROM basket WHERE workspace=?", (workspace,)).rowcount
+            return sum(self._conn.execute("DELETE FROM basket WHERE workspace=? AND id=?", (workspace, int(i))).rowcount
+                       for i in ids)
 
     def memories_move(self, src: int, dst: int) -> None:
         with self._lock:

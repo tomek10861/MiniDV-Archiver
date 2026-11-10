@@ -481,6 +481,62 @@ class Engine:
             self.store.memory_update(mid, status="ERROR", error=str(exc)[-300:])
             raise
 
+    # ---- the editing basket ("Kosz montażowy", basket.py) ----------------------------
+    BASKET_BUCKET = "_basket"
+
+    def basket(self, workspace: str | None) -> list[dict]:
+        from .vision import catalog
+        ws = workspace or "default"
+        cat = catalog(self.config, self.store)
+        out = []
+        for it in self.store.basket(ws):
+            c = cat.get((it["tape_id"], it["scene_id"])) or {}
+            out.append({**it, "kind": c.get("kind"), "date": c.get("date"), "time": c.get("time"),
+                        "label": c.get("label"), "name": c.get("name"), "media_id": c.get("media_id"),
+                        "scene_index": c.get("scene_index"), "missing": not c})
+        return out
+
+    def basket_add(self, workspace: str | None, items: list[dict]) -> dict:
+        from . import media_library as ml
+        n = 0
+        for it in items or []:
+            tid, sid = it.get("tape_id"), it.get("scene_id")
+            if not (isinstance(tid, str) and isinstance(sid, str)
+                    and (tid == ml.MEDIA_TAPE or re.fullmatch(r"[0-9A-Za-z._-]{1,80}", tid))
+                    and re.fullmatch(r"[0-9A-Za-z._-]{1,80}", sid)):
+                raise ValueError("zła scena")
+            a, b = float(it.get("start") or 0), float(it.get("end") or 0)
+            self.store.basket_add(workspace or "default", tid, sid, max(0.0, min(a, b)), max(a, b))
+            n += 1
+        return {"added": n}
+
+    def basket_remove(self, workspace: str | None, ids: list[int] | None) -> dict:
+        return {"removed": self.store.basket_remove(workspace or "default", ids)}
+
+    def basket_export(self, workspace: str | None) -> dict:
+        ws = workspace or "default"
+        items = self.store.basket(ws)
+        if not items:
+            raise FileNotFoundError("kosz jest pusty")
+        token = "B-" + hashlib.sha1(json.dumps([[i["tape_id"], i["scene_id"], i["start"], i["end"]]
+                                                 for i in items]).encode()).hexdigest()[:12]
+        key = f"{self.BASKET_BUCKET}/{token}"
+        with self.proc_cv:
+            existing = self.store.get_build(key)
+            if existing and (existing["status"] in ("QUEUED", "RUNNING")
+                             or (existing["status"] == "READY" and Path(existing["path"]).exists())):
+                return dict(existing)
+            out = self.config.storage / "tmp" / "share" / f"{self.BASKET_BUCKET}_{token}.zip"
+            build = {"key": key, "token": token, "tape_id": self.BASKET_BUCKET, "mode": "basket",
+                     "title": f"Kosz montażowy ({len(items)})", "workspace": ws, "items": items, "sources": [],
+                     "status": "QUEUED", "path": str(out), "size": None, "error": None}
+            self.store.put_build(build)
+            self.proc_cv.notify_all()
+        return build
+
+    def basket_export_status(self, token: str) -> dict:
+        return self.compress_status(self.BASKET_BUCKET, token)
+
     def media_rescan(self) -> dict:
         self.store.set_meta("media_rescan", "1")
         return {"queued": True}
@@ -983,6 +1039,10 @@ class Engine:
                     self._backfill_metadata_tape(build["sources"][0], force=build["token"].endswith("-F"))
                 elif build["mode"] == "delete":
                     self.delete_scenes(build["tape_id"], build["sources"], _from_build=True)
+                elif build["mode"] == "basket":
+                    from .basket import export_zip
+                    export_zip(self.config, self.store, build.get("workspace") or "default", build.get("items") or [],
+                               out, progress=on_progress)
                 elif build["mode"] == "memory":
                     self._render_memory(build, on_progress)
                 elif build["mode"] == "montage":

@@ -41,7 +41,9 @@ Wszystko działa na Twoim własnym Linuksie, bez chmury.
 - 🧹 **Naprawa**: usuwanie przeplotu, odszumianie, usuwanie bloków, opcjonalnie
   stabilizacja i wyższa rozdzielczość
 - ⬇️ **Udostępnianie**: MP4 ~90 MB na Messengera, jeden film z wielu kaset albo ZIP
-- 🐳 **Jedno `docker compose up`**: cztery małe usługi, interfejs PL / EN
+- 🔍 **Szukanie po tym, co jest na nagraniach**: „staw”, „stary monitor CRT”, „Włochy” — plus kto
+  jest, kiedy i z jakiego źródła; wybrane chwile trafiają do kosza montażowego i eksportu jako klipy
+- 🐳 **Jedno `docker compose up`**: pięć małych usług, interfejs PL / EN
 
 </td>
 </tr>
@@ -53,6 +55,14 @@ Wszystko działa na Twoim własnym Linuksie, bez chmury.
 [Wymagania](#wymagania) · [Konfiguracja](#konfiguracja) · [Użycie](#użycie) ·
 [API](#api) · [FireWire](#kompatybilność-kamer-i-uwagi-o-firewire) ·
 [Rozwój](#rozwój)
+
+## Nowości (listopad 2026)
+
+- 🔍 **[Szukaj](#-szukaj-w-tym-co-jest-na-nagraniach)**: model obraz–tekst przegląda w tle każdą kasetę, film i
+  zdjęcie (osobna usługa z limitem CPU) i taguje, co na nich jest; szukasz słowami albo tagami, po rodzaju
+  źródła, datach i osobach, które muszą albo nie mogą być w kadrze.
+- 🧺 **Kosz montażowy**: odkładasz chwile, z których zmontujesz film; eksport to jeden ZIP z klipami
+  (oryginalna jakość i liczba klatek) i `lista.csv` z pochodzeniem każdego kawałka.
 
 ## Nowości (październik 2026)
 
@@ -169,6 +179,28 @@ Wszystko działa na Twoim własnym Linuksie, bez chmury.
   - Możesz poprawić datę nagrania albo oznaczyć ją jako *nieznaną*, żeby zniknęło z osi.
   - Nagranie otwiera się zatrzymane na klatce z tą osobą, z przewijaniem o ±1 / ±5 klatek (`,` / `.`).
 
+### 🔍 Szukaj w tym, co jest na nagraniach
+
+- **Opisz albo wybierz.** *„staw”*, *„stary monitor CRT i kable”*, *„dzieci na sankach”*, *„Włochy”* — po
+  polsku albo po angielsku. Albo zaznacz tagi (113 w grupach: wydarzenia, miejsca, w domu, przedmioty,
+  pojazdy, zwierzęta, kraje i zabytki) — jedno kliknięcie to *musi być*, drugie *nie może być*.
+- **Zawężanie**: MiniDV / VHS-DVD / filmy / zdjęcia, okres, osoby, które muszą być wszystkie, i osoby,
+  których ma nie być.
+- **Wyniki to chwile**, nie tylko pliki: *▶ 0:42–1:10* odtwarza od tego miejsca, ＋ odkłada do kosza.
+- **Kosz montażowy** trzyma to, co wybrałeś (osobno dla każdego workspace'u). *Eksportuj ZIP* tnie każdą
+  chwilę z sekundą zapasu z obu stron, w rozdzielczości i liczbie klatek źródła, dokłada zdjęcia w
+  oryginale i zapisuje `lista.csv` (plik, data, źródło, od/do, osoby, tagi) dla programu do montażu.
+- **Jak to działa.** SigLIP2 (ViT-B/16, wielojęzyczny, ONNX, ~1,5 GB, pobierany raz i sprawdzany sumą
+  kontrolną) działa w usłudze `vision` na procesorze. Co 2 s filmu ogląda klatkę, ale analizuje ją tylko
+  przy zmianie obrazu; czarne, prześwietlone i płaskie klatki pomija. Wektory i tagi są w
+  `state/vision.db`. Zmiana listy tagów przelicza tagi z zapisanych wektorów, bez ponownego dekodowania.
+- **Nie przeszkadza.** Kontener ma twardy limit (`MINIDV_VISION_CPUS`, domyślnie 1,5 rdzenia, i
+  `MINIDV_VISION_MEM`), działa z najniższym priorytetem, czeka, gdy kaseta się zgrywa albo przetwarza, i
+  można go wstrzymać z zakładki *Szukaj*. Widać go w *Zadaniach* z postępem.
+- **Ograniczenia.** Dobrze rozpoznaje przedmioty, sceny, krajobrazy i znane zabytki; drobne szczegóły
+  gorzej, a kraju bez niczego charakterystycznego w kadrze wcale (kasety nie mają GPS-u). Wyniki są
+  ułożone od najlepiej pasujących.
+
 ### 📷 Zdjęcia i filmy z aparatów i telefonów
 
 - **Wskaż folder albo udział z NAS-a tylko do odczytu** (`MINIDV_MEDIA_DIRS`), a zakładka *Zdjęcia i filmy* pokaże go jako albumy, po jednym na katalog.
@@ -204,10 +236,11 @@ Wszystko działa na Twoim własnym Linuksie, bez chmury.
 
 ### 🐳 Utrzymanie
 
-- **Cztery kontenery albo jeden proces.**
+- **Pięć kontenerów albo jeden proces.**
   - **`grabber`** obsługuje FireWire.
   - **`converter`** robi przetwarzanie, re-enkodowanie i skan twarzy.
   - **`api`** serwuje HTTP/JSON.
+  - **`vision`** przegląda obrazy dla *Szukaj*, z limitem CPU.
   - **`ui`** to nginx z interfejsem.
 
   Koordynują się przez mały magazyn zadań SQLite, więc api można zrestartować, a
@@ -231,13 +264,14 @@ docker compose up -d --build
 # UI pod http://<host>:8088
 ```
 
-Cztery kontenery współdzielą `/srv/minidv` (i jego `state/jobs.db`):
+Pięć kontenerów współdzieli `/srv/minidv` (i jego `state/jobs.db`):
 
 | usługa | kontener | robi |
 |---|---|---|
 | `grabber` | `privileged`, `/dev` + `/sys` hosta | trzyma FireWire, uruchamia `dvgrab` |
 | `converter` | — | podział na sceny, zstd + weryfikacja bajtowa, proxy, re-enkodowanie, sondy jakości, rozpoznawanie twarzy |
 | `api` | `expose: 8080` (niepublikowany) | HTTP/JSON; czyta system plików + magazyn zadań |
+| `vision` | `cpus: 1.5`, `mem_limit: 4g` | *Szukaj*: analizuje klatki w tle, odpowiada na wyszukiwania (`api` pyta go na `:8091`) |
 | `ui` | `nginx`, publikuje `:8088` | serwuje `frontend/`, przekazuje `/api` → `api:8080` |
 
 Każdą usługę można zrestartować bez ruszania pozostałych
@@ -308,6 +342,10 @@ Wszystko ustawiasz zmiennymi środowiskowymi: w `.env` przy Dockerze albo w
 | `MINIDV_FACES_THREADS` | `1` | wątki CPU dla skanu twarzy (`2` ≈ dwa razy szybciej) |
 | `MINIDV_FACES_CLUSTER` | `0.24` | jak chętnie łączyć twarze (niżej = mniej rozbitych osób, więcej pomieszanych) |
 | `MINIDV_MEDIA_DIRS` | *(puste)* | foldery ze zdjęciami i filmami (tylko do odczytu) dla zakładki *Zdjęcia i filmy*, tak jak widzą je kontenery |
+| `MINIDV_VISION_CPUS` / `MINIDV_VISION_MEM` | `1.5` / `4g` | ile maszyny może najwyżej zająć analiza dla *Szukaj* |
+| `MINIDV_VISION_THREADS` | `2` | wątki onnx na klatkę w ramach tego limitu |
+| `MINIDV_VISION_STEP` / `MINIDV_VISION_MAX_GAP` | `2` / `10` | co ile sekund oglądana jest klatka / najrzadziej tyle sekund między analizami, nawet bez zmiany obrazu |
+| `MINIDV_VISION_TAG` | `0.105` | jak bardzo klatka musi pasować do opisu tagu, żeby go dostać |
 | `MINIDV_DVD_CRF` / `MINIDV_DVD_PRESET` | `17` / `slow` | kopie DVD (przegrane VHS): 50p — każdy półobraz to osobna klatka, nic nie jest dorabiane — natywne 720×576 z zachowanym kształtem piksela. Istniejące kopie są przekodowywane tylko na żądanie: `POST /api/media/<id>/reencode` (części i czasy twarzy zostają) |
 | `MINIDV_INDEX_INTERVAL` | `300` | co ile sekund odświeżać indeks kaset/scen w tle |
 | `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | nasłuch HTTP api (wewnątrz kontenera) |

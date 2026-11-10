@@ -38,7 +38,9 @@ involved.
   face recognition
 - 🧹 **Restore**: deinterlace, denoise, deblock, plus optional stabilisation and upscaling
 - ⬇️ **Share**: a ~90 MB Messenger-ready MP4, a single video joined from many tapes, or a ZIP
-- 🐳 **One `docker compose up`**: four small services, bilingual web UI (EN / PL)
+- 🔍 **Search what's in the footage**: "a pond", "an old CRT monitor", "Italy" — plus who's in it,
+  when and from what; collect the moments in an editing basket and export them as clips
+- 🐳 **One `docker compose up`**: five small services, bilingual web UI (EN / PL)
 
 </td>
 </tr>
@@ -50,6 +52,14 @@ involved.
 [Requirements](#requirements) · [Configuration](#configuration) · [Usage](#usage) ·
 [API](#api) · [FireWire notes](#camera-compatibility--firewire-notes) ·
 [Development](#development)
+
+## What's new (November 2026)
+
+- 🔍 **[Search](#-search-whats-in-the-footage)**: an image-text model looks through every tape, video and photo in
+  the background (its own CPU-capped service) and tags what's there; search by words or tags, kind of
+  source, dates, and people who must or mustn't be in it.
+- 🧺 **Editing basket**: keep the moments you'll cut a film from; export them as one ZIP of clips
+  (original quality and frame rate) with a `lista.csv` saying where each came from.
 
 ## What's new (October 2026)
 
@@ -161,6 +171,28 @@ involved.
   - every film is a different pick; keep several, swap the music, download or delete them.
   - Recordings open paused on the frame where the person appears, with ±1 / ±5 frame stepping (`,` / `.`).
 
+### 🔍 Search what's in the footage
+
+- **Describe it, or pick it.** *"a pond"*, *"an old CRT monitor and cables"*, *"children sledging"*, *"Italy"*,
+  in English or Polish. Or tick tags (113, grouped: events, places, at home, things, vehicles, animals,
+  countries & landmarks) — a click means *must have*, another *must not have*.
+- **Narrow it down**: MiniDV / VHS-DVD / videos / photos, a period, people who must all be there, people who
+  mustn't.
+- **Results are moments**, not just files: *▶ 0:42–1:10* plays from there; ＋ puts it in the basket.
+- **The editing basket** keeps what you picked (per workspace). *Export ZIP* cuts every moment a second wider
+  on each side at its source's own size and frame rate, adds photos as the originals, and writes a
+  `lista.csv` (file, date, source, from/to, people, tags) for your editor.
+- **How it works.** SigLIP2 (ViT-B/16, multilingual, ONNX, ~1.5 GB, downloaded once and checksum-checked)
+  runs in the `vision` service on the CPU. Every 2 s of video it looks at a frame, but only analyses it
+  when the picture changed; black, blown-out and flat frames are skipped. Vectors and tags live in
+  `state/vision.db`. Changing the tag list re-tags from the stored vectors without decoding anything.
+- **Background-friendly.** The container is capped (`MINIDV_VISION_CPUS`, default 1.5 cores, and
+  `MINIDV_VISION_MEM`), runs at idle priority, waits while a tape is captured or processed, and can be
+  paused from the *Search* tab. It shows in *Tasks* with its progress.
+- **Limits.** It recognises things, scenes and landscapes well, and famous landmarks; fine detail less so,
+  and a country without anything characteristic in the picture not at all (tapes carry no GPS). Results
+  are ranked by how well they match, so the best come first.
+
 ### 📷 Photos & videos from cameras and phones
 
 - **Point it at a read-only folder or NAS share** (`MINIDV_MEDIA_DIRS`), and a *Photos & videos* tab shows it as albums (one per folder).
@@ -196,10 +228,11 @@ involved.
 
 ### 🐳 Operations
 
-- **Four containers, or one process.**
+- **Five containers, or one process.**
   - **`grabber`** handles FireWire.
   - **`converter`** handles processing, re-encodes and the face scan.
   - **`api`** serves HTTP/JSON.
+  - **`vision`** looks through the pictures for *Search*, CPU-capped.
   - **`ui`** is an nginx front end.
 
   They coordinate through a small SQLite job store, so you can restart the api or move
@@ -221,13 +254,14 @@ docker compose up -d --build
 # UI on http://<host>:8088
 ```
 
-Four containers share `/srv/minidv` (and its `state/jobs.db`):
+Five containers share `/srv/minidv` (and its `state/jobs.db`):
 
 | service | container | does |
 |---|---|---|
 | `grabber` | `privileged`, host `/dev` + `/sys` | owns FireWire, runs `dvgrab` |
 | `converter` | — | scene split, zstd + byte-verify, proxies, re-encodes, quality scans, face recognition |
 | `api` | `expose: 8080` (not published) | HTTP/JSON; reads the filesystem + job store |
+| `vision` | `cpus: 1.5`, `mem_limit: 4g` | *Search*: analyses frames in the background, answers searches (`api` asks it at `:8091`) |
 | `ui` | `nginx`, publishes `:8088` | serves `frontend/`, proxies `/api` → `api:8080` |
 
 You can restart any one service without touching the others
@@ -300,6 +334,10 @@ with defaults. The ones you're most likely to touch:
 | `MINIDV_FACES_THREADS` | `1` | CPU threads for the face scan (`2` is about twice as fast) |
 | `MINIDV_FACES_CLUSTER` | `0.24` | how readily faces are grouped (lower = fewer split people, more mixed ones) |
 | `MINIDV_MEDIA_DIRS` | *(empty)* | read-only photo/video folders for the *Photos & videos* tab (as the containers see them) |
+| `MINIDV_VISION_CPUS` / `MINIDV_VISION_MEM` | `1.5` / `4g` | how much of the machine the *Search* analysis may take at most |
+| `MINIDV_VISION_THREADS` | `2` | onnx threads per frame inside that cap |
+| `MINIDV_VISION_STEP` / `MINIDV_VISION_MAX_GAP` | `2` / `10` | seconds between frames looked at / analysed at least this often even if the picture doesn't change |
+| `MINIDV_VISION_TAG` | `0.105` | how similar a frame must be to a tag's description to get it |
 | `MINIDV_DVD_CRF` / `MINIDV_DVD_PRESET` | `17` / `slow` | DVD (VHS transfer) copies: 50p — one frame per field, nothing interpolated — native 720×576 with its pixel aspect. Existing copies are re-encoded only on request: `POST /api/media/<id>/reencode` (parts and face times are kept) |
 | `MINIDV_INDEX_INTERVAL` | `300` | seconds between background refreshes of the tape/scene index |
 | `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | api HTTP listener (inside its container) |
@@ -370,7 +408,9 @@ call until they report `QUEUED` → `RUNNING` → `READY`.
 `/api/media/{id}/thumb.jpg|view|video|original`. `/api/timeline*` also takes `?source=dv|media` ·
 `/api/persons/{id}/memories` (films about a person) · `/api/memories/{id}/file` (`?dl=1` downloads) ·
 `/api/memories/{id}/poster` · `/api/music` (built-in, own and fetched tracks, by mood) ·
-`/api/music/search?q=…` (free music on Openverse) · `/api/music/{id}/audio` (preview).
+`/api/music/search?q=…` (free music on Openverse) · `/api/music/{id}/audio` (preview) ·
+`/api/vision/status` · `/api/vision/tags` · `/api/vision/frame/{tape}/{scene}/{t}.jpg` ·
+`/api/basket` · `/api/basket/export/{token}.zip`.
 
 **`POST`**
 `/api/capture/start` `{tape_id?, rewind?, duration?, manual_transport?, timezone?, workspace?}`:
@@ -400,7 +440,10 @@ joins scenes from several tapes, in order ·
 `/api/media/rescan` · `/api/media/{id}/date` `{date, whole?}` · `/api/media/album/date` `{album, date}` ·
 `/api/media/{id}/reencode` (a DVD copy again with the current settings; parts and face times are kept) ·
 `/api/persons/{id}/memories` `{length: short|medium|long, sources?, date_from?, date_to?, music?: <track id> | "auto:<mood>" | null, lang?}` ·
-`/api/memories/{id}/music` `{music}` (same moments, other music).
+`/api/memories/{id}/music` `{music}` (same moments, other music) ·
+`/api/vision/search` `{q?, tags?, not_tags?, kinds?: [dv|dvd|video|photo], date_from?, date_to?, with?: [person ids], without?, sort?: score|date}` ·
+`/api/vision/pause` `{paused}` · `/api/basket` `{items: [{tape_id, scene_id, start, end}]}` ·
+`/api/basket/remove` `{ids: […] | "all"}` · `/api/basket/export` (a ZIP of clips + `lista.csv`).
 
 **`DELETE`**
 `/api/tapes/{id}` · `/api/memories/{id}` · `/api/jobs/{tape_id}` (clears a finished or errored job row; refuses

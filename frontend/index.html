@@ -48,6 +48,9 @@
         <li><a href="#osoby" @click="sidebarToggle=false" class="navlink menu-item group menu-item-inactive">
           <svg class="menu-item-icon-inactive" width="24" height="24" viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M9 3.25a4.25 4.25 0 100 8.5 4.25 4.25 0 000-8.5zM6.25 7.5a2.75 2.75 0 115.5 0 2.75 2.75 0 01-5.5 0zM2.25 18.5A5.25 5.25 0 017.5 13.25h3a5.25 5.25 0 015.25 5.25v1.5a.75.75 0 01-1.5 0v-1.5a3.75 3.75 0 00-3.75-3.75h-3a3.75 3.75 0 00-3.75 3.75v1.5a.75.75 0 01-1.5 0v-1.5zM15.5 4a.75.75 0 01.75-.75 3.75 3.75 0 010 7.5.75.75 0 010-1.5 2.25 2.25 0 000-4.5.75.75 0 01-.75-.75zM17.25 14a.75.75 0 01.75-.75A3.75 3.75 0 0121.75 17v3a.75.75 0 01-1.5 0v-3A2.25 2.25 0 0018 14.75a.75.75 0 01-.75-.75z"/></svg>
           <span class="menu-item-text" data-i18n="sec.osoby">Osoby</span></a></li>
+        <li><a href="#szukaj" @click="sidebarToggle=false" class="navlink menu-item group menu-item-inactive">
+          <svg class="menu-item-icon-inactive" width="24" height="24" viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M10.5 3.25a7.25 7.25 0 104.55 12.9l4.4 4.4a.75.75 0 101.06-1.06l-4.4-4.4A7.25 7.25 0 0010.5 3.25zM4.75 10.5a5.75 5.75 0 1111.5 0 5.75 5.75 0 01-11.5 0z"/></svg>
+          <span class="menu-item-text" data-i18n="sec.szukaj">Szukaj</span><span id="navBasket" class="menu-dropdown-badge menu-dropdown-badge-inactive ml-auto"></span></a></li>
         <li><a href="#zadania" @click="sidebarToggle=false" class="navlink menu-item group menu-item-inactive">
           <svg class="menu-item-icon-inactive" width="24" height="24" viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 8.25a3.75 3.75 0 100 7.5 3.75 3.75 0 000-7.5zM9.75 12a2.25 2.25 0 114.5 0 2.25 2.25 0 01-4.5 0z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M11.98 1.25c-.86 0-1.57 0-2.15.05-.6.05-1.13.15-1.62.42a3.75 3.75 0 00-1.44 1.44c-.24.42-.35.88-.4 1.4l-.02.16-.14.08-.14-.08a3.75 3.75 0 00-5.12 1.37c-.28.48-.38 1.02-.43 1.62-.05.58-.05 1.29-.05 2.15v.03c0 .86 0 1.57.05 2.15.05.6.15 1.14.43 1.62a3.75 3.75 0 001.37 1.37l.14.08.14.08.02.16c.05.52.16.98.4 1.4a3.75 3.75 0 001.44 1.44c.49.27 1.02.37 1.62.42.58.05 1.29.05 2.15.05h.04c.86 0 1.57 0 2.15-.05.6-.05 1.13-.15 1.62-.42a3.75 3.75 0 001.44-1.44c.24-.42.35-.88.4-1.4l.02-.16.14-.08.14.08a3.75 3.75 0 005.12-1.37c.28-.48.38-1.02.43-1.62.05-.58.05-1.29.05-2.15v-.04c0-.85 0-1.56-.05-2.14-.05-.6-.15-1.14-.43-1.62a3.75 3.75 0 00-1.37-1.37l-.14-.08-.14-.08-.02-.16a3.86 3.86 0 00-.4-1.4 3.75 3.75 0 00-1.44-1.44c-.49-.27-1.02-.37-1.62-.42-.58-.05-1.29-.05-2.15-.05h-.04z"/></svg>
           <span class="menu-item-text" data-i18n="sec.zadania">Zadania</span><span id="navJobs" class="menu-dropdown-badge menu-dropdown-badge-inactive ml-auto"></span></a></li>
@@ -284,6 +287,22 @@
             <div id="mediaBar" class="mt-3"></div>
           </div>
           <div id="mediaView" class="p-5"><p class="text-theme-sm text-gray-400" data-i18n="loading">Wczytywanie…</p></div>
+        </section>
+
+        <!-- Szukaj: what's in the pictures (vision service) + the editing basket -->
+        <section id="szukaj" class="hidden scroll-mt-24 rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-white/[0.03]">
+          <div class="border-b border-gray-200 px-5 py-4 dark:border-gray-800">
+            <h2 class="text-base font-semibold text-gray-800 dark:text-white/90" data-i18n="search.title">Szukaj w nagraniach</h2>
+            <p class="mt-0.5 text-theme-xs text-gray-400" data-i18n="search.scent">Co jest na nagraniach i zdjęciach — rozpoznawane na tym komputerze, w tle.</p>
+            <div id="visionBar" class="mt-3"></div>
+          </div>
+          <div class="grid gap-5 p-5 xl:grid-cols-[1fr_340px]">
+            <div class="min-w-0">
+              <div id="searchForm"></div>
+              <div id="searchView" class="mt-5"></div>
+            </div>
+            <aside id="basketView" class="min-w-0"></aside>
+          </div>
         </section>
 
         <!-- Duplikaty -->

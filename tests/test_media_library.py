@@ -177,7 +177,7 @@ def test_dvd_title_set_is_one_video_named_and_dated_by_its_folder(tmp_path, monk
     ts.mkdir(parents=True)
     vob = tmp_path / "title.vob"
     subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=720x576:rate=25", "-f", "lavfi",
-                    "-i", "sine", "-t", "4", "-c:v", "mpeg2video", "-flags", "+ilme+ildct", "-top", "1",
+                    "-i", "sine", "-t", "4", "-vf", "setfield=tff", "-c:v", "mpeg2video", "-flags", "+ilme+ildct",
                     "-aspect", "4:3", "-c:a", "ac3", "-f", "vob", str(vob)], check=True)   # interlaced, like VHS
     data = vob.read_bytes()
     (ts / "VTS_01_1.VOB").write_bytes(data[: len(data) // 2])       # DVDs split a title at 1 GB
@@ -313,9 +313,9 @@ def _vob_of_colours(path, colours, seconds_each=1.0):
     """An interlaced 4:3 MPEG-2 programme stream, one solid colour per second, with a tone."""
     inputs = [x for c in colours for x in ("-f", "lavfi", "-i", f"color=c={c}:s=720x576:r=25:d={seconds_each}")]
     subprocess.run(["ffmpeg", "-v", "error", "-y", *inputs, "-f", "lavfi", "-i", "sine=frequency=440",
-                    "-filter_complex", "".join(f"[{i}]" for i in range(len(colours))) + f"concat=n={len(colours)}:v=1[v]",
+                    "-filter_complex", "".join(f"[{i}]" for i in range(len(colours))) + f"concat=n={len(colours)}:v=1,setfield=tff[v]",
                     "-map", "[v]", "-map", f"{len(colours)}:a", "-t", str(len(colours) * seconds_each),
-                    "-c:v", "mpeg2video", "-b:v", "4M", "-flags", "+ilme+ildct", "-top", "1", "-aspect", "4:3",
+                    "-c:v", "mpeg2video", "-b:v", "4M", "-flags", "+ilme+ildct", "-aspect", "4:3",
                     "-c:a", "ac3", "-f", "vob", str(path)], check=True)
 
 

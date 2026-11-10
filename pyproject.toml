@@ -20,6 +20,8 @@ dependencies = []   # stdlib only; needs the external tools listed in the README
 dev = ["pytest>=7"]
 # face recognition ("Osoby"); the scanner skips itself cleanly without these
 faces = ["opencv-python-headless>=4.8", "numpy>=1.24", "onnxruntime>=1.17", "pillow>=10", "pillow-heif>=0.16"]
+# "Szukaj" (vision service): the image-text model's tokenizer, on top of the faces extra
+vision = ["minidv-archiver[faces]", "tokenizers>=0.20"]
 
 [project.urls]
 Repository = "https://github.com/tomek10861/MiniDV-Archiver"
