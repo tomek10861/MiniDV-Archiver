@@ -1072,6 +1072,13 @@ class JobStore:
         return self._media_rows("WHERE status='ready' AND kind='video' AND fps IS NULL "
                                 "AND (playable=1 OR proxy=1) ORDER BY id LIMIT ?", (limit,))
 
+    def media_mark_reproxy_all(self) -> int:
+        """Every video with a browser copy (not the parts of split films: they're
+        cut again from their film's new copy)."""
+        with self._lock:
+            return self._conn.execute("UPDATE media SET reproxy=1 WHERE kind='video' AND parent_id IS NULL "
+                                      "AND proxy=1 AND status='ready'").rowcount
+
     def media_reproxy_pending(self) -> list[dict]:
         return self._media_rows("WHERE reproxy=1 AND status='ready' AND parent_id IS NULL ORDER BY id")
 

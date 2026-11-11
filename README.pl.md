@@ -61,6 +61,8 @@ Wszystko działa na Twoim własnym Linuksie, bez chmury.
 - 🔍 **[Szukaj](#-szukaj-w-tym-co-jest-na-nagraniach)**: model obraz–tekst przegląda w tle każdą kasetę, film i
   zdjęcie (osobna usługa z limitem CPU) i taguje, co na nich jest; szukasz słowami albo tagami, po rodzaju
   źródła, datach i osobach, które muszą albo nie mogą być w kadrze.
+- 🎞️ **Każdy film z kamery i telefonu dostaje MP4 w pełnej jakości** jak MiniDV (MPG / MTS z kamer w 50p,
+  natywny rozmiar), do pobrania przyciskiem **⬇ MP4** obok nietkniętego oryginału.
 - 🧺 **Kosz montażowy**: odkładasz chwile, z których zmontujesz film; eksport to jeden ZIP z klipami
   (oryginalna jakość i liczba klatek) i `lista.csv` z pochodzeniem każdego kawałka.
 
@@ -217,7 +219,7 @@ Wszystko działa na Twoim własnym Linuksie, bez chmury.
 - **Płyty DVD** (folder `VIDEO_TS` albo przegrane jak leci pliki VOB) to jeden film na tytuł, z datą z nazwy folderu. Kopia do przeglądarki jest w **50p**: każdy półobraz przeplecionego obrazu z VHS staje się klatką, nic nie jest dorabiane. Rozmiar natywny 720×576 z kształtem 4:3, x264 CRF 17. Menu płyty nie są indeksowane.
 - **Długie filmy są dzielone na sceny** (45 s – 5 min, cięte przy zmianie obrazu), żeby otwierały się od razu; cały oryginał można dalej pobrać.
 - **Zrzuty ekranu, ikony i foldery programów są pomijane.**
-- **Oglądanie w przeglądarce**: zdjęcia HEIC dostają kopię JPEG do wyświetlania, a filmy, których przeglądarka nie odtworzy (MTS, AVI, HEVC…), dostają kopię H.264. Wszystko trafia do `<storage>/media`, a oryginały pozostają nietknięte.
+- **Oglądanie w przeglądarce**: zdjęcia HEIC dostają kopię JPEG do wyświetlania. Filmy, których przeglądarka nie odtworzy (MPG / MTS / M2TS z kamer, AVI, 3GP, WMV, HEVC…), dostają kopię MP4 robioną jak dla MiniDV: nagranie z przeplotem dostaje osobną klatkę na każdy półobraz (50p), progresywne zachowuje swoją liczbę klatek, natywny rozmiar i kształt piksela, x264 CRF 17. **⬇ MP4** pobiera tę kopię z nazwą oryginału, **⬇ Oryginał** plik taki, jaki jest. Wszystko trafia do `<storage>/media`, a oryginały pozostają nietknięte.
 - **Na osi czasu razem z kasetami**, z ptaszkiem *Tylko MiniDV*.
 - **To samo rozpoznawanie twarzy**, więc na stronie osoby są razem jej kasety, zdjęcia i filmy.
 - **Indeksowanie przyrostowe co kilka minut.** Pliki w trakcie kopiowania są pomijane, a chwilowo niedostępny udział niczego nie kasuje.
@@ -354,7 +356,7 @@ Wszystko ustawiasz zmiennymi środowiskowymi: w `.env` przy Dockerze albo w
 | `MINIDV_VISION_STEP` / `MINIDV_VISION_MAX_GAP` | `2` / `10` | co ile sekund oglądana jest klatka / najrzadziej tyle sekund między analizami, nawet bez zmiany obrazu |
 | `MINIDV_VISION_TAG` | `0.105` | jak bardzo klatka musi pasować do opisu tagu, żeby go dostać |
 | `MINIDV_VISION_TAG_STRONG` / `MINIDV_VISION_TAG_MARGIN` / `MINIDV_VISION_EVENT_SUPPORT` | `0.125` / `0.005` / `2` | etap 2: tak mocne trafienie wystarcza samo / o ile musi wygrać z rywalami / ile klatek tego samego wydarzenia musi potwierdzić słabsze |
-| `MINIDV_DVD_CRF` / `MINIDV_DVD_PRESET` | `17` / `slow` | kopie DVD (przegrane VHS): 50p — każdy półobraz to osobna klatka, nic nie jest dorabiane — natywne 720×576 z zachowanym kształtem piksela. Istniejące kopie są przekodowywane tylko na żądanie: `POST /api/media/<id>/reencode` (części i czasy twarzy zostają) |
+| `MINIDV_VIDEO_CRF` / `MINIDV_VIDEO_PRESET` / `MINIDV_VIDEO_PRESET_HD` | `17` / `slow` / `medium` | kopie MP4 filmów z aparatów, telefonów i płyt DVD (starsze nazwy `MINIDV_DVD_CRF` / `_PRESET` dalej działają). Istniejące kopie są przerabiane tylko na żądanie: `POST /api/media/<id>/reencode` dla jednej, `POST /api/media/reencode-all` dla wszystkich (części i czasy twarzy zostają) |
 | `MINIDV_INDEX_INTERVAL` | `300` | co ile sekund odświeżać indeks kaset/scen w tle |
 | `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | nasłuch HTTP api (wewnątrz kontenera) |
 

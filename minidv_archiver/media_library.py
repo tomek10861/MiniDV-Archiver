@@ -434,27 +434,37 @@ def _ffmpeg_with_progress(cmd: list[str], duration: float, on_frac) -> tuple[int
     return proc.wait(), err[-300:]
 
 
-def dvd_interlaced(src: str) -> bool:
-    """A DVD title is interlaced unless its stream says progressive (a film DVD).
-    VHS transfers are always interlaced; measured on the 1987 wedding disc every
-    frame is TFF with distinct motion in each field."""
-    from .media import ffprobe
+_INTERLACED = ("tt", "bb", "tb", "bt")
+
+
+def video_shape(src: str) -> dict:
+    """What a browser copy of this video must keep: whether it's interlaced (field
+    order in the stream, else the first frames' flags — a DVD title or a camcorder
+    MPG / MTS is; a phone or a photo camera isn't), the frame rate it comes out
+    at (one frame per field when interlaced) and whether it's HD."""
+    from .media import ffprobe, first_frame_interlaced
     v = next((s for s in ffprobe(src).get("streams", []) if s.get("codec_type") == "video"), {})
-    return v.get("field_order") not in ("progressive",)
+    fo = v.get("field_order")
+    interlaced = fo in _INTERLACED or (fo in (None, "unknown") and first_frame_interlaced(src)[0])
+    fps = (stream_fps(v) or 25.0) * (2 if interlaced else 1)
+    w, h = int(v.get("width") or 0), int(v.get("height") or 0)
+    return {"interlaced": interlaced, "fps": fps, "hd": w * h > 720 * 576}
 
 
-def dvd_proxy_cmd(src: str, out: Path, *, interlaced: bool, crf: int, preset: str,
-                  keyframes: list[float] = ()) -> list[str]:
-    """DVD (VHS/camcorder transfer) -> browser copy without throwing anything away:
-    every field becomes a frame (bwdif send_field: 50 real motion samples a second,
-    nothing interpolated in time; field order read from each frame's flags), the
-    native 720x576 is kept with its pixel aspect (players show 4:3 / 16:9, one
-    resampling step less), no denoise / sharpening. Keyframes at least every 2 s
-    (plus ``keyframes``) so lossless clip cuts land close to where they should."""
-    vf = ("bwdif=mode=send_field:parity=auto:deint=interlaced," if interlaced else "") + "format=yuv420p"
+def proxy_cmd(config, src: str, out: Path, shape: dict, keyframes: list[float] = ()) -> list[str]:
+    """The browser copy, made like the MiniDV ones: every field a frame when
+    interlaced (bwdif send_field, field order from each frame's flags), the
+    source's own frame rate and size, its pixel aspect kept (players show 4:3 /
+    16:9 right, one resampling less), no denoise / sharpening, x264 CRF
+    media_video_crf. A keyframe at least every 2 s (plus ``keyframes``) so lossless
+    clip cuts land close to where they should."""
+    vf = ("bwdif=mode=send_field:parity=auto:deint=interlaced," if shape["interlaced"] else "") + \
+        "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p"
     kf = ["-force_key_frames", ",".join(f"{t:.3f}" for t in keyframes)] if keyframes else []
+    preset = config.media_video_preset_hd if shape["hd"] else config.media_video_preset
     return ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", src, "-map", "0:v:0", "-map", "0:a:0?",
-            "-vf", vf, "-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-g", "100", *kf,
+            "-vf", vf, "-fps_mode", "passthrough", "-c:v", "libx264", "-preset", preset,
+            "-crf", str(config.media_video_crf), "-g", str(max(1, round(2 * shape["fps"]))), *kf,
             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)]
 
 
@@ -474,18 +484,12 @@ def build_proxies(config, store, check=lambda: None, busy=lambda: False, budget_
         out = derived(config, "proxy", row["id"], ".mp4")
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(".part.mp4")
-        if is_dvd(row):
-            cmd = dvd_proxy_cmd(source(row), tmp, interlaced=dvd_interlaced(source(row)),
-                                crf=config.media_dvd_crf, preset=config.media_dvd_preset)
-        else:
-            # bwdif only touches frames flagged interlaced (MTS, AVI); the sar step makes
-            # anamorphic pixels square so 4:3 / 16:9 come out right
-            cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", source(row), "-map", "0:v:0", "-map", "0:a:0?",
-                   "-vf", "bwdif=mode=send_frame:deint=interlaced,"
-                          "scale='trunc(iw*sar/2)*2':ih,setsar=1,"
-                          "scale='min(1280,iw)':-2,format=yuv420p", "-c:v", "libx264",
-                   "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-b:a", "128k",
-                   "-movflags", "+faststart", str(tmp)]
+        try:
+            cmd = proxy_cmd(config, source(row), tmp, video_shape(source(row)))
+        except Exception as exc:  # noqa: BLE001 - unreadable: mark it and go on
+            store.media_update(row["id"], proxy=-1, error=str(exc)[:300])
+            done += 1
+            continue
         rc, err = _ffmpeg_with_progress(
             _nice() + cmd, row.get("duration") or 0,
             lambda f, i=i, n=row["name"]: report("convert", i, len(rows), n, f))
@@ -531,9 +535,10 @@ def _kf_at(keyframes: list[float], t: float) -> float:
     return max((k for k in keyframes if k <= t + 0.005), default=0.0)
 
 
-def reencode_dvd(config, store, row: dict, report=_no_report, check=lambda: None) -> bool:
-    """Re-encode one DVD title's copy with today's settings (dvd_proxy_cmd), on
-    explicit request only (``reproxy``). The film's parts keep their ids, bounds and
+def reencode_video(config, store, row: dict, report=_no_report, check=lambda: None, i: int = 0,
+                   total: int = 1) -> bool:
+    """Re-encode one video's browser copy with today's settings (proxy_cmd), on
+    request only (``reproxy``). A split film's parts keep their ids, bounds and
     names; each new part starts on a keyframe forced at its exact bound, and every
     face time found in a part moves by how much earlier the old part file began
     (old cuts started on the keyframe before the bound), so "jump to the face"
@@ -542,19 +547,16 @@ def reencode_dvd(config, store, row: dict, report=_no_report, check=lambda: None
     proxy = derived(config, "proxy", row["id"], ".mp4")
     parts = store.media_children(row["id"]) if row.get("split") == 1 else []
     src = source(row)
-    interlaced = dvd_interlaced(src)
-    from .media import ffprobe
-    v = next((s for s in ffprobe(src).get("streams", []) if s.get("codec_type") == "video"), {})
-    rate = (stream_fps(v) or 25.0) * (2 if interlaced else 1)
+    shape = video_shape(src)
+    rate = shape["fps"]
     # the bound on a frame of the new copy, so the forced keyframe is exactly there
     starts = [int(p["clip_start"] * rate + 1e-6) / rate for p in parts]
     tmp = proxy.with_suffix(".next.mp4")
     made: list[Path] = [tmp]
     try:
         rc, err = _ffmpeg_with_progress(
-            _nice() + dvd_proxy_cmd(src, tmp, interlaced=interlaced, crf=config.media_dvd_crf,
-                                    preset=config.media_dvd_preset, keyframes=[t for t in starts if t > 0]),
-            row.get("duration") or 0, lambda f: report("convert", 0, 1, row["name"], f))
+            _nice() + proxy_cmd(config, src, tmp, shape, keyframes=[t for t in starts if t > 0]),
+            row.get("duration") or 0, lambda f: report("reencode", i, total, row["name"], f))
         if rc or not tmp.exists():
             raise RuntimeError(err or "ffmpeg")
         check()

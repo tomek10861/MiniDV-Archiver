@@ -351,6 +351,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(ENGINE.create_memory(int(mp[2]), self.body()), 202)
             if len(mp) == 4 and mp[:2] == ["api", "memories"] and mp[2].isdigit() and mp[3] == "music":
                 return self.json(ENGINE.memory_music(int(mp[2]), self.body().get("music")), 202)
+            if path == "/api/media/reencode-all":
+                return self.json(ENGINE.media_reproxy_all(), 202)
             if len(mp) == 4 and mp[:2] == ["api", "media"] and mp[2].isdigit() and mp[3] == "reencode":
                 return self.json(ENGINE.media_request_reproxy(int(mp[2])), 202)
             if path == "/api/faces/scan":
@@ -460,7 +462,10 @@ class Handler(BaseHTTPRequestHandler):
         if target is None or not target.is_file() or (
                 target.is_relative_to(CONFIG.storage) is False and not inside(target)):
             return self.json({"error": "not found"}, 404)
-        return self.send_file(target, inline=what != "original" or "dl=1" not in self.path)
+        dl = "dl=1" in self.path
+        if what == "video" and dl:                     # the browser copy, named after the original
+            return self.send_file(target, inline=False, filename=f"{Path(row['name']).stem}.mp4")
+        return self.send_file(target, inline=what != "original" or not dl)
 
     def static(self, path):
         target = STATIC / (path.lstrip("/") or "index.html")
@@ -476,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def send_file(self, target: Path, inline: bool = True):
+    def send_file(self, target: Path, inline: bool = True, filename: str | None = None):
         """Serve a file with single-range support so proxy MP4s scrub in <video>."""
         size = target.stat().st_size
         start, end, status = 0, size - 1, HTTPStatus.OK
@@ -500,8 +505,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type(target.name))
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Content-Disposition",
-                         f'{"inline" if inline else "attachment"}; filename="{target.name}"')
+        name = filename or target.name
+        ascii_name = name.encode("ascii", "replace").decode().replace('"', "'")
+        self.send_header("Content-Disposition", f'{"inline" if inline else "attachment"}; filename="{ascii_name}"; '
+                         f"filename*=UTF-8''{quote(name)}")
         if status == HTTPStatus.PARTIAL_CONTENT:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()

@@ -58,6 +58,8 @@ involved.
 - 🔍 **[Search](#-search-whats-in-the-footage)**: an image-text model looks through every tape, video and photo in
   the background (its own CPU-capped service) and tags what's there; search by words or tags, kind of
   source, dates, and people who must or mustn't be in it.
+- 🎞️ **Every camera and phone video gets a full-quality MP4** like the MiniDV ones (camcorder MPG / MTS in
+  50p, native size), downloadable with **⬇ MP4** next to the untouched original.
 - 🧺 **Editing basket**: keep the moments you'll cut a film from; export them as one ZIP of clips
   (original quality and frame rate) with a `lista.csv` saying where each came from.
 
@@ -208,7 +210,7 @@ involved.
 - **DVDs** (a `VIDEO_TS` folder, or the VOBs copied as they are) show up as one film per title, dated from the folder name. The browser copy is **50p**: each field of the interlaced VHS picture becomes a frame, nothing invented. Native 720×576 with its 4:3 shape, x264 CRF 17. Disc menus aren't indexed.
 - **Long videos are split into scenes** (45 s – 5 min, cut where the picture changes) so they open at once; the whole original stays downloadable.
 - **Screenshots, icons and program folders stay out.**
-- **Viewing in the browser**: HEIC photos get a JPEG for display, and videos browsers can't play (MTS, AVI, HEVC…) get an H.264 copy, all under `<storage>/media`. The originals are never touched.
+- **Viewing in the browser**: HEIC photos get a JPEG for display. Videos browsers can't play (camcorder MPG / MTS / M2TS, AVI, 3GP, WMV, HEVC…) get an MP4 copy made like the MiniDV ones: interlaced footage becomes one frame per field (50p), progressive keeps its own frame rate, native size and pixel aspect, x264 CRF 17. **⬇ MP4** downloads that copy under the original's name; **⬇ Original** the file as it is. Everything lands under `<storage>/media`; the originals are never touched.
 - **On the timeline next to the tapes**, with a *MiniDV only* checkbox.
 - **Through the same face recognition**, so a person's page lists their tapes, photos and videos together.
 - **Indexed incrementally every few minutes.** Files still being copied are skipped, and a share that's briefly offline doesn't drop anything.
@@ -345,7 +347,7 @@ with defaults. The ones you're most likely to touch:
 | `MINIDV_VISION_STEP` / `MINIDV_VISION_MAX_GAP` | `2` / `10` | seconds between frames looked at / analysed at least this often even if the picture doesn't change |
 | `MINIDV_VISION_TAG` | `0.105` | how similar a frame must be to a tag's description to get it |
 | `MINIDV_VISION_TAG_STRONG` / `MINIDV_VISION_TAG_MARGIN` / `MINIDV_VISION_EVENT_SUPPORT` | `0.125` / `0.005` / `2` | stage 2: a hit this strong stands alone / how much it must beat its rivals by / how many frames of the same event must agree with a weaker one |
-| `MINIDV_DVD_CRF` / `MINIDV_DVD_PRESET` | `17` / `slow` | DVD (VHS transfer) copies: 50p — one frame per field, nothing interpolated — native 720×576 with its pixel aspect. Existing copies are re-encoded only on request: `POST /api/media/<id>/reencode` (parts and face times are kept) |
+| `MINIDV_VIDEO_CRF` / `MINIDV_VIDEO_PRESET` / `MINIDV_VIDEO_PRESET_HD` | `17` / `slow` / `medium` | MP4 copies of camera, phone and DVD videos (the older names `MINIDV_DVD_CRF` / `_PRESET` still work). Existing copies are re-made only on request: `POST /api/media/<id>/reencode` for one, `POST /api/media/reencode-all` for all (parts and face times are kept) |
 | `MINIDV_INDEX_INTERVAL` | `300` | seconds between background refreshes of the tape/scene index |
 | `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | api HTTP listener (inside its container) |
 
@@ -445,7 +447,7 @@ joins scenes from several tapes, in order ·
 `/api/persons/dissolve` / `/api/persons/delete` `{ids: […]}` ·
 `/api/tapes/{id}/scene-dates` `{dates: {scene_id: "YYYY-MM-DD" | "unknown" | ""}}` ·
 `/api/media/rescan` · `/api/media/{id}/date` `{date, whole?}` · `/api/media/album/date` `{album, date}` ·
-`/api/media/{id}/reencode` (a DVD copy again with the current settings; parts and face times are kept) ·
+`/api/media/{id}/reencode` (a video's MP4 copy again with the current settings; parts and face times are kept) · `/api/media/reencode-all` ·
 `/api/persons/{id}/memories` `{length: short|medium|long, sources?, date_from?, date_to?, music?: <track id> | "auto:<mood>" | null, lang?}` ·
 `/api/memories/{id}/music` `{music}` (same moments, other music) ·
 `/api/vision/search` `{q?, tags?, not_tags?, kinds?: [dv|dvd|video|photo], date_from?, date_to?, with?: [person ids], without?, sort?: score|date}` ·

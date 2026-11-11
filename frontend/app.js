@@ -223,6 +223,7 @@ function renderMediaModal(m) {
       ${m.kind === 'video' && !m.playable ? ' · ' + L('media.notReady') : ''}
     </div>`;
   $('#scModalActions').innerHTML = `
+    ${m.kind === 'video' && m.playable ? `<a class="${LINK}" href="/api/media/${m.id}/video?dl=1" title="${L('media.mp4Hint')}">${L('media.mp4Dl')}</a>` : ''}
     <a class="${LINK}" href="/api/media/${m.id}/original?dl=1">${L(m.parent_id ? 'media.clipDl' : 'media.original')}</a>
     ${m.parent_id ? `<a class="${LINK}" href="/api/media/${m.parent_id}/original?dl=1">${L('media.wholeFilm')}</a>` : ''}
     <button data-media-date="${m.id}" class="${BTN}">${L('people.tlSetDate')}</button>

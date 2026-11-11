@@ -255,24 +255,39 @@ class Engine:
         return b
 
     # ---- photos & videos ("Zdjęcia i filmy") -------------------------------
-    def _media_reproxy(self, ml, busy) -> None:
-        """DVD copies the operator asked to re-encode (media_request_reproxy) — never
-        while a face scan runs, since re-encoding moves the face times of the parts."""
-        for row in self.store.media_reproxy_pending():
+    def _media_reproxy(self, ml, busy, budget_s: float = 600) -> None:
+        """Video copies queued for re-encoding with today's settings (one, or all at
+        once), a few at a time so new files keep being indexed meanwhile — and
+        never while a face scan runs, since re-encoding moves the face times of a
+        split film's parts."""
+        rows = self.store.media_reproxy_pending()
+        until = time.monotonic() + budget_s
+        total = len(rows) + int(self.store.get_meta("media_reencoded") or 0)
+        for row in rows:
             scan = self.store.get_build(FACES_KEY)
-            if busy() or (scan and scan.get("status") in ("QUEUED", "RUNNING")):
+            if busy() or time.monotonic() > until or (scan and scan.get("status") in ("QUEUED", "RUNNING")):
                 return
-            ml.reencode_dvd(self.config, self.store, row, report=self._media_report)
+            done = int(self.store.get_meta("media_reencoded") or 0)
+            ml.reencode_video(self.config, self.store, row, report=self._media_report, i=done, total=total)
+            self.store.set_meta("media_reencoded", str(done + 1))
+        if not rows:
+            self.store.set_meta("media_reencoded", "0")
 
     def media_request_reproxy(self, media_id: int) -> dict:
-        """Queue one DVD title for re-encoding with the current DVD settings."""
-        from . import media_library as ml
+        """Queue one video's browser copy for re-encoding with the current settings."""
         row = self.store.media_get(media_id)
-        if not row or row.get("parent_id") or not ml.is_dvd(row) or row.get("proxy") != 1:
-            raise ValueError("to nie jest gotowa płyta DVD")
+        if not row or row.get("parent_id") or row.get("kind") != "video" or row.get("proxy") != 1:
+            raise ValueError("to nie jest film z gotową kopią")
         self.store.media_update(media_id, reproxy=1)
         self.store.set_meta("media_rescan", "1")
         return {"id": media_id, "queued": True}
+
+    def media_reproxy_all(self) -> dict:
+        """Queue every video copy for re-encoding (the originals stay as they are)."""
+        n = self.store.media_mark_reproxy_all()
+        self.store.set_meta("media_reencoded", "0")
+        self.store.set_meta("media_rescan", "1")
+        return {"queued": n}
 
     def _media_worker(self) -> None:
         """Index the read-only media folders: find new files, then thumbnails and

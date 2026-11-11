@@ -369,7 +369,7 @@ def test_reencoding_a_split_dvd_keeps_parts_and_face_times_on_the_same_moment(tm
     seen_old = [_colour_at(s.media_get(ids[1])["path"], t + 0.5) for t in (6, 7)]
 
     s.media_update(film["id"], reproxy=1)
-    assert ml.reencode_dvd(cfg, s, s.media_reproxy_pending()[0])
+    assert ml.reencode_video(cfg, s, s.media_reproxy_pending()[0])
 
     film = s.media_get(film["id"])
     assert film["reproxy"] == 0 and film["fps"] == 50 and not s.media_reproxy_pending()
@@ -408,9 +408,9 @@ def test_failed_reencode_leaves_the_old_copy(tmp_path, monkeypatch):
     film = s.media_ready()[0]
     proxy = ml.derived(cfg, "proxy", film["id"], ".mp4")
     before = proxy.read_bytes()
-    monkeypatch.setattr(ml, "dvd_proxy_cmd", lambda *a, **k: ["ffmpeg", "-v", "error", "-i", "/nonexistent", "x.mp4"])
+    monkeypatch.setattr(ml, "proxy_cmd", lambda *a, **k: ["ffmpeg", "-v", "error", "-i", "/nonexistent", "x.mp4"])
     s.media_update(film["id"], reproxy=1)
-    assert not ml.reencode_dvd(cfg, s, s.media_get(film["id"]))
+    assert not ml.reencode_video(cfg, s, s.media_get(film["id"]))
     assert proxy.read_bytes() == before and s.media_get(film["id"])["reproxy"] == -1
     assert not s.media_reproxy_pending()
 
@@ -555,3 +555,60 @@ def test_files_indexed_before_are_redated_once(tmp_path):
     assert rows["/z/stare zdjęcia, skany/b.jpg"]["taken"] == "2012-05-05T10:00:00"   # fixed by hand: untouched
     assert rows["/z/2019/IMG_1.jpg"]["taken"] == "2019-05-05T10:00:00"
     assert ml.redate_analog(s) == []
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
+@pytest.mark.parametrize("name, make, expect", [
+    # Sony Handycam MPG: interlaced 720x576, 16:9 pixels -> every field a frame, shape kept
+    ("M2U00154.MPG", ["-f", "lavfi", "-i", "testsrc=size=720x576:rate=25", "-t", "2", "-vf", "setfield=tff,setsar=64/45",
+                      "-c:v", "mpeg2video", "-flags", "+ilme+ildct", "-f", "mpeg"], ("50/1", 720, 576, "64:45")),
+    # an old phone: 176x144, 15 frames a second -> stays 15
+    ("Wideo0019.3gp", ["-f", "lavfi", "-i", "testsrc=size=176x144:rate=15", "-t", "2", "-c:v", "mpeg4"],
+     ("15/1", 176, 144, None)),
+    # a photo camera's MJPEG AVI, 30 fps progressive
+    ("DSCN1910.AVI", ["-f", "lavfi", "-i", "testsrc=size=640x480:rate=30", "-t", "2", "-c:v", "mjpeg"],
+     ("30/1", 640, 480, None)),
+])
+def test_odd_camera_formats_get_a_full_quality_copy(tmp_path, name, make, expect):
+    from minidv_archiver.media import ffprobe
+    src = tmp_path / "zdjecia"
+    src.mkdir()
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *make, str(src / name)], check=True)
+    _age(src / name)
+    cfg = _cfg(tmp_path, src)
+    s = JobStore(cfg.state / "jobs.db")
+    ml.scan(cfg, s)
+    ml.process_pending(cfg, s)
+    row = s.media_ready()[0]
+    assert row["playable"] == 0 and ml.build_proxies(cfg, s) == 1
+    out = ml.video_path(cfg, s.media_get(row["id"]))
+    v = next(x for x in ffprobe(out)["streams"] if x["codec_type"] == "video")
+    rate, w, h, sar = expect
+    assert (v["codec_name"], v["r_frame_rate"], v["width"], v["height"]) == ("h264", rate, w, h)
+    if sar:
+        assert v["sample_aspect_ratio"] == sar
+    assert (src / name).exists()                                   # the original is left alone
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
+def test_all_copies_can_be_redone_and_face_times_of_a_whole_film_stay(tmp_path):
+    src = tmp_path / "zdjecia"
+    src.mkdir()
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=640x480:rate=30", "-t", "3",
+                    "-c:v", "mjpeg", str(src / "DSCN0001.AVI")], check=True)
+    _age(src / "DSCN0001.AVI")
+    cfg = _cfg(tmp_path, src)
+    s = JobStore(cfg.state / "jobs.db")
+    ml.scan(cfg, s)
+    ml.process_pending(cfg, s)
+    ml.build_proxies(cfg, s)
+    row = s.media_ready()[0]
+    with s._lock:
+        s._conn.execute("INSERT INTO face_tracks (person_id, workspace, tape_id, scene_id, embedding, quality, times) "
+                        "VALUES (1, 'default', ?, ?, x'00', 1, '[1, 2]')", (ml.MEDIA_TAPE, str(row["id"])))
+    assert s.media_mark_reproxy_all() == 1
+    before = ml.derived(cfg, "proxy", row["id"], ".mp4").stat().st_mtime_ns
+    assert ml.reencode_video(cfg, s, s.media_reproxy_pending()[0])
+    assert ml.derived(cfg, "proxy", row["id"], ".mp4").stat().st_mtime_ns != before
+    assert not s.media_reproxy_pending() and s.media_get(row["id"])["fps"] == 30
+    assert s.face_scene_tracks(ml.MEDIA_TAPE, str(row["id"]))[0]["times"] == [1, 2]   # same timeline

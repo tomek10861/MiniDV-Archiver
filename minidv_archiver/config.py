@@ -134,11 +134,16 @@ class Config:
     # videos longer than this are cut into scene clips (~45 s – 5 min, on picture
     # changes) so they open quickly; the original stays downloadable. 0 = never.
     media_split_min_s: int = int(os.getenv("MINIDV_MEDIA_SPLIT_MIN", "600"))
-    # DVD (VHS transfers) copies: each field becomes a frame (50p, real motion, no
-    # invented frames), native 720x576 with its pixel aspect kept, near-transparent
-    # x264. Measured on the 1987 wedding disc: VMAF 97 vs 93 for the old 25p CRF 23.
-    media_dvd_crf: int = int(os.getenv("MINIDV_DVD_CRF", "17"))
-    media_dvd_preset: str = os.getenv("MINIDV_DVD_PRESET", "slow")
+    # Browser copies of videos browsers can't play (camcorder MPG / MTS / M2TS, AVI,
+    # 3GP, WMV, DVD titles…) — made like the MiniDV ones, nothing thrown away:
+    # interlaced pictures become one frame per field (50p / 59.94p, nothing
+    # invented), progressive ones keep their own frame rate, the native size is kept
+    # with its pixel aspect, near-transparent x264. HD (above 720x576) uses the
+    # faster preset so a weak machine gets through it. The originals stay as they are.
+    # (MINIDV_DVD_* are the older names of the first two.)
+    media_video_crf: int = int(os.getenv("MINIDV_VIDEO_CRF", os.getenv("MINIDV_DVD_CRF", "17")))
+    media_video_preset: str = os.getenv("MINIDV_VIDEO_PRESET", os.getenv("MINIDV_DVD_PRESET", "slow"))
+    media_video_preset_hd: str = os.getenv("MINIDV_VIDEO_PRESET_HD", "medium")
     # "Szukaj": what's in the pictures (vision.py), indexed by its own service. The
     # api asks it at MINIDV_VISION_URL (empty = answer in-process from the index).
     # The service's CPU is capped by compose (MINIDV_VISION_CPUS); threads = onnx
