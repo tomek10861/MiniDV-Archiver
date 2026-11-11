@@ -159,12 +159,31 @@ def test_a_new_vocabulary_retags_from_the_stored_vectors(tmp_path, vocab, monkey
     cfg, s, src, ids = _library(tmp_path)
     svc = vision.VisionService(cfg, s, encoder=FakeEncoder())
     svc.index_once()
+    assert svc.distill() == 0                                         # done at the end of the round already
     monkeypatch.setattr(vision, "TAGS", vocab + [{"id": "white", "pl": "w", "en": "w", "cat": "things",
                                                   "prompts": ["something green"]}])
     calls = []
     monkeypatch.setattr(vision, "sample_frames", lambda *a, **k: calls.append(a) or iter(()))
-    assert svc.retag_all() == 3 and not calls                         # no frame decoded again
+    assert svc.distill() == 3 and not calls                           # no frame decoded again
     assert svc.search({"tags": ["white"]})["results"][0]["media_id"] == ids["IMG_20100101_120000.jpg"]
+
+
+def test_stage_two_keeps_what_the_surroundings_agree_with():
+    # frames: 0-2 one scene, 3 a scene of its own; 0-3 one event; 4 alone in another event
+    T = np.array([[0.11], [0.11], [0.02], [0.11], [0.11]])
+    rival = np.full_like(T, 0.05)
+    scene = [0, 0, 0, 1, 2]
+    event = [0, 0, 0, 0, 1]
+    keep = vision.distill_keep(T, rival, scene, event, thr=0.105, strong=0.125, margin=0.005, support=2)
+    # 0, 1 back each other up in their scene; 3 has two others in its event; 4 is a lone weak frame
+    assert keep[:, 0].tolist() == [True, True, False, True, False]
+    strong = vision.distill_keep(np.array([[0.13]]), np.array([[0.05]]), [0], [0], thr=0.105, strong=0.125,
+                                 margin=0.005, support=2)
+    assert strong[0, 0]                                               # strong enough on its own
+    # what the tag is mistaken for looks even more like this frame (sunlit sand for "snow")
+    sand = vision.distill_keep(np.array([[0.13], [0.13]]), np.array([[0.15], [0.15]]), [0, 0], [0, 0],
+                               thr=0.105, strong=0.125, margin=0.005, support=2)
+    assert not sand.any()
 
 
 def test_models_are_checked_before_use(tmp_path, monkeypatch):

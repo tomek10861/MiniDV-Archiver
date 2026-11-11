@@ -148,3 +148,21 @@ _T = [
 
 TAGS = [{"id": i, "pl": pl, "en": en, "cat": cat, "prompts": prompts} for i, pl, en, cat, prompts in _T]
 BY_ID = {t["id"]: t for t in TAGS}
+
+# Stage 2 ("destylat", VisionService.distill): a frame keeps a tag only if the tag
+# beats what it's mistaken for. GENERIC = pictures that resemble many tags without
+# containing them; RIVALS = what one tag in particular gets confused with (seen on
+# the archive: sunlit sand and white walls as snow, a blurry lawn as rain...).
+GENERIC = ["a blurry photo", "an overexposed white photo", "a very dark photo", "lens flare", "a photo of a wall"]
+# generic descriptions a tag is allowed to look like (night pictures *are* dark)
+GENERIC_OK = {"noc": {"a very dark photo"}, "fajerwerki": {"a very dark photo"}}
+RIVALS = {
+    "snieg": ["sand on a beach", "white sand", "a white wall", "the sea", "a grey sky", "white bed sheets"],
+    "plaza": ["snow"],
+    "morze": ["a lake", "the sky"],
+    "deszcz": ["a dirty window", "film grain noise"],
+    "noc": ["a dark room"],
+    "woda": ["the sky", "a window"],
+    "las": ["a park"],
+    "laka": ["a lawn in a garden"],
+}

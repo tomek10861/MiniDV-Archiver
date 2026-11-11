@@ -155,6 +155,13 @@ class Config:
     # a tag applies to a frame from this similarity up (SigLIP2 cosine; tuned on
     # the archive: hits ~0.10–0.16, unrelated pictures ~0.02–0.05)
     vision_tag_t: float = float(os.getenv("MINIDV_VISION_TAG", "0.105"))
+    # stage 2 ("destylat"): a tag at least this strong stands on its own; a weaker
+    # one needs another frame of its scene, or this many frames of the same event
+    # (same tape and day / same album and day), to agree — and must beat its rivals
+    # (vision_vocab.RIVALS / GENERIC) by vision_tag_margin
+    vision_tag_strong: float = float(os.getenv("MINIDV_VISION_TAG_STRONG", "0.125"))
+    vision_tag_margin: float = float(os.getenv("MINIDV_VISION_TAG_MARGIN", "0.005"))
+    vision_event_support: int = int(os.getenv("MINIDV_VISION_EVENT_SUPPORT", "2"))
 
     @property
     def tapes(self) -> Path:

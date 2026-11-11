@@ -194,6 +194,13 @@ Wszystko działa na Twoim własnym Linuksie, bez chmury.
   kontrolną) działa w usłudze `vision` na procesorze. Co 2 s filmu ogląda klatkę, ale analizuje ją tylko
   przy zmianie obrazu; czarne, prześwietlone i płaskie klatki pomija. Wektory i tagi są w
   `state/vision.db`. Zmiana listy tagów przelicza tagi z zapisanych wektorów, bez ponownego dekodowania.
+- **Etap 2 („destylat”).** Po każdej rundzie tagi są ustalane od nowa z kontekstem, z zapisanych wektorów
+  (całe archiwum w mniej niż minutę): klatka zachowuje tag tylko wtedy, gdy wygrywa z tym, z czym ten tag się
+  myli (piasek w słońcu albo biała ściana dla śniegu, rozmazana trawa dla deszczu, do tego rozmyte,
+  prześwietlone i ciemne kadry w ogóle), a słabe trafienie tylko wtedy, gdy potwierdza je inna klatka tej
+  samej sceny albo kilka klatek tego samego wydarzenia (ta sama kaseta i dzień, ten sam album i dzień).
+  Na tym archiwum usunął śnieg z plaż i większość fałszywych „deszczów” i „nocy”, zostawiając prawdziwe
+  plaże i śnieg.
 - **Nie przeszkadza.** Kontener ma twardy limit (`MINIDV_VISION_CPUS`, domyślnie 1,5 rdzenia, i
   `MINIDV_VISION_MEM`), działa z najniższym priorytetem, czeka, gdy kaseta się zgrywa albo przetwarza, i
   można go wstrzymać z zakładki *Szukaj*. Widać go w *Zadaniach* z postępem.
@@ -271,7 +278,7 @@ Pięć kontenerów współdzieli `/srv/minidv` (i jego `state/jobs.db`):
 | `grabber` | `privileged`, `/dev` + `/sys` hosta | trzyma FireWire, uruchamia `dvgrab` |
 | `converter` | — | podział na sceny, zstd + weryfikacja bajtowa, proxy, re-enkodowanie, sondy jakości, rozpoznawanie twarzy |
 | `api` | `expose: 8080` (niepublikowany) | HTTP/JSON; czyta system plików + magazyn zadań |
-| `vision` | `cpus: 1.5`, `mem_limit: 4g` | *Szukaj*: analizuje klatki w tle, odpowiada na wyszukiwania (`api` pyta go na `:8091`) |
+| `vision` | `cpus: 1.5`, `mem_limit: 6g` | *Szukaj*: analizuje klatki w tle, odpowiada na wyszukiwania (`api` pyta go na `:8091`) |
 | `ui` | `nginx`, publikuje `:8088` | serwuje `frontend/`, przekazuje `/api` → `api:8080` |
 
 Każdą usługę można zrestartować bez ruszania pozostałych
@@ -342,10 +349,11 @@ Wszystko ustawiasz zmiennymi środowiskowymi: w `.env` przy Dockerze albo w
 | `MINIDV_FACES_THREADS` | `1` | wątki CPU dla skanu twarzy (`2` ≈ dwa razy szybciej) |
 | `MINIDV_FACES_CLUSTER` | `0.24` | jak chętnie łączyć twarze (niżej = mniej rozbitych osób, więcej pomieszanych) |
 | `MINIDV_MEDIA_DIRS` | *(puste)* | foldery ze zdjęciami i filmami (tylko do odczytu) dla zakładki *Zdjęcia i filmy*, tak jak widzą je kontenery |
-| `MINIDV_VISION_CPUS` / `MINIDV_VISION_MEM` | `1.5` / `4g` | ile maszyny może najwyżej zająć analiza dla *Szukaj* |
+| `MINIDV_VISION_CPUS` / `MINIDV_VISION_MEM` | `1.5` / `6g` | ile maszyny może najwyżej zająć analiza dla *Szukaj* |
 | `MINIDV_VISION_THREADS` | `2` | wątki onnx na klatkę w ramach tego limitu |
 | `MINIDV_VISION_STEP` / `MINIDV_VISION_MAX_GAP` | `2` / `10` | co ile sekund oglądana jest klatka / najrzadziej tyle sekund między analizami, nawet bez zmiany obrazu |
 | `MINIDV_VISION_TAG` | `0.105` | jak bardzo klatka musi pasować do opisu tagu, żeby go dostać |
+| `MINIDV_VISION_TAG_STRONG` / `MINIDV_VISION_TAG_MARGIN` / `MINIDV_VISION_EVENT_SUPPORT` | `0.125` / `0.005` / `2` | etap 2: tak mocne trafienie wystarcza samo / o ile musi wygrać z rywalami / ile klatek tego samego wydarzenia musi potwierdzić słabsze |
 | `MINIDV_DVD_CRF` / `MINIDV_DVD_PRESET` | `17` / `slow` | kopie DVD (przegrane VHS): 50p — każdy półobraz to osobna klatka, nic nie jest dorabiane — natywne 720×576 z zachowanym kształtem piksela. Istniejące kopie są przekodowywane tylko na żądanie: `POST /api/media/<id>/reencode` (części i czasy twarzy zostają) |
 | `MINIDV_INDEX_INTERVAL` | `300` | co ile sekund odświeżać indeks kaset/scen w tle |
 | `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | nasłuch HTTP api (wewnątrz kontenera) |

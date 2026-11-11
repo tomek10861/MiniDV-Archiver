@@ -186,6 +186,12 @@ involved.
   runs in the `vision` service on the CPU. Every 2 s of video it looks at a frame, but only analyses it
   when the picture changed; black, blown-out and flat frames are skipped. Vectors and tags live in
   `state/vision.db`. Changing the tag list re-tags from the stored vectors without decoding anything.
+- **Stage 2 ("distillate").** After every round the tags are re-decided with context, from the stored vectors
+  (under a minute for the whole archive): a frame keeps a tag only if it beats what that tag is mistaken for
+  (sunlit sand or a white wall for snow, a blurry lawn for rain, plus blurry / overexposed / dark pictures in
+  general), and a weak hit only if another frame of the same scene, or a couple of frames of the same event
+  (same tape and day, same album and day), agree. On this archive it dropped snow on beaches and most "rain"
+  and "night" false alarms while keeping real beaches and snow.
 - **Background-friendly.** The container is capped (`MINIDV_VISION_CPUS`, default 1.5 cores, and
   `MINIDV_VISION_MEM`), runs at idle priority, waits while a tape is captured or processed, and can be
   paused from the *Search* tab. It shows in *Tasks* with its progress.
@@ -261,7 +267,7 @@ Five containers share `/srv/minidv` (and its `state/jobs.db`):
 | `grabber` | `privileged`, host `/dev` + `/sys` | owns FireWire, runs `dvgrab` |
 | `converter` | — | scene split, zstd + byte-verify, proxies, re-encodes, quality scans, face recognition |
 | `api` | `expose: 8080` (not published) | HTTP/JSON; reads the filesystem + job store |
-| `vision` | `cpus: 1.5`, `mem_limit: 4g` | *Search*: analyses frames in the background, answers searches (`api` asks it at `:8091`) |
+| `vision` | `cpus: 1.5`, `mem_limit: 6g` | *Search*: analyses frames in the background, answers searches (`api` asks it at `:8091`) |
 | `ui` | `nginx`, publishes `:8088` | serves `frontend/`, proxies `/api` → `api:8080` |
 
 You can restart any one service without touching the others
@@ -334,10 +340,11 @@ with defaults. The ones you're most likely to touch:
 | `MINIDV_FACES_THREADS` | `1` | CPU threads for the face scan (`2` is about twice as fast) |
 | `MINIDV_FACES_CLUSTER` | `0.24` | how readily faces are grouped (lower = fewer split people, more mixed ones) |
 | `MINIDV_MEDIA_DIRS` | *(empty)* | read-only photo/video folders for the *Photos & videos* tab (as the containers see them) |
-| `MINIDV_VISION_CPUS` / `MINIDV_VISION_MEM` | `1.5` / `4g` | how much of the machine the *Search* analysis may take at most |
+| `MINIDV_VISION_CPUS` / `MINIDV_VISION_MEM` | `1.5` / `6g` | how much of the machine the *Search* analysis may take at most |
 | `MINIDV_VISION_THREADS` | `2` | onnx threads per frame inside that cap |
 | `MINIDV_VISION_STEP` / `MINIDV_VISION_MAX_GAP` | `2` / `10` | seconds between frames looked at / analysed at least this often even if the picture doesn't change |
 | `MINIDV_VISION_TAG` | `0.105` | how similar a frame must be to a tag's description to get it |
+| `MINIDV_VISION_TAG_STRONG` / `MINIDV_VISION_TAG_MARGIN` / `MINIDV_VISION_EVENT_SUPPORT` | `0.125` / `0.005` / `2` | stage 2: a hit this strong stands alone / how much it must beat its rivals by / how many frames of the same event must agree with a weaker one |
 | `MINIDV_DVD_CRF` / `MINIDV_DVD_PRESET` | `17` / `slow` | DVD (VHS transfer) copies: 50p — one frame per field, nothing interpolated — native 720×576 with its pixel aspect. Existing copies are re-encoded only on request: `POST /api/media/<id>/reencode` (parts and face times are kept) |
 | `MINIDV_INDEX_INTERVAL` | `300` | seconds between background refreshes of the tape/scene index |
 | `MINIDV_BIND` / `MINIDV_PORT` | `0.0.0.0` / `8080` | api HTTP listener (inside its container) |

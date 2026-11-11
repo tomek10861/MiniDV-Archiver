@@ -53,7 +53,7 @@ services:
     expose:
       - "8091"
     cpus: ${MINIDV_VISION_CPUS:-1.5}
-    mem_limit: ${MINIDV_VISION_MEM:-4g}
+    mem_limit: ${MINIDV_VISION_MEM:-6g}
 
   ui-proxy:
     image: nginx:1.29-alpine

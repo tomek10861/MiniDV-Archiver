@@ -38,7 +38,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .vision_vocab import CATEGORIES, TAGS
+from .media_library import MEDIA_TAPE
+from .vision_vocab import CATEGORIES, GENERIC, GENERIC_OK, RIVALS, TAGS
 
 MODEL_TAG = "siglip2-b16-224/webli@5f3fc29"
 _HF = "https://huggingface.co/immich-app/ViT-B-16-SigLIP2__webli/resolve/5f3fc29104ebcf51e9d893af57604badd51a3ea6/"
@@ -197,16 +198,12 @@ class VisionDB:
                     self._conn.execute(f"DELETE FROM {t} WHERE tape_id=? AND scene_id=?", k)
             self._bump()
 
-    def scene_frames(self, key: tuple[str, str]) -> list[tuple[float, float, bytes]]:
-        with self._lock:
-            return self._conn.execute("SELECT t, t_end, emb FROM frames WHERE tape_id=? AND scene_id=? ORDER BY t",
-                                      key).fetchall()
-
-    def replace_tags(self, key: tuple[str, str], tags: list[tuple[str, float, float, float]]) -> None:
+    def replace_all_tags(self, tags: dict[tuple[str, str], list[tuple[str, float, float, float]]]) -> None:
+        """Every scene's tags at once (stage 2), in one transaction."""
         with self._lock, self._conn:
-            self._conn.execute("DELETE FROM tags WHERE tape_id=? AND scene_id=?", key)
+            self._conn.execute("DELETE FROM tags")
             self._conn.executemany("INSERT INTO tags (tape_id, scene_id, tag, t0, t1, score) VALUES (?,?,?,?,?,?)",
-                                   [(*key, *x) for x in tags])
+                                   [(*k, *x) for k, rows in tags.items() for x in rows])
 
     def tags_by_scene(self) -> dict[tuple[str, str], list[tuple[str, float, float, float]]]:
         out: dict = {}
@@ -359,14 +356,31 @@ def tag_ranges(spans, sims, ids: list[str], threshold: float, gap: float):
             if s < threshold:
                 continue
             if run and t0 - run[1] <= gap:
-                run[1], run[2] = max(run[1], t1), max(run[2], float(s))
+                run[1], run[2] = max(run[1], float(t1)), max(run[2], float(s))
             else:
                 if run:
                     out.append((tag, *run))
-                run = [t0, t1, float(s)]
+                run = [float(t0), float(t1), float(s)]
         if run:
             out.append((tag, *run))
     return out
+
+
+def distill_keep(T, rival, scene_of, event_of, *, thr: float, strong: float, margin: float, support: int):
+    """Stage 2: which (frame, tag) hits stay. A hit must beat its rivals by
+    ``margin``; then it stays when it's strong, or when another frame of its scene
+    has it too, or when ``support`` other frames of its event (same tape and day /
+    same album and day) do. A lone weak frame no one around agrees with goes.
+    T, rival: frames x tags; scene_of / event_of: a group id per frame."""
+    import numpy as np
+    ok = (T >= thr) & (T - rival >= margin)
+    keep = ok & (T >= strong)
+    for groups, need in ((scene_of, 1), (event_of, support)):
+        _, inv = np.unique(np.asarray(groups), return_inverse=True)
+        counts = np.zeros((inv.max() + 1 if len(inv) else 0, T.shape[1]), np.int32)
+        np.add.at(counts, inv, ok.astype(np.int32))
+        keep |= ok & (counts[inv] - ok >= need)
+    return keep
 
 
 # ---- the service -----------------------------------------------------------------
@@ -386,22 +400,23 @@ class VisionService:
                 self._enc = Encoder(files, self.config.vision_threads)
             return self._enc
 
+    def _texts(self, texts: list[str]):
+        """Vectors of these descriptions, cached on disk by the exact list."""
+        import numpy as np
+        h = hashlib.sha1((json.dumps(texts) + MODEL_TAG).encode()).hexdigest()[:12]
+        cache = models_dir(self.config) / f"text-{h}.npy"
+        if cache.exists():
+            return h, np.load(cache)
+        enc = self.encoder()
+        m = np.array([enc.text(p) for p in texts], np.float32).reshape(-1, DIM)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        np.save(cache, m)
+        return h, m
+
     def _tags_matrix(self):
         """One row per tag description; the tag of each row."""
-        import numpy as np
-        vocab = json.dumps([[t["id"], t["prompts"]] for t in TAGS])
-        h = hashlib.sha1((vocab + MODEL_TAG).encode()).hexdigest()[:12]
-        if self._tagmat and self._tagmat[0] == h:
-            return self._tagmat[1:]
-        cache = models_dir(self.config) / f"tags-{h}.npy"
         owners = [t["id"] for t in TAGS for _ in t["prompts"]]
-        if cache.exists():
-            m = np.load(cache)
-        else:
-            enc = self.encoder()
-            m = np.array([enc.text(p) for t in TAGS for p in t["prompts"]], np.float32)
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            np.save(cache, m)
+        h, m = self._texts([p for t in TAGS for p in t["prompts"]])
         self._tagmat = (h, owners, m)
         return owners, m
 
@@ -425,23 +440,58 @@ class VisionService:
     def paused(self) -> bool:
         return self.store.get_meta("vision_paused") == "1"
 
-    def retag_all(self) -> int:
-        """Re-tag every analysed scene from its stored vectors (after a vocabulary
-        or threshold change)."""
+    def distill(self, force: bool = False) -> int:
+        """Stage 2 ("destylat"): re-decide every tag of the archive from the stored
+        frame vectors, with what's around each frame — its rivals (what the tag gets
+        mistaken for), the rest of its scene and the rest of its event (same tape
+        and day / same album and day). Nothing is decoded again; a minute or two.
+        Runs whenever the index, the vocabulary or the thresholds changed."""
         import numpy as np
-        self._tags_matrix()
-        mark = f"{self._tagmat[0]}:{self.config.vision_tag_t}"
-        if self.db.meta("tags") == mark:
+        c = self.config
+        ids = [t["id"] for t in TAGS]
+        texts = list(dict.fromkeys([p for t in TAGS for p in t["prompts"]] + GENERIC
+                                   + [p for ps in RIVALS.values() for p in ps]))
+        h, V = self._texts(texts)
+        mark = f"{h}:{c.vision_tag_t}:{c.vision_tag_strong}:{c.vision_tag_margin}:{c.vision_event_support}:" \
+               f"{self.db.meta('version') or 0}"
+        if not force and self.db.meta("distilled") == mark:
             return 0
-        n = 0
-        for key in list(self.db.scanned()):
-            rows = self.db.scene_frames(key)
-            if rows:
-                embs = np.frombuffer(b"".join(r[2] for r in rows), np.float16).reshape(len(rows), DIM).astype(np.float32)
-                self.db.replace_tags(key, self._scene_tags([(r[0], r[1]) for r in rows], embs))
-                n += 1
-        self.db.set_meta("tags", mark)
-        return n
+        n_scenes = self.db.counts()["scenes"]
+        self._report("distill", 0, n_scenes, "etap 2: wczytuję wektory klatek")
+        keys, ts, m = self.db.matrix()
+        if not len(keys):
+            self.db.set_meta("distilled", mark)
+            return 0
+        self._report("distill", 0, n_scenes, "etap 2: porównuję klatki z tagami i rywalami")
+        col = {p: i for i, p in enumerate(texts)}
+        S = m @ V.T                               # frames x descriptions
+        T = np.stack([S[:, [col[p] for p in t["prompts"]]].max(1) for t in TAGS], 1)
+        rival = np.stack([S[:, [col[p] for p in GENERIC if p not in GENERIC_OK.get(t["id"], set())]
+                                + [col[p] for p in RIVALS.get(t["id"], [])]].max(1) for t in TAGS], 1)
+        cat = catalog(c, self.store, max_age=0)
+
+        def event(k):
+            it = cat.get(k) or {}
+            where = ("@" + (it.get("label") or "")) if k[0] == MEDIA_TAPE else k[0]
+            return f"{where}|{(it.get('date') or '')[:10]}"
+        scene_ids, event_ids = {}, {}
+        scene_of = np.array([scene_ids.setdefault(k, len(scene_ids)) for k in keys])
+        event_of = np.array([event_ids.setdefault(event(k), len(event_ids)) for k in keys])
+        keep = distill_keep(T, rival, scene_of, event_of, thr=c.vision_tag_t, strong=c.vision_tag_strong,
+                            margin=c.vision_tag_margin, support=c.vision_event_support)
+        kept = np.where(keep, T, -1.0)
+        tags, start = {}, 0
+        for i in range(1, len(keys) + 1):         # rows are ordered by scene: one block per scene
+            if i == len(keys) or keys[i] != keys[start]:
+                tags[keys[start]] = tag_ranges([tuple(x) for x in ts[start:i]], kept[start:i], ids,
+                                               c.vision_tag_t, c.vision_step)
+                start = i
+                if len(tags) % 2000 == 0:
+                    self._report("distill", len(tags), n_scenes, "etap 2: ustalam tagi scen")
+        self._report("distill", len(tags), n_scenes, "etap 2: zapisuję tagi")
+        self.db.replace_all_tags(tags)
+        self.db.set_meta("distilled", mark)
+        return len(tags)
 
     def index_once(self, busy=lambda: False, budget_s: float = 3600) -> int:
         """Analyse what isn't in the index yet (or changed); forget what's gone."""
@@ -451,7 +501,6 @@ class VisionService:
         gone = [k for k in known if k not in cat]
         if gone:
             self.db.drop(gone)
-        self.retag_all()
         order = {"dv": 0, "dvd": 1, "video": 2, "photo": 3}
         todo = []
         for key, it in sorted(cat.items(), key=lambda kv: (order[kv[1]["kind"]], kv[1]["date"] or "9999", kv[0])):
@@ -480,6 +529,8 @@ class VisionService:
                                self._scene_tags(spans, m) if spans else [])
             done += 1
         left = len(todo) - done
+        if not left:
+            self.distill()                        # stage 2 once a round has seen everything
         self._report("idle" if not left else ("paused" if self.paused() else "scan"), len(todo) - left,
                      len(todo), "", status="PAUSED" if self.paused() and left else ("RUNNING" if left else "READY"))
         return done

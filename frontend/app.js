@@ -2212,16 +2212,17 @@ async function loadVisionStatus() {
   try { st = await api('/api/vision/status'); } catch (e) { st = { error: e.message }; }
   srch.cats = st.categories || srch.cats;
   const pr = st.progress || {}, live = pr.status === 'RUNNING';
-  const share = pr.total ? ` · ${L('search.queue', { done: pr.done || 0, total: pr.total })}` : '';
+  const share = pr.total ? ` · ${L(pr.stage === 'distill' ? 'search.queue2' : 'search.queue', { done: pr.done || 0, total: pr.total })}` : '';
   bar.innerHTML = `<div class="flex flex-wrap items-center gap-2 text-theme-xs text-gray-500 dark:text-gray-400">
       <span class="${BADGE} ${st.error && !pr.status ? 'bg-error-50 text-error-600 dark:bg-error-500/15 dark:text-error-400' : live ? 'bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-400' : 'bg-gray-100 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300'}">${
         st.error && !pr.status ? L('search.down') : st.paused ? L('search.paused') : live ? L('search.indexing') : L('search.ready')}</span>
       <span>${L('search.indexed', { scenes: st.scenes ?? '?', frames: st.frames ?? '?' })}${share}</span>
+      ${live ? `<span class="font-medium text-gray-700 dark:text-gray-200">${L(pr.stage === 'distill' ? 'search.stage2' : 'search.stage1')}</span>` : ''}
       ${live && pr.detail ? `<span class="truncate text-gray-400">${esc(pr.detail)}</span>` : ''}
       <button id="visionPause" class="${BTN}">${st.paused ? L('search.resume') : L('search.pause')}</button>
     </div>
     ${live && pr.total ? `<div class="mt-2 h-1.5 max-w-md overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"><div class="h-full bg-brand-500" style="width:${Math.round(100 * (pr.done || 0) / pr.total)}%"></div></div>` : ''}`;
-  if (currentRoute().section === 'szukaj') visionPoll = setTimeout(loadVisionStatus, 10000);
+  if (currentRoute().section === 'szukaj') visionPoll = setTimeout(loadVisionStatus, live ? 3000 : 10000);
 }
 function tagChip(t) {
   const on = srch.inc.has(t.id), off = srch.exc.has(t.id);
